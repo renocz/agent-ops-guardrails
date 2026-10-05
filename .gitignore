@@ -1,0 +1,5 @@
+council.json
+council-reports/
+__pycache__/
+*.pyc
+.env
