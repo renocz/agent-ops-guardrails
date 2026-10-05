@@ -14,8 +14,8 @@ jobs:
       matrix:
         python: ["3.9", "3.12"]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python }}
       - name: council tests (offline, no API calls)
@@ -29,8 +29,8 @@ jobs:
     # Informational: a partial score does not fail the build.
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
       - name: install hook-gym (pinned)
@@ -40,14 +40,14 @@ jobs:
           sed "s#HOOK#$GITHUB_WORKSPACE/secret-guard/secret_guard.py#g" ci/hook-gym-settings.json > /tmp/settings.json
           cat /tmp/settings.json
       - name: hook-gym, built-in credentials cases
-        run: hook-gym run --hooks /tmp/settings.json --tag credentials --report credentials.md || true
+        run: hook-gym run --hooks /tmp/settings.json --tag credentials --report gym-builtin.md 2>&1 | tee gym-builtin.log || true
       - name: hook-gym, homelab cases from this repo
-        run: hook-gym run --hooks /tmp/settings.json --cases ci/hook-gym-cases --report homelab.md || true
+        run: hook-gym run --hooks /tmp/settings.json --cases ci/hook-gym-cases --report gym-homelab.md 2>&1 | tee gym-homelab.log || true
       - name: summary
         run: |
-          for f in credentials.md homelab.md; do
+          for f in gym-builtin gym-homelab; do
             echo "### $f" >> "$GITHUB_STEP_SUMMARY"
-            [ -f "$f" ] && cat "$f" >> "$GITHUB_STEP_SUMMARY" || echo "(no report)" >> "$GITHUB_STEP_SUMMARY"
-            score=$(grep -m1 -i "overall" "$f" 2>/dev/null || echo "no score line")
-            echo "::notice title=hook-gym $f::$score"
+            if [ -f "$f.md" ]; then cat "$f.md" >> "$GITHUB_STEP_SUMMARY"; else echo '```' >> "$GITHUB_STEP_SUMMARY"; cat "$f.log" >> "$GITHUB_STEP_SUMMARY"; echo '```' >> "$GITHUB_STEP_SUMMARY"; fi
+            line=$(grep -i -m1 -E "overall|error|usage|no such" "$f.log" || tail -1 "$f.log")
+            echo "::notice title=$f::$line"
           done
