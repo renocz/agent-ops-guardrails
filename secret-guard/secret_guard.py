@@ -33,7 +33,8 @@ RISKY = [
     (r"\bgit\b.*\b(fetch|pull|push|clone|ls-remote)\b|\bgit\s+remote\s+-v\b|\bgit\s+config\b.*(url|credential)|\bgit\s+credential\b",
      "git (URLs with credentials, error messages)"),
     # a reader and a secret-looking path anywhere in the same statement, in either order (`for f in a.env; do cat $f`)
-    (r"(?=.*\b(cat|tac|nl|less|more|head|tail|grep|egrep|rg|sed|awk|cut|sort|uniq|diff|jq|yq|xxd|od|strings|base64|bat|python3?|perl|ruby|node)\b)"
+    # anchored with (?s)^ so the lookahead runs once, not at every position (long commands stay fast)
+    (r"(?s)^(?=.*\b(cat|tac|nl|less|more|head|tail|grep|egrep|rg|sed|awk|cut|sort|uniq|diff|jq|yq|xxd|od|strings|base64|bat|python3?|perl|ruby|node)\b)"
      r".*(\.env\b|\.env\.|config\.(xml|ya?ml|json)|compose\.ya?ml|credentials|\.netrc|rclone\.conf|\.cookie\b|secrets?\.(ya?ml|json|env|txt)\b|/secrets?/|\.git/config|"
      r"settings\.json|/etc/[a-z-]*\.env|\.pem\b|\.key\b|id_(rsa|ed25519|ecdsa)\b|\.kube/config|\.aws/|\.docker/config)",
      "file that may contain secrets"),
@@ -189,8 +190,15 @@ def check_bash(cmd):
     hits = []
     for s in unmasked:
         hits += risky_labels(s)
-    # loops and multi-line scripts spread a reader and its file over several statements (`for f in a.env; do cat $f`)
-    hits += risky_labels(" ".join(unmasked).replace("\n", " "))
+    # loops and multi-line scripts spread a reader and its file over several statements (`for f in a.env; do cat $f`).
+    # Judge them together; only statements whose producer (first stage) also sends stderr into the masked pipe are left out.
+    def fully_masked(s):
+        if not is_masked(s):
+            return False
+        first, amp = pipeline_stages(s)[0]
+        return amp or bool(re.search(r"2>&1\s*$", first)) or first.startswith(("{", "("))
+    loose = [s for s in stmts if not fully_masked(s)]
+    hits += risky_labels(" ".join(loose if balanced else [cmd]).replace("\n", " "))
     if not hits:
         return None
     return ("secret-guard: this command may print a secret (" + ", ".join(dict.fromkeys(hits)) + "). "

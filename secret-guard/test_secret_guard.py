@@ -72,6 +72,8 @@ BASH = [
     ("grep -rhoE 'sk-[A-Za-z0-9]{20,}' docs/", False),
     ("grep -rlE 'sk-[A-Za-z0-9]{20,}' docs/", True),
     ("for f in a.env b.env; do cat $f; done", False),
+    ('for f in a.env; do cat "$f" | mask; done', False),          # third council review: stderr of cat not masked
+    ('for f in a.env; do cat "$f" 2>&1 | mask; done', True),
     ("python3 -c 'import secrets; print(secrets.token_hex(4))'", True),
     ("cat .env | grep -v x 2>&1 | mask", False),
 ]
@@ -104,7 +106,9 @@ class SecretGuard(unittest.TestCase):
         sample = (f"token={fake[0]}\nAuthorization: Bearer {fake[1]}\nhttps://u:{fake[2]}@h/x\n"
                   f"-----BEGIN RSA PRIVATE KEY-----\n{fake[3]}\n-----END RSA PRIVATE KEY-----\nnormal line\n")
         out = subprocess.run([os.path.join(here, "mask")], input=sample, capture_output=True, text=True).stdout
-        for secret in fake:
+        sample += "password=abc\ncurl --token \"quoted" + "value9\" x\n"
+        out = subprocess.run([os.path.join(here, "mask")], input=sample, capture_output=True, text=True).stdout
+        for secret in fake + ["abc", "quotedvalue9"]:
             self.assertNotIn(secret, out)
         self.assertIn("normal line", out)
 
