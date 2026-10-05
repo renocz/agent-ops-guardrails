@@ -6,6 +6,26 @@ A [Claude Code hook](https://docs.claude.com/en/docs/claude-code/hooks) that sto
 
 The rule "always mask output that may contain configuration" was written down, and the agent broke it 3 times in 2 days. Each time it was an honest mistake: a `docker inspect`, an error message carrying a URL with credentials, a `crontab -l`. The fix was to turn the rule into a technical check.
 
+## How it decides
+
+```mermaid
+flowchart TD
+    T["Agent calls a tool"] --> K{"Which tool?"}
+    K -->|"Read / Grep / NotebookRead"| F{"Secret file?<br/>(.env, keys, credentials…)<br/>or Grep hunting for passwords<br/>in content mode"}
+    F -->|"yes"| X1["⛔ refused"]
+    F -->|"no"| OK1["✅ allowed"]
+    K -->|"Bash"| C{"Ends with a real<br/>comment # secret-ok ?"}
+    C -->|"yes: agent's<br/>visible claim"| OK2["✅ allowed"]
+    C -->|"no"| SP["Split into statements<br/>(; && || & newline,<br/>quotes, comments, { } groups)"]
+    SP --> EACH{"For each statement:<br/>does it match a risky pattern?<br/>(env, docker inspect, config file,<br/>git network, key search…)"}
+    EACH -->|"no"| OK3["✅ allowed"]
+    EACH -->|"yes"| MK{"Whole output into the mask?<br/>… 2>&1 | mask as the LAST stage,<br/>stderr of every risky stage piped,<br/>no >&2, /dev/tty…"}
+    MK -->|"yes"| OK4["✅ allowed"]
+    MK -->|"no"| X2["⛔ refused, with the fix to apply"]
+```
+
+On a refusal, the agent gets the reason and the fix (`2>&1 | mask`). In practice it re-runs the command correctly at once.
+
 ## What it does
 
 | Tool | Behaviour |

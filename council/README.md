@@ -10,13 +10,24 @@ It is a ~250-line, standard-library Python script. The script itself is not the 
 
 ## How it works
 
+```mermaid
+flowchart TD
+    P["📝 proposal.md<br/>must contain Request: and GO:"] --> M["🔒 secret-looking values masked"]
+    M --> R1["Model A<br/>(vendor 1)"] & R2["Model B<br/>(vendor 2)"] & R3["Model C<br/>(vendor 3)"] & R4["Model D<br/>(vendor 4)"]
+    subgraph S1 ["1 · Independent reviews: nobody sees the others"]
+        R1 & R2 & R3 & R4
+    end
+    R1 & R2 & R3 & R4 --> X["2 · Anonymous cross-ranking<br/>each member ranks the others, shuffled"]
+    X --> V{"3 · Verdict computed from the votes<br/>(no model decides)"}
+    V -->|"≥ 2 FIX"| F["FIX FIRST"]
+    V -->|"exactly 1 FIX"| I["APPROVE, WITH ONE<br/>ISOLATED ALERT"]
+    V -->|"0 FIX"| OK["APPROVE"]
+    V -->|"< 3 valid answers"| N["INCOMPLETE"]
+    F & I & OK & N --> Y["4 · Synthesis by a chair<br/>copies the verdict, never downgrades<br/>a lone BLOCKING point"]
+    Y --> O["📄 Markdown report + JSON line<br/>for the agent"]
 ```
-proposal.md ──► 4 independent reviews ──► anonymous cross-ranking ──► verdict from the votes ──► synthesis by a chair
-                (different vendors,        (each member ranks the       FIX FIRST if ≥ 2 say FIX      (cannot change the
-                 no member sees another)    others, shuffled)            ISOLATED ALERT if 1           verdict; a lone
-                                                                         APPROVE if 0                  BLOCKING point is
-                                                                         INCOMPLETE if < 3 answered    never downgraded)
-```
+
+Each review lists its problems as `BLOCKING:`, `TO FIX:` or `MINOR:` and ends with `VERDICT: APPROVE` or `VERDICT: FIX`. A real `BLOCKING:` line counts as a FIX vote even if the member wrote APPROVE. An answer with no verdict line counts as absent, never as an approval.
 
 The rules that came from real failures:
 
