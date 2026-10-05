@@ -1,10 +1,22 @@
 {
   "api_base": "http://127.0.0.1:4000",
   "api_key_env": "OPS_COUNCIL_API_KEY",
-  "members": ["gpt-x", "gemini-x", "mistral-large-x", "claude-x"],
+  "members": [
+    "gpt-x",
+    "gemini-x",
+    "mistral-large-x",
+    "claude-x"
+  ],
   "chair": "gpt-x",
   "language": "English",
   "context": "Context: a self-hosted homelab (hypervisor, containers, backups, VPN) run by an AI agent under the control of a demanding human. Rules: no change without explicit approval, dry-run first, never display a secret, everything is documented.",
   "reports_dir": "./council-reports",
-  "model_overrides": {"claude": {"max_tokens": 8000, "reasoning_effort": "medium"}}
+  "model_overrides": {
+    "claude": {
+      "max_tokens": 8000,
+      "reasoning_effort": "medium",
+      "temperature": null
+    }
+  },
+  "temperature": 0.3
 }

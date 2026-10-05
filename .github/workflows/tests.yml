@@ -1,0 +1,53 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python: ["3.9", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: council tests (offline, no API calls)
+        run: cd council && python -m unittest -v test_council.py
+      - name: secret-guard tests (hook + mask filter)
+        run: cd secret-guard && python -m unittest -v test_secret_guard.py
+
+  hook-gym:
+    # External benchmark for Claude Code hooks (https://pypi.org/project/hook-gym/).
+    # secret-guard only targets secret leaks, so we report the credentials category and our own homelab cases.
+    # Informational: a partial score does not fail the build.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: install hook-gym (pinned)
+        run: pip install "hook-gym==0.1.0"
+      - name: point a settings file at secret-guard
+        run: |
+          sed "s#HOOK#$GITHUB_WORKSPACE/secret-guard/secret_guard.py#g" ci/hook-gym-settings.json > /tmp/settings.json
+          cat /tmp/settings.json
+      - name: hook-gym, built-in credentials cases
+        run: hook-gym run --hooks /tmp/settings.json --tag credentials --report credentials.md || true
+      - name: hook-gym, homelab cases from this repo
+        run: hook-gym run --hooks /tmp/settings.json --cases ci/hook-gym-cases --report homelab.md || true
+      - name: summary
+        run: |
+          for f in credentials.md homelab.md; do
+            echo "### $f" >> "$GITHUB_STEP_SUMMARY"
+            [ -f "$f" ] && cat "$f" >> "$GITHUB_STEP_SUMMARY" || echo "(no report)" >> "$GITHUB_STEP_SUMMARY"
+            score=$(grep -m1 -i "overall" "$f" 2>/dev/null || echo "no score line")
+            echo "::notice title=hook-gym $f::$score"
+          done

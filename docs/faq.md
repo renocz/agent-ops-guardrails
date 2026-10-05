@@ -116,9 +116,10 @@ No. It only sees the commands and file reads the agent asks for, before they run
 - other tools or MCP servers that return data.
 
 ### How was it tested?
-- Unit tests cover about 60 cases, including every bypass found during the reviews.
+- Unit tests cover about 90 cases, including every bypass found during the reviews and an external evaluation.
+- CI runs an independent harness, [Hook Gym](https://pypi.org/project/hook-gym/), on its credentials cases and on this repo's homelab cases.
 - Before each deployment, it was replayed against about 5,700 real past commands to compare its decisions with the previous version.
-- It went through 5 multi-model council reviews, which found 7 real gaps, all fixed.
+- It went through 5 multi-model council reviews, which found 7 real gaps. An external evaluation then found 13 more common homelab cases it missed (`printenv VAR`, WireGuard keys, `acme.json`, logs…). All of them are fixed and tested.
 
 ## Method and the other pillars
 

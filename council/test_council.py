@@ -35,6 +35,15 @@ class Verdicts(unittest.TestCase):
         v = oc.compute_verdict({"a": "APPROVE", "b": "APPROVE", "c": "ABSENT", "d": "ABSENT"}, 4)
         self.assertTrue(v.startswith("INCOMPLETE"))
 
+    def test_request_body(self):
+        cfg = dict(oc.DEFAULTS, model_overrides={"claude": {"max_tokens": 8000, "temperature": None}})
+        self.assertNotIn("temperature", oc.Client(cfg).build_request("gpt-x", "s", "u"))      # omitted by default
+        cfg["temperature"] = 0.3
+        self.assertEqual(oc.Client(cfg).build_request("gpt-x", "s", "u")["temperature"], 0.3)
+        body = oc.Client(cfg).build_request("claude-x", "s", "u")
+        self.assertNotIn("temperature", body)                                                  # null override removes it
+        self.assertEqual(body["max_tokens"], 8000)
+
     def test_chat_url(self):
         for base in ("http://h:4000", "http://h:4000/", "http://h:4000/v1", "http://h:4000/v1/chat/completions"):
             self.assertEqual(oc.chat_url(base), "http://h:4000/v1/chat/completions")

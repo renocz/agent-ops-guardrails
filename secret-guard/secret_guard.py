@@ -5,7 +5,9 @@ Why: a written rule ("always mask output that may contain config") was broken 3 
 technical constraint.
 
 Bash tool: a command that may print secrets is refused unless every statement that may print them sends stdout AND
-stderr through a masking filter, e.g. `cmd 2>&1 | mask` or `{ a; b; } 2>&1 | mask`. When the output provably contains
+stderr through a masking filter, e.g. `cmd 2>&1 | mask` or `{ a
+b
+} 2>&1 | mask`. When the output provably contains
 no values (grep -c, sha256sum, key names only), the agent may end the command with the explicit marker `# secret-ok`.
 That is a deliberate, visible, reviewable claim, not a silent bypass.
 
@@ -15,34 +17,82 @@ Scope and limits: this guards against ACCIDENTAL disclosure by a cooperative age
 complete. An adversary who controls the agent can get around it. Pair it with least privilege and keep secrets out of
 the agent's reach.
 
+How to read this file, top to bottom:
+  1. Rules: READERS, SECRET_PATHS, RISKY (Bash), SENSITIVE_FILES and SECRET_HUNT (Read/Grep). Each rule has a comment.
+  2. scan(): splits a command into statements, like Bash would (quotes, comments, { } and ( ) groups).
+  3. pipeline_stages() and is_masked(): does the whole output of a statement go through the mask?
+  4. check_bash(), check_read(), decide(): the decision. main(): the Claude Code hook protocol (JSON in, JSON out).
+
 Install: see README.md. Python 3.9+, standard library only. Input that is not valid JSON is let through (it is not a
-tool call this hook can judge); an internal error or a broken extra-patterns file makes it refuse (fail closed).
+tool call this hook can judge)
+an internal error or a broken extra-patterns file makes it refuse (fail closed).
 """
 import json, os, re, sys
 
 MASK_CMD = os.environ.get("SECRET_GUARD_MASK", "mask")
 MARKER = "secret-ok"
 
-# Commands that may print secret values. (regex, label)
+# ---------------------------------------------------------------------------------------------------------------
+# Rules. Each rule is (regex, label). A statement matching any regex is "risky" and must be masked.
+# They are case-insensitive. Keep each one small and explained: an ops reader should be able to audit this list.
+# ---------------------------------------------------------------------------------------------------------------
+
+# Programs that print a file's content (or can).
+READERS = (r"cat|tac|nl|less|more|head|tail|grep|egrep|rg|sed|awk|cut|sort|uniq|diff|jq|yq|xxd|od|strings|base64|bat"
+           r"|python3?|perl|ruby|node")
+
+# Paths that usually hold secrets. Used by the Bash rule below (reader + path) and, anchored, for Read/Grep.
+SECRET_PATHS = [
+    r"\.env\b", r"\.env\.",                                  # .env, .env.local, app.env
+    r"config\.(xml|ya?ml|json|toml|ini|cfg)\b",              # app configs (*arr config.xml, config.toml…)
+    r"settings\.(json|ini|toml|cfg)\b",
+    r"compose\.ya?ml\b",                                     # docker compose files often inline secrets
+    r"credentials", r"\.netrc\b", r"rclone\.conf\b", r"\.cookie\b",
+    r"secrets?\.(ya?ml|json|env|txt)\b", r"/secrets?/",
+    r"\.git/config\b",
+    r"/etc/[a-z-]*\.env\b",
+    r"\.pem\b", r"\.key\b", r"id_(rsa|ed25519|ecdsa)\b",     # private keys
+    r"\.kube/config\b", r"\.aws/", r"\.docker/config",
+    r"wireguard/", r"\bwg\d*\.conf\b",                       # WireGuard: holds the private key
+    r"acme\.json\b",                                         # Traefik: certificate private keys
+]
+
+# Environment variable names that look secret.
+SECRET_VAR = r"[A-Za-z0-9_]*(KEY|TOKEN|SECRET|PASS|PASSWD|PASSWORD|PWD|CREDENTIAL|AUTH|DSN|DATABASE_URL|COOKIE)[A-Za-z0-9_]*"
+
 RISKY = [
+    # crontab lines often carry API keys and tokens
     (r"\bcrontab\s+-l\b", "crontab"),
-    (r"\bdocker\s+inspect\b|\bdocker[\s-]compose\b.*\bconfig\b|\bdocker\s+(exec|run)\b.*\b(env|printenv)\b", "Docker config / environment"),
+    # docker inspect / compose config print environment variables; env inside a container too
+    (r"\bdocker\s+inspect\b|\bdocker[\s-]compose\b.*\bconfig\b|\bdocker\s+(exec|run)\b.*\b(env|printenv)\b",
+     "Docker config / environment"),
+    # the whole environment…
     (r"(^|[\s;&|(])(env|printenv|set|export\s+-p|declare\s+-x)\s*($|[;&|)])", "environment variables"),
+    # …or one variable: printenv X, or echo/printf of a secret-looking variable
+    (r"\bprintenv\s+\w", "environment variable"),
+    (r"\b(echo|printf)\b.*\$\{?" + SECRET_VAR, "secret-looking variable"),
+    # process listings show command lines (tokens passed as arguments) and environments
     (r"/proc/[^\s]*/(environ|cmdline)|\bps\s+(aux|-ef|e)\b", "process command lines / environment"),
     (r"\bsystemctl\s+(cat|show-environment|show)\b", "systemd units"),
-    (r"\bgit\b.*\b(fetch|pull|push|clone|ls-remote)\b|\bgit\s+remote\s+-v\b|\bgit\s+config\b.*(url|credential)|\bgit\s+credential\b",
-     "git (URLs with credentials, error messages)"),
-    # a reader and a secret-looking path anywhere in the same statement, in either order (`for f in a.env; do cat $f`)
-    # anchored with (?s)^ so the lookahead runs once, not at every position (long commands stay fast)
-    (r"(?s)^(?=.*\b(cat|tac|nl|less|more|head|tail|grep|egrep|rg|sed|awk|cut|sort|uniq|diff|jq|yq|xxd|od|strings|base64|bat|python3?|perl|ruby|node)\b)"
-     r".*(\.env\b|\.env\.|config\.(xml|ya?ml|json)|compose\.ya?ml|credentials|\.netrc|rclone\.conf|\.cookie\b|secrets?\.(ya?ml|json|env|txt)\b|/secrets?/|\.git/config|"
-     r"settings\.json|/etc/[a-z-]*\.env|\.pem\b|\.key\b|id_(rsa|ed25519|ecdsa)\b|\.kube/config|\.aws/|\.docker/config)",
-     "file that may contain secrets"),
+    # logs: apps print connection strings, tokens in URLs, stack traces with config
+    (r"\bdocker\s+(compose\s+)?logs\b|\bdocker-compose\s+logs\b|\bjournalctl\b|\bkubectl\s+logs\b", "logs"),
+    # git network commands print remote URLs (with embedded credentials) in errors
+    (r"\bgit\b.*\b(fetch|pull|push|clone|ls-remote)\b|\bgit\s+remote\s+-v\b|\bgit\s+config\b.*(url|credential)"
+     r"|\bgit\s+credential\b", "git (URLs with credentials, error messages)"),
+    # WireGuard: showconf / private-key / genkey print private keys (plain `wg show` hides them)
+    (r"\bwg\s+(showconf|genkey|genpsk)\b|\bwg\s+show\b.*\b(private-key|preshared-keys)\b", "WireGuard keys"),
+    # a reader and a secret-looking path in the same statement, in either order (`for f in a.env; do cat $f`).
+    # Anchored with (?s)^ so the lookahead runs once per statement, not at every position: long commands stay fast.
+    (r"(?s)^(?=.*\b(" + READERS + r")\b).*(" + "|".join(SECRET_PATHS) + ")", "file that may contain secrets"),
     # grepping for key formats prints the keys, unless only file names / counts / exit status are asked for
-    (r"\b(grep|egrep|rg)\b(?!.*\s-[a-zA-Z]*[lLcq][a-zA-Z]*\b).*(sk-|AIza|ghp_|github_pat_|xox[abp]-|eyJ|PRIVATE KEY)", "search for key values"),
-    (r"os\.environ\s*[)\]]|os\.environ\.(items|copy|values)\b|dict\(\s*os\.environ|process\.env\s*[)\];]", "environment variables (script)"),
+    (r"\b(grep|egrep|rg)\b(?!.*\s-[a-zA-Z]*[lLcq][a-zA-Z]*\b).*(sk-|AIza|ghp_|github_pat_|xox[abp]-|eyJ|PRIVATE KEY)",
+     "search for key values"),
+    # scripts that dump their environment
+    (r"os\.environ\s*[)\]]|os\.environ\.(items|copy|values)\b|dict\(\s*os\.environ|process\.env\s*[)\];]",
+     "environment variables (script)"),
+    # password managers and secret stores (not when the value is captured: X=$(security ...))
     (r"\bpass\s+show\b|\b(pass-cli|gopass)\b.*\b(show|get|view)\b|\bop\s+(read|item\s+get)\b|\bbw\s+get\b"
-     r"|(?<!\$\()\bsecurity\s+find-[a-z-]*password\b.*\s-[wg]\b", "password manager"),   # not when captured: X=$(security ...)
+     r"|(?<!\$\()\bsecurity\s+find-[a-z-]*password\b.*\s-[wg]\b", "password manager"),
     (r"\bkubectl\b.*\bget\s+secrets?\b|\bvault\s+(kv\s+get|read)\b|\baws\s+(secretsmanager|ssm)\s+get", "secret store"),
 ]
 
@@ -65,9 +115,8 @@ def _load_extra():
 RISKY += _load_extra()
 
 # Files that the Read/Grep tools must not open directly.
-SENSITIVE_FILES = (r"((^|/)\.env($|\.)|\.env$|config\.xml$|rclone\.conf$|\.netrc$|credentials|\.cookie$|/etc/[^/]*\.env$|"
-                   r"security\.json$|\.git/config$|(^|/)id_(rsa|ed25519|ecdsa)[^/]*$|\.pem$|\.key$|\.kube/config$|"
-                   r"\.aws/credentials$|\.docker/config\.json$|secrets?\.(ya?ml|json|env)$|compose\.ya?ml$)")
+SENSITIVE_FILES = "(" + "|".join(SECRET_PATHS) + r"|(^|/)id_(rsa|ed25519|ecdsa)[^/]*$)"   # .pub files are allowed below
+
 
 # Grep in content mode with a pattern that hunts for secrets prints the matching lines: refused.
 SECRET_HUNT = r"(pass(word|wd)?|secret|token|api[_-]?key|private[_-]?key|credential|bearer|auth)"
@@ -76,9 +125,12 @@ SECRET_HUNT = r"(pass(word|wd)?|secret|token|api[_-]?key|private[_-]?key|credent
 def scan(cmd):
     """Split a shell command into top-level statements (on ; && || & and newlines), keeping pipelines intact.
     Returns (statements, trailing_comment, balanced).
-    Quote-aware ('...', "...", backslash escapes) and group-aware: `{ ...; }` and `( ... )` / `$( ... )` count as
-    groups only where Bash treats them as such (a `{` that is a word at command position; a `}` that is a word).
-    Comments are dropped; the last real comment is returned when nothing but whitespace follows it.
+    Quote-aware ('...', "...", backslash escapes) and group-aware: `{ ...
+    }` and `( ... )` / `$( ... )` count as
+    groups only where Bash treats them as such (a `{` that is a word at command position
+    a `}` that is a word).
+    Comments are dropped
+    the last real comment is returned when nothing but whitespace follows it.
     Not a full Bash parser. When it loses track (unclosed quote or group), `balanced` is False and the caller
     treats the whole command as one unmasked statement."""
     stmts, cur, depth, i, n = [], [], 0, 0, len(cmd)
@@ -93,14 +145,23 @@ def scan(cmd):
         if quote:
             cur.append(c)
             if c == "\\" and quote == '"' and i + 1 < n:
-                cur.append(cmd[i + 1]); i += 2; continue
+                cur.append(cmd[i + 1])
+                i += 2
+                continue
             if c == quote:
                 quote = None
-            i += 1; continue
+            i += 1
+            continue
         if c == "\\" and i + 1 < n:
-            cur.append(c); cur.append(cmd[i + 1]); i += 2; continue
+            cur.append(c)
+            cur.append(cmd[i + 1])
+            i += 2
+            continue
         if c in ("'", '"'):
-            quote = c; cur.append(c); i += 1; continue
+            quote = c
+            cur.append(c)
+            i += 1
+            continue
         if c == "#" and (not cur or cur[-1] in " \t\n;&|(){}"):
             j = cmd.find("\n", i)
             j = n if j < 0 else j
@@ -119,10 +180,17 @@ def scan(cmd):
         if depth == 0:
             two = cmd[i:i + 2]
             if two in ("&&", "||"):
-                stmts.append("".join(cur)); cur = []; i += 2; continue
+                stmts.append("".join(cur))
+                cur = []
+                i += 2
+                continue
             if c in ";\n" or (c == "&" and two != "&>" and (i == 0 or cmd[i - 1] not in ">&|")):
-                stmts.append("".join(cur)); cur = []; i += 1; continue
-        cur.append(c); i += 1
+                stmts.append("".join(cur))
+                cur = []
+                i += 1
+                continue
+        cur.append(c)
+        i += 1
     stmts.append("".join(cur))
     return [s.strip() for s in stmts if s.strip()], last_comment, (quote is None and depth == 0)
 
@@ -143,12 +211,18 @@ def pipeline_stages(stmt):
         if quote:
             cur.append(c)
             if c == "\\" and quote == '"' and i + 1 < n:
-                cur.append(stmt[i + 1]); i += 2; continue
+                cur.append(stmt[i + 1])
+                i += 2
+                continue
             if c == quote:
                 quote = None
-            i += 1; continue
+            i += 1
+            continue
         if c == "\\" and i + 1 < n:
-            cur.append(c); cur.append(stmt[i + 1]); i += 2; continue
+            cur.append(c)
+            cur.append(stmt[i + 1])
+            i += 2
+            continue
         if c in ("'", '"'):
             quote = c
         elif c in "({":
@@ -157,15 +231,20 @@ def pipeline_stages(stmt):
             depth -= 1
         elif c == "|" and depth == 0 and stmt[i + 1:i + 2] != "|" and (i == 0 or stmt[i - 1] != "|"):
             amp = stmt[i + 1:i + 2] == "&"
-            stages.append(("".join(cur), amp)); cur = []; i += 2 if amp else 1; continue
-        cur.append(c); i += 1
+            stages.append(("".join(cur), amp))
+            cur = []
+            i += 2 if amp else 1
+            continue
+        cur.append(c)
+        i += 1
     stages.append(("".join(cur), False))
     return [(st.strip(), amp) for st, amp in stages]
 
 
 def is_masked(stmt):
     """True if the statement's whole output ends in the mask filter, and every RISKY stage of the pipeline sends its
-    stderr into the pipe too (`a 2>&1 | b | mask` is fine; `a | b 2>&1 | mask` leaves a's errors on the terminal)."""
+    stderr into the pipe too (`a 2>&1 | b | mask` is fine
+    `a | b 2>&1 | mask` leaves a's errors on the terminal)."""
     stages = pipeline_stages(stmt)
     if len(stages) < 2 or stages[-1][0] != MASK_CMD:
         return False

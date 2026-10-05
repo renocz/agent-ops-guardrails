@@ -33,7 +33,7 @@ On a refusal, the agent gets the reason and the fix (`2>&1 | mask`). In practice
 | **Bash** | A command that may print secrets is refused unless its whole output, **stdout and stderr**, goes through `mask`. |
 | **Read / Grep / NotebookRead** | Direct reads (and Grep in any mode) of files that typically hold secrets (`.env`, private keys, `.netrc`, cloud credentials, compose files…) are refused. A Grep in content mode whose pattern hunts for secrets (`password`, `token`, `api_key`…) is refused too; listing matching files is allowed. |
 
-For Bash, commands such as `crontab -l`, `docker inspect`, `env`, git network commands, or reading a config file count as risky. To pass, the command must look like this:
+For Bash, commands such as `crontab -l`, `docker inspect`, `env` / `printenv VAR` / `echo $API_KEY`, `wg showconf`, logs (`docker logs`, `journalctl`), git network commands, or reading a config file (`.env`, `config.toml`, `acme.json`, WireGuard configs…) count as risky. To pass, the command must look like this:
 - `cmd 2>&1 | mask`, or
 - `{ cmd1; cmd2; } 2>&1 | mask` to cover several statements.
 
@@ -54,7 +54,7 @@ When the output provably holds no values, for example `grep -c`, a hash, or key 
 
 Requirements: Python 3.9+, and Perl for `mask`. `mask` starts with `#!/usr/bin/env -S perl`; `env -S` needs coreutils 8.30+ on Linux and is built in on macOS. Elsewhere, change that line to `#!/usr/bin/perl -p`.
 
-From a clone of this repo:
+From a clone of this repo, the quickest way is `./install.sh` at the repo root (`--write-settings` also registers the hook, with a backup of your settings). By hand:
 
 ```bash
 cd secret-guard
@@ -83,7 +83,7 @@ Failure behaviour:
 - a broken or invalid extras file, or any internal error, makes the hook **refuse** (fail closed);
 - input that is not a valid tool call (not JSON) is let through, because there is nothing to judge.
 
-Run the tests with `python3 -m unittest test_secret_guard.py`.
+Run the tests with `python3 -m unittest test_secret_guard.py`. CI also runs it against [Hook Gym](https://pypi.org/project/hook-gym/), an independent test harness for Claude Code hooks. Two suites run there: its built-in *credentials* cases, and homelab cases from this repo (`ci/hook-gym-cases/`). Hook Gym also tests things secret-guard does not try to cover (destructive commands, git hygiene…), so only those two suites are reported. See the **Summary** of the latest [tests run](https://github.com/renocz/agent-ops-guardrails/actions/workflows/tests.yml).
 
 ## Limits
 

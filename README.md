@@ -1,6 +1,8 @@
 # agent-ops-guardrails
 
-**Guardrails for an AI agent that runs real infrastructure.**
+[![tests](https://github.com/renocz/agent-ops-guardrails/actions/workflows/tests.yml/badge.svg)](https://github.com/renocz/agent-ops-guardrails/actions/workflows/tests.yml)
+
+**An operating model for an AI agent that runs real infrastructure: the guardrails, the method, and the field notes.**
 
 I let an AI agent run my homelab: a hypervisor, about forty containers, backups and a VPN. The agent is Claude Code; the reviewers in the council come from four different vendors. It has root, and it is good at the work. It is also confidently wrong a few times a week, and early on it printed secrets into its own transcript.
 
@@ -36,6 +38,8 @@ flowchart LR
 
 ## Start here
 
+- **See what you get:** a real [council report](examples/council-report.md) and the hook's real [refusals](examples/secret-guard-refusals.md).
+- **Install secret-guard:** `./install.sh` (add `--write-settings` to register the hook in `~/.claude/settings.json`; a backup is made).
 - **Questions?** The [FAQ](docs/faq.md) covers: why several LLMs, cost, use with other agents, false positives, limits, adapting it to your setup.
 - **Review plans with several models:** [council/README.md](council/README.md). Works with any OpenAI-compatible endpoint.
 - **Stop secret leaks in Claude Code:** [secret-guard/README.md](secret-guard/README.md). Two files to install, plus a settings snippet.

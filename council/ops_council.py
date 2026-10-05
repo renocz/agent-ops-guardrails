@@ -46,6 +46,7 @@ DEFAULTS = {
     # reasoning and return an empty answer; giving them more room and a medium effort fixed it in practice.
     "model_overrides": {"anthropic/": {"max_tokens": 8000, "reasoning_effort": "medium"}},
     "timeout_s": 180,
+    "temperature": None,                           # e.g. 0.3; left out of requests when None (some reasoning APIs reject it)
 }
 
 MASK = [(r"eyJ[A-Za-z0-9_-]{15,}(?:\.[A-Za-z0-9_-]*){0,2}", "<jwt>"),
@@ -141,14 +142,7 @@ class Client:
         self.key = os.environ.get(cfg["api_key_env"], "")
 
     def chat(self, model, system, user, max_tokens=None):
-        req = {"model": model, "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
-               "max_tokens": max_tokens or self.cfg["max_tokens"], "temperature": 0.3}
-        for prefix, extra in self.cfg.get("model_overrides", {}).items():
-            if model.startswith(prefix):
-                extra = dict(extra)
-                if "max_tokens" in extra:
-                    extra["max_tokens"] = max(req["max_tokens"], extra["max_tokens"])
-                req.update(extra)
+        req = self.build_request(model, system, user, max_tokens)
         headers = {"Content-Type": "application/json"}
         if self.key:
             headers["Authorization"] = "Bearer " + self.key
@@ -163,6 +157,20 @@ class Client:
             raise RuntimeError(f"empty answer (finish_reason={c.get('finish_reason')}, "
                                f"completion_tokens={u.get('completion_tokens', 0)})")
         return txt.strip(), u.get("prompt_tokens", 0), u.get("completion_tokens", 0), round(time.time() - t, 1)
+
+    def build_request(self, model, system, user, max_tokens=None):
+        """The JSON body sent to the endpoint: defaults, then per-model overrides (null removes a field)."""
+        req = {"model": model, "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
+               "max_tokens": max_tokens or self.cfg["max_tokens"]}
+        if self.cfg.get("temperature") is not None:   # omitted by default: some reasoning APIs reject it
+            req["temperature"] = self.cfg["temperature"]
+        for prefix, extra in self.cfg.get("model_overrides", {}).items():
+            if model.startswith(prefix):
+                extra = dict(extra)
+                if "max_tokens" in extra:
+                    extra["max_tokens"] = max(req["max_tokens"], extra["max_tokens"])
+                req.update(extra)
+        return {k: v for k, v in req.items() if v is not None}   # an override set to null removes a field
 
 
 def run(proposal, title, cfg, client):
@@ -185,7 +193,10 @@ def run(proposal, title, cfg, client):
         for f in cf.as_completed(futs):
             m = futs[f]
             try:
-                txt, i, o, _ = f.result(); reviews[m] = txt; tok[0] += i; tok[1] += o
+                txt, i, o, _ = f.result()
+                reviews[m] = txt
+                tok[0] += i
+                tok[1] += o
             except Exception as e:
                 reviews[m] = f"(unavailable: {str(e)[:120]})"
 
@@ -208,7 +219,10 @@ def run(proposal, title, cfg, client):
         for f in cf.as_completed(futs):
             m = futs[f]
             try:
-                txt, i, o, _ = f.result(); ranks[m] = txt; tok[0] += i; tok[1] += o
+                txt, i, o, _ = f.result()
+                ranks[m] = txt
+                tok[0] += i
+                tok[1] += o
             except Exception as e:
                 ranks[m] = f"(unavailable: {str(e)[:120]})"
     pts = rank_points(ranks, letters)
@@ -229,7 +243,8 @@ def run(proposal, title, cfg, client):
     try:
         synthesis, i, o, _ = client.chat(cfg["chair"], sys3, f"VERDICT (computed): {verdict}\n\nProposal:\n{proposal}\n\n"
                                          f"Independent reviews:\n{anon}\n\nAnonymous cross-reviews:\n{rv}", 4000)
-        tok[0] += i; tok[1] += o
+        tok[0] += i
+        tok[1] += o
     except Exception as e:
         synthesis = f"(synthesis unavailable: {str(e)[:120]}; the computed verdict above still stands)"
 

@@ -70,6 +70,25 @@ BASH = [
     ("docker inspect web 2>&1 | grep -v x | mask", True),
     ("docker inspect web |& grep -v x | mask", True),
     ("ls | mask", True),                       # nothing risky in it
+    # external evaluation (05/10): honest homelab accidents that used to pass
+    ("printenv DATABASE_URL", False),
+    ("echo $API_KEY", False),
+    ('echo "${DB_PASSWORD}"', False),
+    ("echo $HOME", True),
+    ("wg showconf wg0", False),
+    ("wg show wg0 private-key", False),
+    ("wg genkey", False),
+    ("wg show", True),                         # private keys are shown as (hidden)
+    ("cat /etc/wireguard/wg0.conf", False),
+    ("cat traefik/acme.json", False),
+    ("cat config.toml", False),
+    ("cat settings.ini", False),
+    ("cat pyproject.toml", True),
+    ("docker logs app", False),
+    ("docker logs app 2>&1 | mask", True),
+    ("docker compose logs --tail 50", False),
+    ("journalctl -u app", False),
+    ("kubectl logs pod/app", False),
     ("grep -rhoE 'sk-[A-Za-z0-9]{20,}' docs/", False),
     ("grep -rlE 'sk-[A-Za-z0-9]{20,}' docs/", True),
     ("for f in a.env b.env; do cat $f; done", False),
@@ -87,6 +106,11 @@ READS = [
     ({"file_path": "/srv/app/README.md"}, True),
     ({"path": "/srv/app", "glob": "*.env"}, False),
     ({"path": ".", "glob": "**/.env"}, False),
+    ({"file_path": "/etc/wireguard/wg0.conf"}, False),
+    ({"file_path": "/srv/traefik/acme.json"}, False),
+    ({"file_path": "/srv/app/config.toml"}, False),
+    ({"file_path": "/srv/app/settings.ini"}, False),
+    ({"file_path": "/srv/app/pyproject.toml"}, True),
 ]
 
 

@@ -1,0 +1,8 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      { "matcher": "Bash", "hooks": [{ "type": "command", "command": "python3 HOOK" }] },
+      { "matcher": "Read|Grep|NotebookRead", "hooks": [{ "type": "command", "command": "python3 HOOK" }] }
+    ]
+  }
+}
