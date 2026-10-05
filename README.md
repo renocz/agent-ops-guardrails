@@ -22,7 +22,7 @@ This repo collects the guardrails that grew around it. Each one exists because s
 - what it caught;
 - its false alarms, and what it can't see (UX).
 
-The [secret-guard README](secret-guard/README.md) explains how the hook was checked: about 5,600 real commands replayed through it before deployment.
+The [secret-guard README](secret-guard/README.md) explains how the hook was checked: about 5,700 real commands replayed through the old and new versions before deployment. That is a comparison between versions, not proof that nothing leaks.
 
 These are one person's field notes, not a benchmark.
 

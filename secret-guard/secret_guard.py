@@ -26,7 +26,7 @@ MARKER = "secret-ok"
 # Commands that may print secret values. (regex, label)
 RISKY = [
     (r"\bcrontab\s+-l\b", "crontab"),
-    (r"\bdocker\s+(inspect|compose\s+config)\b|\bdocker\s+(exec|run)\b.*\b(env|printenv)\b", "Docker config / environment"),
+    (r"\bdocker\s+inspect\b|\bdocker[\s-]compose\b.*\bconfig\b|\bdocker\s+(exec|run)\b.*\b(env|printenv)\b", "Docker config / environment"),
     (r"(^|[\s;&|(])(env|printenv|set|export\s+-p|declare\s+-x)\s*($|[;&|)])", "environment variables"),
     (r"/proc/[^\s]*/(environ|cmdline)|\bps\s+(aux|-ef|e)\b", "process command lines / environment"),
     (r"\bsystemctl\s+(cat|show-environment|show)\b", "systemd units"),
@@ -198,7 +198,9 @@ def check_bash(cmd):
         first, amp = pipeline_stages(s)[0]
         return amp or bool(re.search(r"2>&1\s*$", first)) or first.startswith(("{", "("))
     loose = [s for s in stmts if not fully_masked(s)]
-    hits += risky_labels(" ".join(loose if balanced else [cmd]).replace("\n", " "))
+    joined = " ".join(loose if balanced else [cmd]).replace("\n", " ")
+    # only the reader + file rule spans statements; other rules (e.g. `git … push`) would match across unrelated commands
+    hits += [label for label in risky_labels(joined) if label == "file that may contain secrets"]
     if not hits:
         return None
     return ("secret-guard: this command may print a secret (" + ", ".join(dict.fromkeys(hits)) + "). "

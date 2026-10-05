@@ -27,6 +27,9 @@ class Verdicts(unittest.TestCase):
         self.assertEqual(oc.vote_of("BLOCKING: no rollback plan"), "FIX")      # no verdict line, but a blocker
         self.assertEqual(oc.vote_of("VERDICT: FIX\n...\nVERDICT: APPROVE"), "APPROVE")  # last one wins
         self.assertEqual(oc.vote_of("Looks fine to me."), "ABSENT")             # malformed: never an implicit approval
+        self.assertEqual(oc.vote_of("BLOCKING: data loss\nVERDICT: APPROVE"), "FIX")  # contradiction counts against
+        self.assertEqual(oc.vote_of("BLOCKING: none\nVERDICT: APPROVE"), "APPROVE")
+        self.assertEqual(oc.vote_of("End with 'VERDICT: APPROVE' if fine."), "ABSENT")  # a quoted example is no vote
 
     def test_absent_not_counted(self):
         v = oc.compute_verdict({"a": "APPROVE", "b": "APPROVE", "c": "ABSENT", "d": "ABSENT"}, 4)

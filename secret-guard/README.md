@@ -1,6 +1,6 @@
 # secret-guard
 
-A [Claude Code hook](https://docs.claude.com/en/docs/claude-code/hooks) that stops an AI agent from **printing secrets by accident**.
+A [Claude Code hook](https://docs.claude.com/en/docs/claude-code/hooks) that stops an AI agent from **printing secrets by accident** in the output of the commands and file reads it runs. That output is the only thing it filters.
 
 ## Why
 
@@ -11,7 +11,7 @@ The rule "always mask output that may contain configuration" was written down, a
 | Tool | Behaviour |
 |---|---|
 | **Bash** | A command that may print secrets is refused unless its whole output, **stdout and stderr**, goes through `mask`. |
-| **Read / Grep / NotebookRead** | Direct reads of files that typically hold secrets (`.env`, private keys, `.netrc`, cloud credentials, compose files…) are refused. A Grep in content mode whose pattern hunts for secrets (`password`, `token`, `api_key`…) is refused too; listing matching files is allowed. |
+| **Read / Grep / NotebookRead** | Direct reads (and Grep in any mode) of files that typically hold secrets (`.env`, private keys, `.netrc`, cloud credentials, compose files…) are refused. A Grep in content mode whose pattern hunts for secrets (`password`, `token`, `api_key`…) is refused too; listing matching files is allowed. |
 
 For Bash, commands such as `crontab -l`, `docker inspect`, `env`, git network commands, or reading a config file count as risky. To pass, the command must look like this:
 - `cmd 2>&1 | mask`, or
@@ -32,9 +32,16 @@ When the output provably holds no values, for example `grep -c`, a hash, or key 
 
 ## Install
 
+Requirements: Python 3.9+, and Perl for `mask`. `mask` starts with `#!/usr/bin/env -S perl`; `env -S` needs coreutils 8.30+ on Linux and is built in on macOS. Elsewhere, change that line to `#!/usr/bin/perl -p`.
+
+From a clone of this repo:
+
 ```bash
+cd secret-guard
+mkdir -p ~/.local/bin ~/.claude/hooks
 install -m 755 mask ~/.local/bin/mask            # must be on the PATH of the shell the agent uses
 install -m 755 secret_guard.py ~/.claude/hooks/secret_guard.py
+printf 'password=hunter2\n' | mask              # should print: password=<m>
 ```
 
 Then add the hook to `~/.claude/settings.json`:

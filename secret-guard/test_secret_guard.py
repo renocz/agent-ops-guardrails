@@ -64,6 +64,7 @@ BASH = [
     ("bash -s <<'EOF'\ncrontab -l\nEOF", False),
     ("{ bash -s <<'EOF'\ncrontab -l\nEOF\n} 2>&1 | mask", True),
     ("docker run --rm img env", False),
+    ("docker compose -f prod.yml config", False),
     # second council review: every risky pipeline stage must send its stderr into the pipe
     ("docker inspect web | cat 2>&1 | mask", False),
     ("docker inspect web 2>&1 | grep -v x | mask", True),
@@ -74,6 +75,7 @@ BASH = [
     ("for f in a.env b.env; do cat $f; done", False),
     ('for f in a.env; do cat "$f" | mask; done', False),          # third council review: stderr of cat not masked
     ('for f in a.env; do cat "$f" 2>&1 | mask; done', True),
+    ("git ls-files | wc -l; scp a host:/tmp; ssh host 'pct push 1 a b'", True),   # git + push in unrelated commands
     ("python3 -c 'import secrets; print(secrets.token_hex(4))'", True),
     ("cat .env | grep -v x 2>&1 | mask", False),
 ]

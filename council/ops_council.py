@@ -87,12 +87,16 @@ def missing_context(proposal):
 
 
 def vote_of(review):
-    """Last 'VERDICT: APPROVE|FIX' line wins. Without one: any BLOCKING line means FIX, otherwise the
-    answer is malformed and the member counts as ABSENT (never as an implicit approval)."""
-    v = re.findall(r"VERDICT\s*:\s*\**\s*(APPROVE|FIX|VALIDER|CORRIGER)", review, re.I)
+    """A real BLOCKING line means FIX, even if the member also wrote 'VERDICT: APPROVE' (contradictory answers
+    count against approval). Otherwise the last 'VERDICT: APPROVE|FIX' line wins. With neither, the answer is
+    malformed and the member counts as ABSENT (never as an implicit approval)."""
+    blockers = re.findall(r"(?im)^\W*(?:BLOCKING|BLOQUANT)\s*:\s*(.*)$", review)
+    if any(b.strip() and not re.fullmatch(r"(none|aucun|n/?a|-)\.?", b.strip(), re.I) for b in blockers):
+        return "FIX"
+    v = re.findall(r"(?im)^\W*VERDICT\s*:\s*\**\s*(APPROVE|FIX|VALIDER|CORRIGER(?: D.ABORD)?)\W*$", review)
     if v:
-        return "FIX" if v[-1].upper() in ("FIX", "CORRIGER") else "APPROVE"
-    return "FIX" if re.search(r"(?im)^\W*(BLOCKING|BLOQUANT)\s*:", review) else "ABSENT"
+        return "FIX" if v[-1].upper().startswith(("FIX", "CORRIGER")) else "APPROVE"
+    return "ABSENT"
 
 
 def compute_verdict(votes, n_members):

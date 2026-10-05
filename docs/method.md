@@ -21,7 +21,7 @@ Every change follows the same steps:
 
 The council is used in step 2 for decisions that matter: permissions, security, data, irreversible work. It is not used for routine work.
 
-## 2. Secrets never reach the transcript
+## 2. Keeping secrets out of the transcript
 
 - A shell hook blocks any command that could print configuration unless its output goes through a broad mask (`2>&1 | mask`).
   - The mask covers `--token X`, JWTs, `sk-`/`ghp_` style keys, `key=`/`password:` pairs and PEM bodies.
