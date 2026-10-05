@@ -1,0 +1,20 @@
+#!/usr/bin/env -S PERL_BADLANG=0 perl -p
+# mask: redact secret-looking values from a stream. Usage: <command> 2>&1 | mask
+# Best effort, pattern-based: common key formats, JWTs, bot tokens, URL credentials, auth headers, --token style flags,
+# key=value / key: value pairs, XML secrets and whole PEM private-key blocks. Prefer over-masking to under-masking.
+BEGIN { $| = 1 }
+# A private key is masked from BEGIN to END. If END never comes (truncated output), everything after is masked: on purpose.
+if (/-----BEGIN [A-Z ]*PRIVATE KEY-----/) { $in_pk = 1; s{(-----BEGIN [A-Z ]*PRIVATE KEY-----).*}{$1 <m>}; next; }
+if ($in_pk) { if (/-----END [A-Z ]*PRIVATE KEY-----/) { $in_pk = 0; } else { $_ = "<m>\n"; } next; }
+s{eyJ[A-Za-z0-9_-]{15,}(?:\.[A-Za-z0-9_-]*){0,2}}{<jwt>}g;
+s{\b(sk-(?:ant-|proj-)?|ghp_|gho_|ghs_|ghu_|github_pat_|glpat-|AIza|xox[abpr]-|cfut_|hf_)[A-Za-z0-9_-]{8,}}{$1<m>}g;
+s{\b\d{8,10}:[A-Za-z0-9_-]{30,}\b}{<bottoken>}g;
+s{://[^/@\s:]+:[^/@\s]+@}{://<m>@}g;
+s{://[A-Za-z0-9_]{20,}@}{://<m>@}g;
+s{(Authorization:\s*(?:Bearer|token|Basic)\s+)\S+}{$1<m>}gi;
+s{(X-[A-Za-z-]*(?:Key|Token)[A-Za-z-]*:\s*)\S+}{$1<m>}gi;
+s{(--?(?:token|key|password|passwd|secret|api-key|apikey)[= ]+)[^\s"']+}{$1<m>}gi;
+s{(<(?:ApiKey|Password|Token|Secret|ClientSecret)>)[^<]+(</)}{$1<m>$2}gi;
+s~(\s-u\s+[^\s:]+:)\S+~$1<m>~g;
+s~((?:key|token|secret|password|passwd|pwd|passphrase|cookie|credential)[A-Za-z0-9_]*["']?\s*[:=]\s*)(["'])[^"']*\2~$1$2<m>$2~gi;
+s~((?:key|token|secret|password|passwd|pwd|auth|cookie|bearer|session|credential)[A-Za-z0-9_]*["']?\s*[:=]\s*["']?)[^\s,"'}\]]{6,}~$1<m>~gi;

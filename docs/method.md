@@ -1,7 +1,7 @@
 # The harness around the agent
 
 The setup: one person, one hypervisor host, and two Claude Code agents with the same rules and a shared memory.
-- The **main agent** runs on the laptop, has root on the host, and is driven over Telegram.
+- The **main agent** runs on the laptop, has root on the host, and is driven from a chat app.
 - The **on-call agent** runs inside the container that hosts all the services. It is deliberately weaker; see below.
 
 Everything below exists because something went wrong once.
@@ -37,8 +37,8 @@ So the on-call agent has no hypervisor rights on that container. It gets a **cre
 - The agent drops a request file in a shared directory. The file's content is never read.
 - A systemd path unit on the host takes one atomic ZFS snapshot of the data and of the container's root filesystem.
 - The host writes the result to a status file, which the agent reads.
-- Refusal conditions: the pool is at 85% or more, or a snapshot was taken less than 10 minutes ago (the previous one is returned instead).
-- A nightly job deletes these snapshots, and only these (strict name filter), after 7 days.
+- Refusal conditions: the pool is above a disk-usage threshold, or a snapshot was taken within a short cool-down (the previous one is returned instead).
+- A nightly job deletes these snapshots, and only these (strict name filter), after a fixed retention period.
 - Restore is documented **per service**: copy one app's files out of `.zfs/snapshot/...`. A global rollback is never used to fix one service, and rollback stays with the human.
 
 The procedure for the on-call agent: snapshot (abort if it fails), pin the exact image version (never leave `:latest`), take a `pg_dump` for Postgres apps, dry-run, recreate one service, verify, and write the snapshot name in the change record.

@@ -1,7 +1,7 @@
 """Offline tests: no network, a fake client stands in for the models."""
 import os, sys, unittest
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+sys.path.insert(0, os.path.dirname(__file__))
 import ops_council as oc
 
 PROPOSAL = "Request: \"upgrade the auth service\"\nGO: yes, for this upgrade only\n\nPlan: snapshot, pin version, upgrade, verify."
