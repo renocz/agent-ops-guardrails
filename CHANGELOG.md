@@ -2,7 +2,7 @@
 
 One version scheme: **a repository tag per release**. Components have no version of their own. Commit messages from 06/10/2026 that say "secret-guard v0.3/v0.4/v0.5" refer to the intermediate revisions listed under v0.6.
 
-## v0.7 (unreleased)
+## v0.7 (06/10/2026)
 
 - **leak-check v2, after a fourth external audit.** v1 found 1 of 5 planted secrets.
   - JSON transcript lines are decoded before searching, so quotes, backslashes and newlines no longer hide values.
