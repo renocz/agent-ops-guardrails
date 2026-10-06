@@ -30,6 +30,25 @@ class LeakCheck(unittest.TestCase):
         vals = lc.collect_values(self.cfg)
         self.assertEqual(sorted(vals.values()), sorted([f"{self.d}/stack/.env:DB_PASSWORD", f"{self.d}/single.key"]))
 
+    def test_missing_source_is_reported(self):
+        cfg = dict(self.cfg, env_files=self.cfg["env_files"] + [f"{self.d}/gone/*.env"])
+        r = lc.scan(cfg)
+        self.assertTrue(any("gone" in m for m in r["missing_sources"]))
+
+    def test_env_parsing(self):
+        w(f"{self.d}/p/.env", "export API_TOKEN='" + FAKE + "'\n# OLD_PASSWORD=" + FAKE[::-1] + "x\n"
+                              "DB_PASSWORD=12345678901234\nREDIS_PASSWORD=${REDIS_PASS}\n")
+        names = sorted(n.split(":")[-1] for n in lc.collect_values(dict(self.cfg, env_files=[f"{self.d}/p/.env"],
+                                                                         value_files=[])).values())
+        self.assertEqual(names, ["API_TOKEN"])                  # comments, numbers and ${VAR} are not values
+
+    def test_weak_values_are_not_exported(self):
+        w(f"{self.d}/weak/.env", "ADMIN_PASSWORD=correcthorse12\n")
+        out = f"{self.d}/fp.json"
+        r = lc.export(dict(self.cfg, env_files=self.cfg["env_files"] + [f"{self.d}/weak/.env"]), out)
+        self.assertEqual(r["secrets_server_only"], 1)          # 14 lowercase+digits: below 80 bits, server-side only
+        self.assertEqual(r["secrets_exported"], 2)
+
     def test_no_leak(self):
         self.assertEqual(lc.scan(self.cfg)["leaks"], [])
 
@@ -42,7 +61,7 @@ class LeakCheck(unittest.TestCase):
     def test_fingerprints_carry_no_value(self):
         out = f"{self.d}/fp.json"
         lc.export(self.cfg, out)
-        self.assertNotIn(FAKE, open(out).read())
+        self.assertNotIn(FAKE, lc.read_text(out))
         self.assertEqual(oct(os.stat(out).st_mode)[-3:], "600")
 
     def test_fingerprint_scan_finds_value_in_key_value_and_user_pass_forms(self):

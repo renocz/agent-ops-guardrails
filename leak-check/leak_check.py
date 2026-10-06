@@ -12,7 +12,8 @@ Modes
   scan-fingerprints look for fingerprinted values in local transcripts (token match; for the agent's laptop).
 
 Output: a JSON report and a one-line summary per finding (secret NAME and transcript file, never the value).
-Exit code: 0 no leak, 1 leak found, 2 error. Only NEW findings are reported again when --state is given.
+Exit code: 0 no leak, 1 leak found, 2 error. Configured sources that match nothing or can't be read are listed in
+"missing_sources" and on stderr: a scan with missing sources must not be read as "no leak". Only NEW findings are reported again when --state is given.
 
 Configuration (JSON, --config): {
   "env_files":   ["/opt/stacks/*/.env", "/etc/*.env"],   # KEY=VALUE files; keys that look secret are kept
@@ -22,7 +23,7 @@ Configuration (JSON, --config): {
   "ignore_names": ["EXAMPLE_KEY"]
 }
 """
-import argparse, glob, hashlib, json, os, re, secrets as rnd, sys, time
+import argparse, glob, hashlib, json, math, os, re, secrets as rnd, sys, time
 
 SECRET_NAME = re.compile(r"(?i)(KEY|TOKEN|SECRET|PASS|PASSWD|PASSWORD|PWD|CREDENTIAL|AUTH|DSN|COOKIE|SALT|PRIVATE)")
 NOT_SECRET_NAME = re.compile(r"(?i)(_ID|CLIENTID|_USER|USERNAME|_NAME|_URL|_URI|_HOST|_PORT|_FILE|_PATH|_DIR)$")   # identifiers, not secrets
@@ -53,14 +54,22 @@ def load_config(path):
     return cfg
 
 
+MISSING = []                   # configured sources that matched nothing or could not be read; filled by collect_values
+
+
 def collect_values(cfg):
     """{value: name} for every secret-looking value in the configured files. Values never leave this process."""
     found = {}
+    MISSING.clear()
     for pattern in cfg["env_files"]:
-        for f in sorted(glob.glob(os.path.expanduser(pattern), recursive=True)):
+        files = sorted(glob.glob(os.path.expanduser(pattern), recursive=True))
+        if not files:
+            MISSING.append(f"{pattern} (no match)")
+        for f in files:
             try:
                 lines = read_text(f).splitlines()
-            except OSError:
+            except OSError as e:
+                MISSING.append(f"{f} ({type(e).__name__})")
                 continue
             for line in lines:
                 m = re.match(r"\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$", line)
@@ -71,10 +80,14 @@ def collect_values(cfg):
                 if len(v) >= cfg["min_length"] and not NOT_A_VALUE.match(v):
                     found.setdefault(v, f"{f}:{m.group(1)}")
     for pattern in cfg["value_files"]:
-        for f in sorted(glob.glob(os.path.expanduser(pattern))):
+        files = sorted(glob.glob(os.path.expanduser(pattern)))
+        if not files:
+            MISSING.append(f"{pattern} (no match)")
+        for f in files:
             try:
                 v = read_text(f).strip()
-            except OSError:
+            except OSError as e:
+                MISSING.append(f"{f} ({type(e).__name__})")
                 continue
             if len(v) >= cfg["min_length"] and "\n" not in v:
                 found.setdefault(v, f)
@@ -95,7 +108,14 @@ def scan(cfg):
             n = text.count(v)
             if n:
                 hits.append({"secret": name, "transcript": t, "occurrences": n})
-    return {"mode": "scan", "secrets_checked": len(values), "transcripts_checked": len(list(transcripts(cfg))), "leaks": hits}
+    return {"mode": "scan", "secrets_checked": len(values), "transcripts_checked": len(list(transcripts(cfg))),
+            "missing_sources": list(MISSING), "leaks": hits}
+
+
+def entropy_bits(v):
+    """Rough upper bound: length x log2(size of the character classes used)."""
+    pool = sum(n for rx, n in ((r"[a-z]", 26), (r"[A-Z]", 26), (r"[0-9]", 10), (r"[^A-Za-z0-9]", 32)) if re.search(rx, v))
+    return len(v) * math.log2(max(pool, 2))
 
 
 def fingerprint(salt, value):
@@ -104,15 +124,17 @@ def fingerprint(salt, value):
 
 def export(cfg, out):
     values = collect_values(cfg)
+    strong = {v: n for v, n in values.items() if entropy_bits(v) >= cfg.get("min_entropy_bits", 80)}
     salt = rnd.token_hex(16)
     fp = {"created": time.strftime("%Y-%m-%dT%H:%M:%S"), "salt": salt, "min_length": cfg["min_length"],
-          "fingerprints": {fingerprint(salt, v): name for v, name in values.items()}}
+          "fingerprints": {fingerprint(salt, v): name for v, name in strong.items()}}
     old = os.umask(0o077)
     try:
         write_json(out, fp, 1)
     finally:
         os.umask(old)
-    return {"mode": "export", "secrets_exported": len(values), "file": out}
+    return {"mode": "export", "secrets_exported": len(strong), "secrets_server_only": len(values) - len(strong),
+            "missing_sources": list(MISSING), "file": out}
 
 
 def candidates(text, min_length):
@@ -179,6 +201,8 @@ def main():
             r = export(cfg, a.out or "leak-check-fingerprints.json")
         else:
             r = scan_fingerprints(cfg, a.fingerprints)
+        if r.get("missing_sources"):
+            print("WARNING sources not checked: " + "; ".join(r["missing_sources"]), file=sys.stderr)
         if a.state and "leaks" in r:
             r = only_new(r, a.state)
         if a.report:

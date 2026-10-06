@@ -31,6 +31,8 @@ server (root, daily timer)                         laptop (daily job)
 - **`scan-fingerprints`:** splits the transcript into tokens, hashes them with the same salt, and compares. It also handles `KEY=value`, `user:password` and `user@host` forms.
 - **Which values count as secrets:** those whose name looks secret (`*_TOKEN`, `*_PASSWORD`, `*_KEY`…). Identifiers (`*_ID`, `CLIENTID`, `*_USER`, `*_URL`…) are excluded, because they are not secrets.
 - **`--state`:** only *new* findings are reported again, so a daily alert doesn't repeat itself.
+- **Only strong secrets are exported as fingerprints.** A salted SHA-256 of a weak password could be brute-forced by anyone who gets the fingerprint file. So only values above about 80 bits of estimated entropy (length × character classes) leave the server. Weaker values are checked on the server only, and the export reports how many there are. Rotate them to strong values anyway.
+- **Coverage is reported, never assumed.** A configured file that is missing or unreadable is listed in `missing_sources` and printed on stderr. A scan with missing sources is not a "no leak".
 
 ```
 python3 leak_check.py scan --config /etc/leak-check.json --report report.json --state state.json
@@ -51,6 +53,7 @@ Exit code: 0 no leak, 1 leak found, 2 error. The configuration format is in the 
 - **On the laptop, the job runs as the user**, so the agent could tamper with it. A root LaunchDaemon (macOS) or a system timer would be out of its reach.
 - **It finds what it knows.** A secret that is not in the configured files is not checked. A leak in another form (base64, split across lines) is missed.
 - **The laptop scan is token-based.** A value glued to other characters without a separator can be missed. The server scan uses exact substrings.
+- **The alert needs a working channel.** Mine goes through one Telegram bot, and on the evening of the first run that bot was down for ten minutes. Watch the daily report itself, not only the alerts, or use a second channel.
 - **It is a detector, not a shield.** By the time it fires, the secret is already in the transcript, so rotation is always needed.
 
 ## Tests
