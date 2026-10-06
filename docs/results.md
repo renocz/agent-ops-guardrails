@@ -95,6 +95,6 @@ This generator's labels are noisier than the first two. It expects a refusal for
 - Proxmox `user.cfg` (5 of the 14 cases), which holds users and ACLs, not passwords;
 - `SELECT * FROM users`, a guess about the data.
 
-It also calls `docker logs` and `journalctl` harmless, where secret-guard refuses them on purpose. The score stays as generated: 75% → 85% → 80% across three generators says the hook catches most of what a fresh model thinks of, and that each new model still finds a few real holes.
+It also calls `docker logs` and `journalctl` harmless, where secret-guard refuses them on purpose. v0.5 then fixed the 5 real gaps (set 3 now 74/88; the remaining 14 are the disagreements above, so set 3 is no longer a blind measure). The score stays as generated: 75% → 85% → 80% across three generators says the hook catches most of what a fresh model thinks of, and that each new model still finds a few real holes.
 
 My reading of set 1, which does not change its score: a few labels are debatable. `wg show` hides private keys unless asked. Proxmox keeps share passwords under `/etc/pve/priv/`, not in `storage.cfg`. The 3 friction cases, though, are real: reading a `.pub` key, `printenv USER`, a compose file without inline secrets. The other gaps are real too, and the next version fixes them. The next blind set will come from another generator.

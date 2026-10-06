@@ -108,7 +108,8 @@ RISKY = [
      r"|\baws\s+configure\s+(export-credentials|get\s+\S*(secret|key|token))|\baws\s+sts\s+(get-session-token|assume-role)\b"
      r"|\bgcloud\s+auth\s+(print-access-token|print-identity-token)\b|\bdocker\s+login\b.*\s-p\s", "CLI that prints a token"),
     (r"\brestic\b.*\s(dump|cat)\b|\bborg\s+extract\b.*--stdout|\bkopia\s+(show|content\s+show)\b", "backup contents"),
-    (r"\btailscale\s+debug\s+(local-creds|prefs)\b|\bpveum\s+(user\s+)?token\s+add\b|\bpvesh\s+create\s+/access/users/\S+/token"
+    (r"\bredis-cli\b.*\s(get|getdel|getex|mget|hget|hgetall|hmget|hvals|config\s+get)\s", "Redis values"),
+    (r"\btailscale\s+debug\s+(local-creds|prefs|authkey)\b|\bqm\s+cloudinit\s+dump\b|\bpveum\s+(user\s+)?token\s+add\b|\bpvesh\s+create\s+/access/users/\S+/token"
      r"|\bdocker\s+swarm\s+join-token\b|\bkubeadm\s+token\s+create\b|\bgh\s+auth\s+token\b", "command that prints a new or local secret"),
     (r"(?i)\bselect\b[^;\n]{0,200}?(?<!length\()(?<!count\()\b\w*(api_?key|password|passwd|secret|token)\w*\b[^;\n]{0,200}?\bfrom\b",
      "SQL selecting secret columns"),
@@ -148,7 +149,7 @@ LITERAL_SECRET = (r"\b(AKIA|ASIA)[0-9A-Z]{16}\b"
                   r"|\btskey-[A-Za-z0-9]+-[A-Za-z0-9-]{10,}")             # Tailscale auth and API keys
 
 # A password written literally after the option or in the URL that carries it. "$VAR", "$(…)" and file: are fine.
-VALUE = r"""['"]?(?![$'"\\]|file:)"""                       # "$VAR", \$VAR (nested quoting), file: are not values
+VALUE = r"""['"]?(?![$'"\\<@/]|file:)"""      # "$VAR", \$VAR (nested quoting), <placeholder>, @file, /path, file: are not values
 CLEAR_CREDENTIAL = (r"\b(?:curl|wget|http|https|xh)\b.*\s(?:-u|--user|--proxy-user|-U)(?:\s+|=)?['\"]?(?:\$\{?\w+\}?|[^\s:'\"$]+):"
                     + VALUE + r"[^\s'\"]+"
                     r"|\b(?:mysql|mariadb|mysqldump|mysqladmin)\b.*\s(?:-p|--password=)" + VALUE + r"[^\s'\"-][^\s'\"]*"
@@ -156,8 +157,9 @@ CLEAR_CREDENTIAL = (r"\b(?:curl|wget|http|https|xh)\b.*\s(?:-u|--user|--proxy-us
                     r"|--auth-?key(?:\s+|=)" + VALUE + r"[^\s'\"]{8,}"
                     r"|\b[a-z][a-z0-9+.-]*://[^\s/:@$'\"]+:" + VALUE + r"[^\s/@'\"]+@"
                     r"|\b(?:PGPASSWORD|MYSQL_PWD|SSHPASS|REDISCLI_AUTH)=" + VALUE + r"[^\s'\"]+"
-                    r"|(?:^|[\s;&|(])[A-Z0-9_]*(?:PASSWORD|PASSWD|_PASS|SECRET|TOKEN|API_?KEY|ACCESS_KEY)=" + VALUE + r"(?!\d+\b)[^\s'\"]{4,}"
+                    r"|(?:^|[\s;&|('\"])[A-Z0-9_]*(?:PASSWORD|PASSWD|_PASS|SECRET|TOKEN|API_?KEY|ACCESS_KEY)=" + VALUE + r"(?!\d+\b)[^\s'\"]{4,}"
                     r"|\bredis-cli\b.*\s(?:-a|--pass)\s+" + VALUE + r"[^\s'\"]+"
+                    r"|\s--(?:password|passwd|pass|secret|token|api-?key|auth-token)(?:=|\s+)" + VALUE + r"[^\s'\"-][^\s'\"]{3,}"
                     r"|(?i:-H\s*['\"]?[\w-]*(?:authorization|api-?key|token|secret)[\w-]*\s*:\s*(?:bearer\s+|basic\s+|token\s+)?)"
                     + VALUE + r"(?!(?i:bearer|basic|token)\b)[^\s'\"]{6,}")
 

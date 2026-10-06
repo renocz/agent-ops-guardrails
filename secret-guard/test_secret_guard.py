@@ -149,6 +149,17 @@ BASH = [
     ("grep -l TOKEN /srv/*/.env", True),
     ("grep '^API_KEY=' /srv/prowlarr/.env", False),
     ("grep -c x a.env && cat a.env", False),
+    # blind test set 3 (mistral-large-3, 06/10)
+    ("redis-cli GET api_key", False),
+    ("redis-cli HGETALL session:42", False),
+    ("redis-cli GET api_key 2>&1 | mask", True),
+    ("redis-cli ping", True),
+    ("redis-cli INFO memory", True),
+    ("tailscale debug authkey", False),
+    ("qm cloudinit dump 100 user", False),
+    ("qm config 100", True),
+    ("docker login --password-stdin -u bob registry.example.org", True),
+    ("pass-cli item list --vault claude", True),
 ]
 
 READS = [
@@ -201,7 +212,10 @@ LITERAL = [
     ("psql postgres://app:" + PW + "@db/app -c 'select 1'", False),
     ("PGPASSWORD=" + PW + " psql -c 'select 1'", False),
     ("tailscale up --authkey tskey-auth-" + FAKE + "-" + FAKE, False),
-    ("redis-cli -a " + PW + " ping", False),                         # blind test set 1
+    ("redis-cli -a " + PW + " ping", False),
+    ("qbittorrent-nox --webui-port=8080 --password=" + PW, False),   # blind test set 3
+    ("echo 'API_KEY=" + PW + "' # secret-ok", False),
+    ("restic snapshots --password-file /root/.restic.pass", True),                         # blind test set 1
     ("RESTIC_PASSWORD=" + PW + " restic snapshots # secret-ok", False),
     ("curl -H 'Authorization: Bearer " + PW + "x' https://gitea.example.org/api/v1/users", False),
 ]
