@@ -168,7 +168,10 @@ BASH = [
     ("borg key export /srv/repo", False),
     ("borg list /srv/repo", True),
     ("git log -p -- .env", False),
-    ("git log --oneline -- .env", False),
+    ("git log --oneline -- .env", True),                       # fourth audit: prints commit titles, no value
+    ("git diff .env.example", True),                           # template, no value
+    ("git show HEAD~3:.env", False),
+    ("git diff HEAD~1 -- .env", False),
     ("git log --oneline -- src/app.py", True),
     ("nmcli -s connection show home", False),
     ("nmcli connection show", True),

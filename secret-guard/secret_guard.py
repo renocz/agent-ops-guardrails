@@ -43,7 +43,7 @@ READERS = (r"cat|tac|nl|less|more|head|tail|grep|egrep|rg|sed|awk|cut|sort|uniq|
 
 # Paths that usually hold secrets. Used by the Bash rule below (reader + path) and, anchored, for Read/Grep.
 SECRET_PATHS = [
-    r"\.env\b", r"\.env\.",                                  # .env, .env.local, app.env
+    r"\.env\b(?!\.(example|sample|template|dist)\b)", r"\.env\.(?!(example|sample|template|dist)\b)",   # .env, .env.local, app.env; not templates
     r"config\.(xml|ya?ml|json|toml|ini|cfg)\b",              # app configs (*arr config.xml, config.toml…)
     r"settings\.(json|ini|toml|cfg)\b",
     r"compose\.ya?ml\b",                                     # docker compose files often inline secrets
@@ -115,8 +115,10 @@ RISKY = [
     (r"\bborg\s+key\s+export\b|\brestic\s+key\s+(list|add)\b.*--json|\bgpg\b.*--export-secret-keys?\b",
      "backup or encryption keys"),
     (r"\bnmcli\b.*(\s-s\b|--show-secrets)|\bwpa_cli\b.*\bget_network\b.*\bpsk\b", "Wi-Fi / VPN secrets"),
-    (r"\bgit\b.*\b(log|show|diff|blame|grep)\b.*(-p\b|--patch|\s-S|\s-G|--follow)?.*(\.env\b|secrets?\.(ya?ml|json)|credentials)",
-     "secret file in git history"),
+    # a secret file's content from git history: diff/show/blame/grep always print content, log only with -p/--patch.
+    # Template files (.env.example, .sample, .template) hold no values.
+    (r"\bgit\b(?=.*(\.env\b(?!\.(example|sample|template|dist))|secrets?\.(ya?ml|json)|credentials))"
+     r"(?=.*\b(diff|show|blame|grep)\b|.*\blog\b.*(\s-p\b|--patch|\s-u\b))", "secret file in git history"),
     (r"\btailscale\s+debug\s+(local-creds|prefs|authkey)\b|\bqm\s+cloudinit\s+dump\b|\bpveum\s+(user\s+)?token\s+add\b|\bpvesh\s+create\s+/access/users/\S+/token"
      r"|\bdocker\s+swarm\s+join-token\b|\bkubeadm\s+token\s+create\b|\bgh\s+auth\s+token\b", "command that prints a new or local secret"),
     (r"(?i)\bselect\b[^;\n]{0,200}?(?<!length\()(?<!count\()\b\w*(api_?key|password|passwd|secret|token)\w*\b[^;\n]{0,200}?\bfrom\b",

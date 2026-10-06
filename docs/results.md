@@ -4,7 +4,8 @@
 
 | Component | Measure | Value | Date | How independent |
 |---|---|---|---|---|
-| leak-check | Real secrets found in real transcripts (49 secrets, 41 transcripts, 2 machines) | **3 leaks** (2 still valid, rotated) | 06/10 | High: exact values, no model involved |
+| leak-check | Real secrets found in real transcripts, v1 (49 values, 41 transcripts) | **3 leaks** (2 still valid, rotated) | 06/10 | High for what it checks, but v1 found 1 of 5 planted secrets |
+| leak-check | Same, v2: JSON decoded, URL passwords, private keys, canary 5/5 (98 values, 82 files) | **+1 leak**: an SSH private key (rotated) | 06/10 | High for what it checks; a floor, not a total |
 | secret-guard | Agreement with a blind set from gemini-3.1-pro (60 cases) | 75% | 06/10 | Good: another vendor, never seen before the score |
 | secret-guard | Same, gpt-6.1-sol (60 cases) | 85% | 06/10 | Good |
 | secret-guard | Same, mistral-large-3 (88 cases; noisier labels) | 80% | 06/10 | Good, but labels disputed in places |
@@ -14,7 +15,7 @@
 | council | Backtest on 3 real past mistakes | 2 of 3 caught; 3 of 3 with full context | 29/09 | Medium: the agent picked the cases |
 | council | Runs where the cross-review step added a point or a correction | 27 of 28 runs; 16% of synthesis points; 15 wrong claims added | 06/10 | Medium: judged by a model |
 
-Blind-set scores measure **agreement with another model's labels**, so they say how much of what a fresh model thinks of is covered. They don't count leaks. leak-check counts leaks.
+Blind-set scores measure **agreement with another model's labels**, so they say how much of what a fresh model thinks of is covered. They don't count leaks. leak-check counts leaks, but only the ones it can see. Its inventory (what was checked) is the denominator, not the total of secrets in existence.
 
 About 20 runs, roughly $3 in total, and four members from four vendors. Each run is logged with two questions:
 - did it find a real problem the agent had missed?

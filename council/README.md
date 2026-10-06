@@ -40,7 +40,7 @@ Step 2 costs 4 of the 9 calls of a run. It was measured on 28 saved reports (06/
 | Wrong claims of an independent review that a cross-review corrected | 57 |
 | Wrong claims introduced by a cross-review, rejected by the chair | 15 |
 
-So it stays on. It finds about one point in six, mostly corrections and things all members missed. It also adds about one wrong claim every two runs, which the chair has caught so far.
+Note that step 2 **never changes the verdict**: the verdict is computed from the step 1 votes. It only enriches the report the human reads. So the question is whether that richer report is worth 4 calls, and on these numbers it is. So it stays on. It finds about one point in six, mostly corrections and things all members missed. It also adds about one wrong claim every two runs, which the chair has caught so far.
 
 Limits: the judge is a model, and some "cross-only" points are procedural reminders of little value. To save the calls, set `"cross_review": false` in the config.
 
