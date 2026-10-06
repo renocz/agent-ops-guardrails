@@ -22,6 +22,8 @@ jobs:
         run: cd council && python -m unittest -v test_council.py
       - name: secret-guard tests (hook + mask filter)
         run: cd secret-guard && python -m unittest -v test_secret_guard.py
+      - name: go-gate tests (classifier + hook flow)
+        run: cd go-gate && python -m unittest -v test_go_gate.py
 
   hook-gym:
     # External benchmark for Claude Code hooks (https://pypi.org/project/hook-gym/).

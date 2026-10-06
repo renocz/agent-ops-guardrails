@@ -21,7 +21,7 @@ flowchart LR
     C -->|"APPROVE<br/>(+ isolated alerts)"| G{"👤 Human GO?"}
     P -->|"routine change"| G
     G -->|"no"| P
-    G -->|"yes"| S["📸 snapshot gate<br/>host takes a snapshot<br/>(agent can't roll back)"]
+    G -->|"yes: plan + scope approved<br/>(enforced by go-gate)"| S["📸 snapshot gate<br/>host takes a snapshot<br/>(agent can't roll back)"]
     S --> E["⚙️ Execute + verify<br/>with evidence"]
     E --> D["📚 Document<br/>(change record)"]
     SG["🔐 secret-guard<br/>every command and file read"] -.->|"watches"| A
@@ -32,7 +32,8 @@ flowchart LR
 |---|---|---|
 | Confidently wrong plan: a wrong diagnosis, an inconsistent threshold, a missed risk | [**council/**](council/): four models from different vendors review the written plan. The verdict is computed from their votes, and a lone blocking objection is never merged away. | ✅ code |
 | Prints a secret by accident (`docker inspect`, `crontab -l`, an error message carrying a URL with credentials) | [**secret-guard/**](secret-guard/): a hook refuses commands that may print secrets unless their whole output goes through a masking filter, and blocks direct reads of secret files. | ✅ code |
-| Acts without being asked, or skips checks | **Change procedure**: analyse → plan → explicit GO → dry-run → execute → verify with evidence → document. | 📄 [described](docs/method.md#1-the-change-procedure) |
+| Acts without being asked, or beyond what was approved | [**go-gate/**](go-gate/): a hook that allows changes only inside a plan the human approved with a GO (scope + expiry). Reads stay free. Observe mode by default. | 🧪 code, experimental |
+| Skips checks | **Change procedure**: analyse → plan → explicit GO → dry-run → execute → verify with evidence → document. | 📄 [described](docs/method.md#1-the-change-procedure) |
 | Breaks something during an upgrade | **Snapshot gate**: the agent *requests* a snapshot; the host takes it. The agent can never roll back or delete. | 📄 [described](docs/method.md#3-an-on-call-agent-that-cannot-undo) |
 | Has too much power when working alone | **On-call restrictions**: a least-privilege role, and denial tests that are harmless if they unexpectedly succeed. | 📄 [described](docs/method.md#4-denial-tests-must-be-harmless) |
 
@@ -43,6 +44,7 @@ flowchart LR
 - **Questions?** The [FAQ](docs/faq.md) covers: why several LLMs, cost, use with other agents, false positives, limits, adapting it to your setup.
 - **Review plans with several models:** [council/README.md](council/README.md). Works with any OpenAI-compatible endpoint.
 - **Stop secret leaks in Claude Code:** [secret-guard/README.md](secret-guard/README.md). Two files to install, plus a settings snippet.
+- **Make the GO mechanical (experimental):** [go-gate/README.md](go-gate/README.md). Start with `simulate.py` on your own history, then a week in observe mode.
 - **The whole method and the incidents behind it:** [docs/method.md](docs/method.md).
 
 ## Results, honestly
@@ -54,6 +56,8 @@ flowchart LR
 - its false alarms, and what it can't see (UX).
 
 The [secret-guard README](secret-guard/README.md#limits) explains how the hook was checked: about 5,700 real commands replayed through the old and new versions before deployment. That is a comparison between versions, not proof that nothing leaks.
+
+go-gate's [simulation](go-gate/README.md#our-numbers-simulation-before-installing) on 11,000 past tool calls: only about 45% of the agent's changes came within 2 h of a short explicit approval (a measure of proximity in time, not a replay). That is the reason the gate exists, and the reason it starts in observe mode.
 
 These are one person's field notes, not a benchmark.
 

@@ -131,13 +131,30 @@ The run did find 2 real gaps: an AWS key and a GitHub token typed in clear insid
 ### Why refuse a secret in the command, even through the mask?
 The mask only filters the output. A value typed into the command is already in the transcript, the shell history and the process list. Put it in a mode-600 file or the keychain, read it into a variable, or pass a file (`curl -H @file`). If it was already typed, rotate it.
 
+## go-gate
+
+### Isn't a GO in the instructions enough?
+No. Instructions are advice the model weighs against everything else in its context. My agent had the rule for weeks and still acted outside what I had approved twice: a real rollback during a "should be refused" test, and a deployment when I had said "prepare locally". A hook runs every time, whatever the model thinks.
+
+### Will it get in my way?
+It will at first, which is why it starts in observe mode. On my history, about half of the agent's changes had no recent explicit approval: work in resumed sessions, browser clicks I had asked for, docs after a change. The gate works when proposals end with a `Scope:` line and you answer with one word. Run `go-gate/simulate.py` on your own history to see your number before installing.
+
+### Why does "ok mais…" not count as a GO?
+Because an approval with a reservation is not an approval of the plan as written. "GO but only prepare" would otherwise unlock the deployment too. The gate ignores it and logs it, and the agent asks again.
+
+### Can the agent switch it off?
+If it runs as your user, yes: it can edit its own settings. go-gate guards against mistakes, not against an agent trying to get around it. For integrity, install the hooks through Claude Code managed settings (root-owned files). Where the agent is root, rely on least privilege instead.
+
+### Does a pasted alert count as a GO?
+Not any more. It used to on my setup, and the council objected: the alert is external text, and with that rule it triggered a change whose plan I hadn't read. Now an alert makes the agent propose a plan, and I answer GO.
+
 ## Method and the other pillars
 
 ### Why not just give the agent less power?
 Both are needed. Least privilege limits the damage, and the guardrails catch mistakes inside what is allowed. My on-call agent has deliberately fewer rights than the main one. See [method.md §3](method.md#3-an-on-call-agent-that-cannot-undo).
 
 ### Where is the code for the change procedure and the snapshot gate?
-They are described in [method.md](method.md) for now. The code is coming. Each piece goes through the same steps before it is published: tests, secret and identity scans, a council review, and a human GO.
+The GO part of the change procedure is now enforced by [go-gate](../go-gate/) (experimental). The rest of the procedure and the snapshot gate are described in [method.md](method.md) for now. The code is coming. Each piece goes through the same steps before it is published: tests, secret and identity scans, a council review, and a human GO.
 
 ### Can I contribute?
 Issues and suggestions are welcome, especially bypasses of secret-guard and false alarms in council. This is a personal project, so replies may be slow.
