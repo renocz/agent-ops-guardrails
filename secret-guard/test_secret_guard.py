@@ -114,7 +114,29 @@ READS = [
 ]
 
 
+FAKE = "Ab1" * 12
+LITERAL = [
+    # a secret typed into the command: refused, even masked or with the marker
+    ("AWS_ACCESS_KEY_ID=AKIA" + "ABCDEFGHIJKLMNOP aws s3 ls", False),
+    ("curl -H 'Authorization: token ghp_" + FAKE + "' https://api.github.com/user", False),
+    ("curl -H 'x-api-key: sk-ant-" + FAKE + "' https://api.example.com 2>&1 | mask", False),
+    ("echo github_pat_" + FAKE + " # secret-ok", False),
+    ("curl -H 'Authorization: Bearer eyJ" + FAKE + ".eyJ" + FAKE + ".sig' https://x", False),
+    ("printf '-----BEGIN OPENSSH PRIVATE KEY-----' > k", False),
+    # prefixes alone, searches and references stay allowed
+    ("grep -c ghp_ notes.md", True),
+    ("grep -rl 'sk-ant-' . 2>&1 | mask", True),
+    ("git log --grep AKIA --oneline", True),
+    ('curl -H "Authorization: Bearer $TOKEN" https://x', True),
+]
+
+
 class SecretGuard(unittest.TestCase):
+    def test_literal_secret_in_command(self):
+        for cmd, allowed in LITERAL:
+            with self.subTest(cmd=cmd[:40]):
+                self.assertEqual(sg.check_bash(cmd) is None, allowed)
+
     def test_bash(self):
         for cmd, allowed in BASH:
             with self.subTest(cmd=cmd):

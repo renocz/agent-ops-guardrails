@@ -116,10 +116,20 @@ No. It only sees the commands and file reads the agent asks for, before they run
 - other tools or MCP servers that return data.
 
 ### How was it tested?
-- Unit tests cover about 90 cases, including every bypass found during the reviews and an external evaluation.
-- CI runs an independent harness, [Hook Gym](https://pypi.org/project/hook-gym/), on its credentials cases and on this repo's homelab cases.
+- Unit tests cover about 100 cases, including every bypass found during the reviews and an external evaluation.
+- CI runs an independent harness, [Hook Gym](https://pypi.org/project/hook-gym/), on its credentials and secrets cases and on this repo's homelab cases. Scores: 12/12 on ours, 6/11 on theirs.
 - Before each deployment, it was replayed against about 5,700 real past commands to compare its decisions with the previous version.
 - It went through 5 multi-model council reviews, which found 7 real gaps. An external evaluation then found 13 more common homelab cases it missed (`printenv VAR`, WireGuard keys, `acme.json`, logs…). All of them are fixed and tested.
+
+### Why only 6/11 on Hook Gym's own cases?
+Because the two tools disagree on 5 cases, on purpose:
+- 3 cases where Hook Gym expects a command to be allowed and secret-guard refuses it: `cat .env`, `printenv`, and a `curl` with an API key in clear. Printing secrets into the transcript is exactly what secret-guard is for.
+- 2 cases about writing a `.env` file with the Write tool. secret-guard only watches what the agent can print; writing a config file is a normal task.
+
+The run did find 2 real gaps: an AWS key and a GitHub token typed in clear inside a command. They are now refused. Replaying our own history showed why it matters: before the rule, 18 past commands held real secrets in clear, which then sat in the local transcripts.
+
+### Why refuse a secret in the command, even through the mask?
+The mask only filters the output. A value typed into the command is already in the transcript, the shell history and the process list. Put it in a mode-600 file or the keychain, read it into a variable, or pass a file (`curl -H @file`). If it was already typed, rotate it.
 
 ## Method and the other pillars
 

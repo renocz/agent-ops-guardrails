@@ -31,6 +31,7 @@ On a refusal, the agent gets the reason and the fix (`2>&1 | mask`). In practice
 | Tool | Behaviour |
 |---|---|
 | **Bash** | A command that may print secrets is refused unless its whole output, **stdout and stderr**, goes through `mask`. |
+| **Bash, literal secrets** | A command that contains a full secret value in clear (AWS key, GitHub/GitLab/Slack/Hugging Face/OpenAI/Anthropic-style token, Google API key, JWT, PEM private key) is refused, masked or not, `# secret-ok` or not: the mask cannot help once the value is in the command itself. Prefixes alone (`grep -c ghp_`) and variables (`$TOKEN`) are fine. |
 | **Read / Grep / NotebookRead** | Direct reads (and Grep in any mode) of files that typically hold secrets (`.env`, private keys, `.netrc`, cloud credentials, compose files…) are refused. A Grep in content mode whose pattern hunts for secrets (`password`, `token`, `api_key`…) is refused too; listing matching files is allowed. |
 
 For Bash, commands such as `crontab -l`, `docker inspect`, `env` / `printenv VAR` / `echo $API_KEY`, `wg showconf`, logs (`docker logs`, `journalctl`), git network commands, or reading a config file (`.env`, `config.toml`, `acme.json`, WireGuard configs…) count as risky. To pass, the command must look like this:
@@ -83,7 +84,11 @@ Failure behaviour:
 - a broken or invalid extras file, or any internal error, makes the hook **refuse** (fail closed);
 - input that is not a valid tool call (not JSON) is let through, because there is nothing to judge.
 
-Run the tests with `python3 -m unittest test_secret_guard.py`. CI also runs it against [Hook Gym](https://pypi.org/project/hook-gym/), an independent test harness for Claude Code hooks. Two suites run there: its built-in *credentials* cases, and homelab cases from this repo (`ci/hook-gym-cases/`). Hook Gym also tests things secret-guard does not try to cover (destructive commands, git hygiene…), so only those two suites are reported. See the **Summary** of the latest [tests run](https://github.com/renocz/agent-ops-guardrails/actions/workflows/tests.yml).
+Run the tests with `python3 -m unittest test_secret_guard.py`. CI also runs it against [Hook Gym](https://pypi.org/project/hook-gym/), an independent test harness for Claude Code hooks. Two suites run there: its built-in *credentials* cases, and homelab cases from this repo (`ci/hook-gym-cases/`). Hook Gym also tests things secret-guard does not try to cover (destructive commands, git hygiene…), so only those two suites are reported.
+
+Latest score: **12/12** on the homelab cases, **6/11** on Hook Gym's *credentials* and *secrets* cases. The 5 differences are deliberate:
+- **Stricter on purpose (3):** Hook Gym expects `cat .env`, `printenv` and an API key in clear in a `curl` to be allowed (it would only warn). secret-guard refuses them: printing secrets is exactly what it is for.
+- **Out of scope (2):** writing a `.env` file with the Write tool. secret-guard watches what the agent can *print*, not what it writes; writing a config file is a legitimate task. See the **Summary** of the latest [tests run](https://github.com/renocz/agent-ops-guardrails/actions/workflows/tests.yml).
 
 ## Limits
 

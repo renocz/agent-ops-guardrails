@@ -118,6 +118,14 @@ RISKY += _load_extra()
 SENSITIVE_FILES = "(" + "|".join(SECRET_PATHS) + r"|(^|/)id_(rsa|ed25519|ecdsa)[^/]*$)"   # .pub files are allowed below
 
 
+# A secret typed into the command itself: the mask cannot help, the command is already in the transcript and the process list.
+# Full-length values only, so `grep ghp_` or `grep -c AKIA` stay allowed. No marker opt-out.
+LITERAL_SECRET = (r"\b(AKIA|ASIA)[0-9A-Z]{16}\b"
+                  r"|\b(sk-(ant-|proj-)?|ghp_|gho_|ghs_|ghu_|github_pat_|glpat-|xox[abpr]-|hf_)[A-Za-z0-9_-]{20,}"
+                  r"|\bAIza[0-9A-Za-z_-]{35}"
+                  r"|\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\."
+                  r"|-----BEGIN [A-Z ]*PRIVATE KEY-----")
+
 # Grep in content mode with a pattern that hunts for secrets prints the matching lines: refused.
 SECRET_HUNT = r"(pass(word|wd)?|secret|token|api[_-]?key|private[_-]?key|credential|bearer|auth)"
 
@@ -262,6 +270,10 @@ def risky_labels(text):
 
 def check_bash(cmd):
     """Return a refusal reason, or None if the command may run."""
+    if re.search(LITERAL_SECRET, cmd):
+        return ("secret-guard: this command contains a secret value in clear (API key, token, JWT or private key). "
+                "Do not type secrets into commands: read them from a mode-600 file or the keychain into a variable, "
+                "or pass a file (`-H @file`). If the value is already exposed, rotate it.")
     stmts, comment, balanced = scan(cmd)
     if comment and re.fullmatch(r"#\s*" + MARKER + r"\s*", comment.strip()):
         return None                                   # opt-out: a real shell comment, last thing in the command
