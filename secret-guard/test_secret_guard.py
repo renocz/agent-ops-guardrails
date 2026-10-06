@@ -116,6 +116,9 @@ BASH = [
     ("docker run -u 1000:1000 alpine id", True),
     ("tailscale up --authkey=file:/etc/ts.key", True),
     ("PGPASSWORD=$(cat /root/.pgpw) psql -c 'select 1' 2>&1 | mask", True),
+    ("gpg -dq backup.tar.gpg", False),                          # council review of v0.2.1: grouped options
+    ("gpg --list-secret-keys --keyid-format long", True),
+    ("age -d -i key.txt secrets.age", False),
 ]
 
 READS = [
@@ -158,6 +161,7 @@ LITERAL = [
     # passwords typed in clear (external audit of v0.2, 06/10): refused, even masked
     ("curl -u " + ADMIN_PW + " https://example.org 2>&1 | mask", False),
     ("wget --user=bob:" + PW + " https://example.org", False),
+    ('curl -u "$API_USER:' + PW + '" https://example.org', False),   # user is a variable, password literal
     ("mysql -p" + PW + " -e 'select 1'", False),
     ("sshpass -p " + PW + " ssh host", False),
     ("psql postgres://app:" + PW + "@db/app -c 'select 1'", False),

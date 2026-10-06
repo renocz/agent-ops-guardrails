@@ -288,6 +288,9 @@ def classify_stage(stage, depth, bodies=()):
         sub = next((x for x in args if not x.startswith("-")), "")
         return ("read", "") if sub in SYSTEMCTL_READ else ("change", f"systemctl {sub}")
     if c == "curl" or c == "wget":
+        if any(re.search(ACTION_URL, a, re.I) for a in args if "://" in a or a.startswith("/")) or \
+                any(re.search(r"(?i)x-http-method(-override)?\s*:\s*(post|put|patch|delete)", a) for a in args):
+            return "change", f"{c} to an action URL"
         if c == "wget":
             if any(x.startswith(("--post-data", "--post-file", "--method", "--body-data", "--body-file")) for x in args):
                 return "change", "wget with body"
@@ -387,6 +390,11 @@ PY_ACTS = re.compile(r"open\([^)]*['\"][wax+]|\.write(_text|_bytes)?\(|\bos\.(re
 def python_kind(code):
     m = PY_ACTS.search(code)
     return ("change", f"python {m.group(0)[:20]}") if m else ("read", "")
+
+
+ACTION_URL = (r"/(webhook|webhook-test|hooks?|trigger|triggers|run|exec|execute|restart|reboot|shutdown|start|stop|"
+              r"delete|remove|purge|reset|refresh|scan|rescan|sync|import|deploy|update|upgrade|install|command)(/|\?|$)"
+              r"|[?&](action|cmd|command|op|do|method)=")      # a GET to these can change state
 
 
 CURL_VALUE_OPTS = set("XdFTocuHeAbxmwrKEyYzCPQD")  # curl short options that take a value
@@ -736,8 +744,10 @@ def on_prompt(data, cfg, state):
     state["active"] = dict(pending, approved_at=now, expires=now + ttl * 60)
     state.pop("pending", None)
     log({"event": "approved", "plan": pending.get("id"), "ttl_min": ttl})
-    return (f"go-gate: the user's GO approved plan '{pending.get('id') or '-'}' for {ttl} min. "
-            f"Targets: {', '.join(pending.get('targets') or []) or 'any'}. Actions: {', '.join(pending.get('actions') or [])}. "
+    plain = lambda xs: ", ".join(re.sub(r"[^\w./:@~+-]", "", x)[:60] for x in xs[:12]) + (" …" if len(xs) > 12 else "")
+    pid = re.sub(r"[^\w.-]", "", pending.get("id") or "-")[:40]
+    return (f"go-gate: the user's GO approved plan '{pid}' for {ttl} min. "
+            f"Targets: {plain(pending.get('targets') or []) or 'any'}. Actions: {plain(pending.get('actions') or [])}. "
             "Start your reply by restating this in one line, so the user sees what the GO covers.")
 
 

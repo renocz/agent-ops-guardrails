@@ -116,7 +116,7 @@ No. It only sees the commands and file reads the agent asks for, before they run
 - other tools or MCP servers that return data.
 
 ### How was it tested?
-- Unit tests cover 128 cases, including every bypass found during the reviews and two external evaluations.
+- Unit tests cover 132 cases, including every bypass found during the reviews and two external evaluations.
 - CI runs an independent harness, [Hook Gym](https://pypi.org/project/hook-gym/), on its credentials and secrets cases and on this repo's homelab cases. Scores: 12/12 on ours, 6/11 on theirs. **Read 12/12 with care:** our homelab cases are the probes of the first external evaluation, written after the fixes. A second evaluation of v0.2 found 15 more holes on probes it had never shown us (`~/.pgpass`, `/etc/pve/priv/`, `rclone config show`, `sops -d`, `curl -u admin:pw`, `mysql -pS3cret`, Tailscale keys…). They are fixed now, which proves the point: a pattern list closes one layer per audit. A score on cases we never saw is the number that matters; see [results](results.md).
 - Before each deployment, it was replayed against about 5,700 real past commands to compare its decisions with the previous version.
 - It went through 5 multi-model council reviews, which found 7 real gaps. An external evaluation then found 13 more common homelab cases it missed (`printenv VAR`, WireGuard keys, `acme.json`, logs…). All of them are fixed and tested.

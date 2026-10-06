@@ -98,7 +98,7 @@ RISKY = [
     (r"\bpass\s+show\b|\b(pass-cli|gopass)\b.*\b(show|get|view)\b|\bop\s+(read|item\s+get)\b|\bbw\s+get\b"
      r"|(?<!\$\()\bsecurity\s+find-[a-z-]*password\b.*\s-[wg]\b", "password manager"),
     (r"\brclone\s+config\s+(show|dump)\b", "rclone config (holds tokens and passwords)"),
-    (r"\bsops\b.*\s(-d|--decrypt)\b|\bsops\s+decrypt\b|\bage\b.*\s(-d|--decrypt)\b|\bgpg\b.*\s(-d|--decrypt)\b"
+    (r"\b(sops|age|gpg2?|rage)\b.*\s(-[a-zA-Z]*d[a-zA-Z]*|--decrypt)\b|\bsops\s+decrypt\b"
      r"|\bansible-vault\s+(view|decrypt)\b", "decrypted secrets"),
     (r"\bkubectl\b.*\bget\s+secrets?\b|\bvault\s+(kv\s+get|read)\b|\baws\s+(secretsmanager|ssm)\s+get", "secret store"),
 ]
@@ -136,7 +136,8 @@ LITERAL_SECRET = (r"\b(AKIA|ASIA)[0-9A-Z]{16}\b"
 
 # A password written literally after the option or in the URL that carries it. "$VAR", "$(…)" and file: are fine.
 VALUE = r"""['"]?(?![$'"]|file:)"""
-CLEAR_CREDENTIAL = (r"\b(?:curl|wget|http|https|xh)\b.*\s(?:-u|--user|--proxy-user|-U)(?:\s+|=)?" + VALUE + r"[^\s:'\"$]+:" + VALUE + r"[^\s'\"]+"
+CLEAR_CREDENTIAL = (r"\b(?:curl|wget|http|https|xh)\b.*\s(?:-u|--user|--proxy-user|-U)(?:\s+|=)?['\"]?(?:\$\{?\w+\}?|[^\s:'\"$]+):"
+                    + VALUE + r"[^\s'\"]+"
                     r"|\b(?:mysql|mariadb|mysqldump|mysqladmin)\b.*\s(?:-p|--password=)" + VALUE + r"[^\s'\"-][^\s'\"]*"
                     r"|\bsshpass\s+-p\s*" + VALUE + r"[^\s'\"]+"
                     r"|--auth-?key(?:\s+|=)" + VALUE + r"[^\s'\"]{8,}"

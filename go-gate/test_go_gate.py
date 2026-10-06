@@ -119,6 +119,13 @@ BASH = [
     ("curl --stderr /tmp/e https://example.com", "read"),
     ("ss -K dst 10.0.0.1", "change"),
     ("ss -tlnp", "read"),
+    # council review of v0.2.1 (06/10): a GET can change state
+    ("curl -s https://n8n.example.org/webhook/abc123", "change"),
+    ("curl -s 'https://app.example.org/api?action=delete&id=4'", "change"),
+    ("curl -s -H 'X-HTTP-Method-Override: DELETE' https://app.example.org/api/x", "change"),
+    ("wget -qO- https://app.example.org/api/v1/restart", "change"),
+    ("curl -s https://app.example.org/api/v1/status", "read"),
+    ("curl -sI https://example.com/hooks.html", "read"),
     # opaque
     ("bash deploy.sh", "opaque"),
     ("eval \"$CMD\"", "opaque"),
@@ -210,6 +217,14 @@ class Hook(unittest.TestCase):
         self.assertIn("deploy", run_hook.context)
         self.prompt(telegram("merci"))
         self.assertIsNone(run_hook.context)
+
+    def test_restated_plan_is_bounded(self):
+        many = ",".join(f"t{i}" for i in range(30))
+        self.propose(f"Scope: id=p1 ; targets={many},a`b$(c) ; actions=deploy ; ttl=30")
+        self.prompt(telegram("GO"))
+        self.assertIn(" …", run_hook.context)
+        self.assertNotIn("`", run_hook.context)
+        self.assertNotIn("$(", run_hook.context)
 
     def test_missing_dependency_fails_closed_in_block_mode(self):
         alone = tempfile.mkdtemp()                       # go_gate.py without secret_guard.py anywhere

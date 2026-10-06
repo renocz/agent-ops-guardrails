@@ -103,7 +103,7 @@ Then add to `~/.claude/settings.json`:
 Then tell the agent the convention, in CLAUDE.md or its system prompt: *"End every proposal of a change with a `Scope:` line; act only after my GO."*
 
 - **Observe mode** never blocks. It logs to `~/.claude/go-gate/log.jsonl`: `allowed`, `would-block`, `approved`, `plan-proposed`, `go-with-reservation-ignored`…
-- **Switching to block mode:** decide the criterion before you start, or observe mode becomes permanent. Mine: after 7 days, every would-block is explained (a real slip, a missing scope line, or a classifier false positive), and false positives are under 5% of the changes. Fix your habits or the classifier, then set `"mode": "block"`.
+- **Switching to block mode:** decide the criterion before you start, or observe mode becomes permanent. Mine: after 7 days, every would-block is classified by hand as a real slip, a missing scope line, a GO the grammar rejected, or a classifier false positive (a read judged a change), and classifier false positives are under 5% of all would-blocks. The other classes are fixed by habit (scope lines, plain GOs), not by the classifier. Fix your habits or the classifier, then set `"mode": "block"`.
 - **The log** holds the category, a short reason and the command words only (`docker compose`, `git push`, `curl`), never their arguments: anything with `=`, `:`, `@` or quotes becomes `<…>`. It never holds message text. Secrets the agent might read on screen are secret-guard's job, not go-gate's.
 
 ## Limits
@@ -118,9 +118,9 @@ Then tell the agent the convention, in CLAUDE.md or its system prompt: *"End eve
 - **Scratch paths are judged by their text.** `/tmp/x` counts as scratch even if it is a symlink to somewhere else; `..` is normalised, links are not followed.
 - **Targets ignore where a command runs.** `ssh host`, `pct exec` and `docker exec` are unwrapped and the inner command is judged, but a target named in the plan is not tied to a host or container.
 - **Inline Python is matched by pattern.** Aliased imports (`from os import remove as r`) can slip through; planned for v0.3.
-- **A GET is a read.** `curl https://host/api?action=delete` or a `X-HTTP-Method-Override: DELETE` header can change something; the classifier sees a GET and lets it through.
+- **A GET is a read, unless the URL looks like an action.** Webhooks, triggers and action words in the path (`/webhook/`, `/restart`, `/delete`…), `?action=`-style parameters and `X-HTTP-Method-Override` count as changes. Any other GET with a side effect still passes as a read.
 - **SQL is not parsed.** A `SELECT` that calls a function with side effects counts as whatever the client command is judged to be.
 
 ## Tests
 
-`python3 -m unittest test_go_gate.py`. It runs 106 Bash classifier cases (including every bypass found in review), the other tools, and the whole hook flow: GOs that must be ignored, scope, expiry, revocation, fail-closed, and no secrets in the log.
+`python3 -m unittest test_go_gate.py`. It runs 112 Bash classifier cases (including every bypass found in review), the other tools, and the whole hook flow: GOs that must be ignored, scope, expiry, revocation, fail-closed, and no secrets in the log.
