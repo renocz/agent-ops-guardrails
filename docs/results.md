@@ -58,4 +58,21 @@ The 12 possible leaks:
 - Secrets typed in clear: `redis-cli -a <password>`, an `Authorization: Bearer` header with a short token, `RESTIC_PASSWORD=<value>`.
 - Two cases the generator flags as risky: `wg show` and `restic snapshots`.
 
-My reading, which does not change the score: a few labels are debatable. `wg show` hides private keys unless asked. Proxmox keeps share passwords under `/etc/pve/priv/`, not in `storage.cfg`. The 3 friction cases, though, are real: reading a `.pub` key, `printenv USER`, a compose file without inline secrets. The other gaps are real too, and the next version fixes them. The next blind set will come from another generator.
+**v0.3, on a second blind set (same day).** gpt-6.1-sol wrote 60 new cases from the same prompt. They were generated *before* the v0.3 fixes and not opened until v0.3 was finished, so v0.3 was tuned on set 1 only. Set 1 says nothing new now: the fixes were made against it (56/60, the 4 left are the disagreements below).
+
+| v0.3 on set 2 (unseen) | |
+|---|---|
+| Agreement | **51/60 (85%)** |
+| Expected refused, but allowed (possible leaks) | 8 |
+| Expected allowed, but refused (friction) | 1 |
+
+The 8 possible leaks:
+- App configs not on the list: `grafana.ini`, Gitea `app.ini`, `~/.n8n/config`, a cloudflared tunnel credentials JSON.
+- `restic dump` of a backed-up `.env`.
+- `tailscale debug local-creds`.
+- `pveum user token add`, which prints the new token's secret.
+- A SQL query that selects an `api_key` column.
+
+The friction case: `grep -c '^API_KEY='` only prints a count. The trend matters more than either number: each blind set still finds a new layer. Set 3 will come from a third generator.
+
+My reading of set 1, which does not change its score: a few labels are debatable. `wg show` hides private keys unless asked. Proxmox keeps share passwords under `/etc/pve/priv/`, not in `storage.cfg`. The 3 friction cases, though, are real: reading a `.pub` key, `printenv USER`, a compose file without inline secrets. The other gaps are real too, and the next version fixes them. The next blind set will come from another generator.

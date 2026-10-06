@@ -119,6 +119,20 @@ BASH = [
     ("gpg -dq backup.tar.gpg", False),                          # council review of v0.2.1: grouped options
     ("gpg --list-secret-keys --keyid-format long", True),
     ("age -d -i key.txt secrets.age", False),
+    # blind test set 1 (gemini-3.1-pro, 06/10)
+    ("gh auth token", False),
+    ("gh auth status", True),
+    ("aws configure export-credentials", False),
+    ("cloudflared tunnel token my-tunnel", False),
+    ("cloudflared tunnel list", True),
+    ("psql -U postgres -c 'SELECT usename, passwd FROM pg_shadow;'", False),
+    ("pct exec 101 -- cat /etc/shadow", False),
+    ("printenv USER", True),
+    ("printenv DB_HOST", False),
+    ("cat ~/.ssh/id_ed25519.pub", True),
+    ("cat ~/.ssh/id_ed25519", False),
+    ("mariadb -uroot -p\\$MARIADB_ROOT_PASSWORD romm -e 'select 1' 2>&1 | mask", True),   # variable in nested quoting
+    ("PASSWORD_MIN_LENGTH=12 ./setup.sh", True),
 ]
 
 READS = [
@@ -139,6 +153,8 @@ READS = [
     ({"file_path": "/root/.pgpass"}, False),
     ({"file_path": "/root/.my.cnf"}, False),
     ({"file_path": "/etc/pve/storage.cfg"}, True),
+    ({"file_path": "/var/www/nextcloud/config/config.php"}, False),     # blind test set 1
+    ({"file_path": "/etc/shadow"}, False),
 ]
 
 
@@ -167,6 +183,9 @@ LITERAL = [
     ("psql postgres://app:" + PW + "@db/app -c 'select 1'", False),
     ("PGPASSWORD=" + PW + " psql -c 'select 1'", False),
     ("tailscale up --authkey tskey-auth-" + FAKE + "-" + FAKE, False),
+    ("redis-cli -a " + PW + " ping", False),                         # blind test set 1
+    ("RESTIC_PASSWORD=" + PW + " restic snapshots # secret-ok", False),
+    ("curl -H 'Authorization: Bearer " + PW + "x' https://gitea.example.org/api/v1/users", False),
 ]
 
 

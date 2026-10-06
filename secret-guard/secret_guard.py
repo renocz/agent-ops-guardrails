@@ -51,7 +51,8 @@ SECRET_PATHS = [
     r"secrets?\.(ya?ml|json|env|txt)\b", r"/secrets?/",
     r"\.git/config\b",
     r"/etc/[a-z-]*\.env\b",
-    r"\.pem\b", r"\.key\b", r"id_(rsa|ed25519|ecdsa)\b",     # private keys
+    r"\.pem\b", r"\.key\b", r"id_(rsa|ed25519|ecdsa)\b(?!\.pub)",  # private keys (not the .pub)
+    r"(^|/)(wp-)?config\.php\b", r"(^|/)(g)?shadow-?\b",       # PHP app configs, password hashes
     r"\.kube/config\b", r"\.aws/", r"\.docker/config",
     r"wireguard/", r"\bwg\d*\.conf\b",                       # WireGuard: holds the private key
     r"acme\.json\b",                                         # Traefik: certificate private keys
@@ -73,7 +74,8 @@ RISKY = [
     # the whole environment…
     (r"(^|[\s;&|(])(env|printenv|set|export\s+-p|declare\s+-x)\s*($|[;&|)])", "environment variables"),
     # …or one variable: printenv X, or echo/printf of a secret-looking variable
-    (r"\bprintenv\s+\w", "environment variable"),
+    (r"\bprintenv\s+(?!(USER|HOME|PATH|SHELL|LANG|LC_\w+|TERM|HOSTNAME|TMPDIR|EDITOR|PWD|OLDPWD|LOGNAME|TZ)\b)\w",
+     "environment variable"),
     (r"\b(echo|printf)\b.*\$\{?" + SECRET_VAR, "secret-looking variable"),
     # process listings show command lines (tokens passed as arguments) and environments
     (r"/proc/[^\s]*/(environ|cmdline)|\bps\s+(aux|-ef|e)\b", "process command lines / environment"),
@@ -100,6 +102,10 @@ RISKY = [
     (r"\brclone\s+config\s+(show|dump)\b", "rclone config (holds tokens and passwords)"),
     (r"\b(sops|age|gpg2?|rage)\b.*\s(-[a-zA-Z]*d[a-zA-Z]*|--decrypt)\b|\bsops\s+decrypt\b"
      r"|\bansible-vault\s+(view|decrypt)\b", "decrypted secrets"),
+    (r"\bgh\s+auth\s+(token|status\b.*(-t|--show-token))\b|\bcloudflared\s+tunnel\s+token\b"
+     r"|\baws\s+configure\s+(export-credentials|get\s+\S*(secret|key|token))|\baws\s+sts\s+(get-session-token|assume-role)\b"
+     r"|\bgcloud\s+auth\s+(print-access-token|print-identity-token)\b|\bdocker\s+login\b.*\s-p\s", "CLI that prints a token"),
+    (r"(?i)\bpg_(shadow|authid)\b|\brolpassword\b|\bmysql\.user\b|\bauthentication_string\b", "password hashes (SQL)"),
     (r"\bkubectl\b.*\bget\s+secrets?\b|\bvault\s+(kv\s+get|read)\b|\baws\s+(secretsmanager|ssm)\s+get", "secret store"),
 ]
 
@@ -135,14 +141,18 @@ LITERAL_SECRET = (r"\b(AKIA|ASIA)[0-9A-Z]{16}\b"
                   r"|\btskey-[A-Za-z0-9]+-[A-Za-z0-9-]{10,}")             # Tailscale auth and API keys
 
 # A password written literally after the option or in the URL that carries it. "$VAR", "$(…)" and file: are fine.
-VALUE = r"""['"]?(?![$'"]|file:)"""
+VALUE = r"""['"]?(?![$'"\\]|file:)"""                       # "$VAR", \$VAR (nested quoting), file: are not values
 CLEAR_CREDENTIAL = (r"\b(?:curl|wget|http|https|xh)\b.*\s(?:-u|--user|--proxy-user|-U)(?:\s+|=)?['\"]?(?:\$\{?\w+\}?|[^\s:'\"$]+):"
                     + VALUE + r"[^\s'\"]+"
                     r"|\b(?:mysql|mariadb|mysqldump|mysqladmin)\b.*\s(?:-p|--password=)" + VALUE + r"[^\s'\"-][^\s'\"]*"
                     r"|\bsshpass\s+-p\s*" + VALUE + r"[^\s'\"]+"
                     r"|--auth-?key(?:\s+|=)" + VALUE + r"[^\s'\"]{8,}"
                     r"|\b[a-z][a-z0-9+.-]*://[^\s/:@$'\"]+:" + VALUE + r"[^\s/@'\"]+@"
-                    r"|\b(?:PGPASSWORD|MYSQL_PWD|SSHPASS|REDISCLI_AUTH)=" + VALUE + r"[^\s'\"]+")
+                    r"|\b(?:PGPASSWORD|MYSQL_PWD|SSHPASS|REDISCLI_AUTH)=" + VALUE + r"[^\s'\"]+"
+                    r"|(?:^|[\s;&|(])[A-Z0-9_]*(?:PASSWORD|PASSWD|_PASS|SECRET|TOKEN|API_?KEY|ACCESS_KEY)=" + VALUE + r"(?!\d+\b)[^\s'\"]{4,}"
+                    r"|\bredis-cli\b.*\s(?:-a|--pass)\s+" + VALUE + r"[^\s'\"]+"
+                    r"|(?i:-H\s*['\"]?[\w-]*(?:authorization|api-?key|token|secret)[\w-]*\s*:\s*(?:bearer\s+|basic\s+|token\s+)?)"
+                    + VALUE + r"(?!(?i:bearer|basic|token)\b)[^\s'\"]{6,}")
 
 # Grep in content mode with a pattern that hunts for secrets prints the matching lines: refused.
 SECRET_HUNT = r"(pass(word|wd)?|secret|token|api[_-]?key|private[_-]?key|credential|bearer|auth)"
