@@ -97,6 +97,25 @@ BASH = [
     ("git ls-files | wc -l; scp a host:/tmp; ssh host 'pct push 1 a b'", True),   # git + push in unrelated commands
     ("python3 -c 'import secrets; print(secrets.token_hex(4))'", True),
     ("cat .env | grep -v x 2>&1 | mask", False),
+    # external audit of v0.2 (06/10): secret files and tools that print decrypted secrets
+    ("cat ~/.pgpass", False),
+    ("cat ~/.my.cnf", False),
+    ("cat .envrc", False),
+    ("cat /etc/pve/priv/token.cfg", False),
+    ("cat ~/.config/gh/hosts.yml", False),
+    ("rclone config show", False),
+    ("rclone config show 2>&1 | mask", True),
+    ("rclone config redacted", True),
+    ("sops -d secrets.enc.yaml", False),
+    ("sops -e -i secrets.enc.yaml", True),
+    ("ansible-vault view vault.yml", False),
+    ("ls /etc/pve/priv", True),
+    ('curl -u "$USER:$PASS" https://x', True),
+    ("mysql -h db -P 3306 -u root -p", True),
+    ('mysql -p"$PW" -e "select 1"', True),
+    ("docker run -u 1000:1000 alpine id", True),
+    ("tailscale up --authkey=file:/etc/ts.key", True),
+    ("PGPASSWORD=$(cat /root/.pgpw) psql -c 'select 1' 2>&1 | mask", True),
 ]
 
 READS = [
@@ -111,10 +130,18 @@ READS = [
     ({"file_path": "/srv/app/config.toml"}, False),
     ({"file_path": "/srv/app/settings.ini"}, False),
     ({"file_path": "/srv/app/pyproject.toml"}, True),
+    ({"file_path": "/srv/app/.envrc"}, False),                 # external audit of v0.2 (06/10)
+    ({"file_path": "/etc/pve/priv/token.cfg"}, False),
+    ({"file_path": "/root/.config/gh/hosts.yml"}, False),
+    ({"file_path": "/root/.pgpass"}, False),
+    ({"file_path": "/root/.my.cnf"}, False),
+    ({"file_path": "/etc/pve/storage.cfg"}, True),
 ]
 
 
 FAKE = "Ab1" * 12
+PW = "hunter" + "22"
+ADMIN_PW = "admin" + ":" + PW
 LITERAL = [
     # a secret typed into the command: refused, even masked or with the marker
     ("AWS_ACCESS_KEY_ID=AKIA" + "ABCDEFGHIJKLMNOP aws s3 ls", False),
@@ -127,7 +154,15 @@ LITERAL = [
     ("grep -c ghp_ notes.md", True),
     ("grep -rl 'sk-ant-' . 2>&1 | mask", True),
     ("git log --grep AKIA --oneline", True),
-    ('curl -H "Authorization: Bearer $TOKEN" https://x', True),
+    ('curl -H "Authorization: Bearer $TOKEN" https://x', True),   # gitleaks:allow (a variable, not a value)
+    # passwords typed in clear (external audit of v0.2, 06/10): refused, even masked
+    ("curl -u " + ADMIN_PW + " https://example.org 2>&1 | mask", False),
+    ("wget --user=bob:" + PW + " https://example.org", False),
+    ("mysql -p" + PW + " -e 'select 1'", False),
+    ("sshpass -p " + PW + " ssh host", False),
+    ("psql postgres://app:" + PW + "@db/app -c 'select 1'", False),
+    ("PGPASSWORD=" + PW + " psql -c 'select 1'", False),
+    ("tailscale up --authkey tskey-auth-" + FAKE + "-" + FAKE, False),
 ]
 
 

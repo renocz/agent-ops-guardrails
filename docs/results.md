@@ -39,3 +39,23 @@ It changed the decision 7 times.
 - **Silent members.** One model returned empty answers in 6 runs: its hidden reasoning used up the whole token budget. A larger budget alone did not help. Medium reasoning effort fixed it. The quorum rule kept those runs honest (`INCOMPLETE`, or 3 voters).
 - **It is a problem finder, not a judge.** It rarely approves outright, even on good plans. What matters is the content of the BLOCKING list, not the label.
 - **What didn't work:** an LLM-judge scoring service scored every proposal, good or bad, between 0.03 and 0.06, so it was removed.
+
+## secret-guard on a blind test set (06/10/2026)
+
+Scores on cases written after the fixes go up by construction. So another model (gemini-3.1-pro) wrote 60 cases from a description of the stack and of the hook's contract only, without seeing the code or the tests. Its expected answers are used as they are. The score was published **before** any fix. Cases, prompt and scorer: [`secret-guard/blind/`](../secret-guard/blind/), [`blind_eval.py`](../secret-guard/blind_eval.py).
+
+| | |
+|---|---|
+| Agreement | **45/60 (75%)** |
+| Expected refused, but allowed (possible leaks) | 12 |
+| Expected allowed, but refused (friction) | 3 |
+
+The 12 possible leaks:
+- Files: Nextcloud `config.php`, Proxmox `storage.cfg`.
+- Database queries: `SELECT * FROM pg_shadow`.
+- `cat /etc/shadow` inside a container.
+- CLIs that print a token: `gh auth token`, `aws configure export-credentials`, `cloudflared tunnel token`.
+- Secrets typed in clear: `redis-cli -a <password>`, an `Authorization: Bearer` header with a short token, `RESTIC_PASSWORD=<value>`.
+- Two cases the generator flags as risky: `wg show` and `restic snapshots`.
+
+My reading, which does not change the score: a few labels are debatable. `wg show` hides private keys unless asked. Proxmox keeps share passwords under `/etc/pve/priv/`, not in `storage.cfg`. The 3 friction cases, though, are real: reading a `.pub` key, `printenv USER`, a compose file without inline secrets. The other gaps are real too, and the next version fixes them. The next blind set will come from another generator.

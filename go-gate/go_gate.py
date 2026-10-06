@@ -33,7 +33,10 @@ def _load_splitter():
     raise ImportError("go-gate needs secret_guard.py (from secret-guard/) next to it")
 
 
-scan, pipeline_stages = _load_splitter()
+try:
+    scan, pipeline_stages = _load_splitter()
+except Exception:            # loaded again in main(), where a failure is caught: refused in block mode, not let through
+    scan = pipeline_stages = None
 
 SCRATCH = (r"^(/tmp/|/private/tmp/|/var/folders/|/dev/null$|/dev/stdout$|/dev/stderr$)")
 
@@ -733,6 +736,9 @@ def on_prompt(data, cfg, state):
     state["active"] = dict(pending, approved_at=now, expires=now + ttl * 60)
     state.pop("pending", None)
     log({"event": "approved", "plan": pending.get("id"), "ttl_min": ttl})
+    return (f"go-gate: the user's GO approved plan '{pending.get('id') or '-'}' for {ttl} min. "
+            f"Targets: {', '.join(pending.get('targets') or []) or 'any'}. Actions: {', '.join(pending.get('actions') or [])}. "
+            "Start your reply by restating this in one line, so the user sees what the GO covers.")
 
 
 def remember_scope(text, state):
@@ -786,6 +792,9 @@ def main():
     try:
         data = json.load(sys.stdin)
         cfg = load_config()
+        global scan, pipeline_stages
+        if pipeline_stages is None:
+            scan, pipeline_stages = _load_splitter()
         os.makedirs(GATE_DIR, mode=0o700, exist_ok=True)
         lock = open(os.path.join(GATE_DIR, ".lock"), "w")
         fcntl.flock(lock, fcntl.LOCK_EX)                      # one read-modify-write at a time
@@ -796,15 +805,17 @@ def main():
         state = sessions.setdefault(str(data.get("session_id") or "no-session"), {})
         state["touched"] = time.time()
         ev = data.get("hook_event_name")
-        decision, why = "allow", ""
+        decision, why, context = "allow", "", None
         if ev == "UserPromptSubmit":
-            on_prompt(data, cfg, state)
+            context = on_prompt(data, cfg, state)
         elif ev == "Stop":
             if remember_scope(data.get("last_assistant_message", ""), state):
                 log({"event": "plan-proposed", "plan": state["pending"].get("id")})
         elif ev == "PreToolUse":
             decision, why = on_pre_tool(data, cfg, state)
         save_state(full)
+        if context:
+            print(json.dumps({"hookSpecificOutput": {"hookEventName": "UserPromptSubmit", "additionalContext": context}}))
         if decision == "deny":
             print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
                                                      "permissionDecisionReason": why}}))

@@ -116,8 +116,8 @@ No. It only sees the commands and file reads the agent asks for, before they run
 - other tools or MCP servers that return data.
 
 ### How was it tested?
-- Unit tests cover about 100 cases, including every bypass found during the reviews and an external evaluation.
-- CI runs an independent harness, [Hook Gym](https://pypi.org/project/hook-gym/), on its credentials and secrets cases and on this repo's homelab cases. Scores: 12/12 on ours, 6/11 on theirs.
+- Unit tests cover 128 cases, including every bypass found during the reviews and two external evaluations.
+- CI runs an independent harness, [Hook Gym](https://pypi.org/project/hook-gym/), on its credentials and secrets cases and on this repo's homelab cases. Scores: 12/12 on ours, 6/11 on theirs. **Read 12/12 with care:** our homelab cases are the probes of the first external evaluation, written after the fixes. A second evaluation of v0.2 found 15 more holes on probes it had never shown us (`~/.pgpass`, `/etc/pve/priv/`, `rclone config show`, `sops -d`, `curl -u admin:pw`, `mysql -pS3cret`, Tailscale keys…). They are fixed now, which proves the point: a pattern list closes one layer per audit. A score on cases we never saw is the number that matters; see [results](results.md).
 - Before each deployment, it was replayed against about 5,700 real past commands to compare its decisions with the previous version.
 - It went through 5 multi-model council reviews, which found 7 real gaps. An external evaluation then found 13 more common homelab cases it missed (`printenv VAR`, WireGuard keys, `acme.json`, logs…). All of them are fixed and tested.
 
@@ -135,6 +135,9 @@ The mask only filters the output. A value typed into the command is already in t
 
 ### Isn't a GO in the instructions enough?
 No. Instructions are advice the model weighs against everything else in its context. My agent had the rule for weeks and still acted outside what I had approved twice: a real rollback during a "should be refused" test, and a deployment when I had said "prepare locally". A hook runs every time, whatever the model thinks.
+
+### Why not Claude Code's plan mode or its permission prompts?
+They answer a different question. Permission prompts approve one call at a time, at the keyboard; they don't work when I approve from my phone, and after a hundred prompts the answer becomes a reflex. Plan mode approves a plan once, then lets every call through with no limit on what or for how long. go-gate ties a GO to a written scope (targets, kinds of action) and a duration, works from a chat channel such as Telegram, and treats any call it can't classify as a change. Use them together: permissions for what the agent may never do, go-gate for what it may do once you said GO.
 
 ### Will it get in my way?
 It will at first, which is why it starts in observe mode. On my history, about half of the agent's changes had no recent explicit approval: work in resumed sessions, browser clicks I had asked for, docs after a change. The gate works when proposals end with a `Scope:` line and you answer with one word. Run `go-gate/simulate.py` on your own history to see your number before installing.

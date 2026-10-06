@@ -2,9 +2,11 @@
 
 A Claude Code hook that lets the agent **change** things only inside a plan the human approved with a GO. Reads stay free.
 
-> **Status: v0.2, experimental. Observe mode by default.** Run it in observe mode for a week on your own work before you switch on blocking. Our own numbers are below: blocking on day one would have refused about half of the agent's past changes.
+> **Status: v0.2.1, experimental. Observe mode by default.** Run it in observe mode for a week on your own work before you switch on blocking. Our own numbers are below: blocking on day one would have refused about half of the agent's past changes.
 
 ## Why
+
+**The number that made me build it:** replaying my agent's history, only **45%** of its 4,693 changes came within 2 hours of a short explicit approval from me ([details](#our-numbers-simulation-before-installing)). A written rule is not a constraint.
 
 "No change without an explicit GO" was a rule in my agent's instructions for weeks. Instructions are not enforcement. Twice the agent acted outside what I had approved:
 - **30/09:** a test that "should be refused" actually rolled back a container.
@@ -38,6 +40,7 @@ sequenceDiagram
    - `GO <id>` must name the pending plan.
    - `stop`, `annule` or `cancel` at the start of a message revokes the plan, and so does a message that is only `non` or `no`. "non non, continue" does not.
    - Only the owner counts: prompts typed in the terminal, and channel messages whose `user_id` is listed in `owner_ids`.
+   - When a GO activates a plan, the hook tells the agent what was approved (id, targets, actions, minutes) and asks it to restate that in one line. A one-word GO then comes back as a visible commitment, not a reflex.
 3. **Gate.** Before every tool call, the hook classifies it:
    - **read / talk:** always allowed. This covers `ls`, `cat … | mask`, `docker ps`, `git log`, `curl` GET, Read, Grep, and chat replies.
    - **change / opaque:** allowed only if the active plan is unexpired, lists the action's category, and, when targets are listed, one of them appears in the call.
@@ -100,7 +103,7 @@ Then add to `~/.claude/settings.json`:
 Then tell the agent the convention, in CLAUDE.md or its system prompt: *"End every proposal of a change with a `Scope:` line; act only after my GO."*
 
 - **Observe mode** never blocks. It logs to `~/.claude/go-gate/log.jsonl`: `allowed`, `would-block`, `approved`, `plan-proposed`, `go-with-reservation-ignored`…
-- **Switching to block mode:** after a week, read the would-blocks, fix your habits or the classifier, then set `"mode": "block"`.
+- **Switching to block mode:** decide the criterion before you start, or observe mode becomes permanent. Mine: after 7 days, every would-block is explained (a real slip, a missing scope line, or a classifier false positive), and false positives are under 5% of the changes. Fix your habits or the classifier, then set `"mode": "block"`.
 - **The log** holds the category, a short reason and the command words only (`docker compose`, `git push`, `curl`), never their arguments: anything with `=`, `:`, `@` or quotes becomes `<…>`. It never holds message text. Secrets the agent might read on screen are secret-guard's job, not go-gate's.
 
 ## Limits
@@ -115,6 +118,7 @@ Then tell the agent the convention, in CLAUDE.md or its system prompt: *"End eve
 - **Scratch paths are judged by their text.** `/tmp/x` counts as scratch even if it is a symlink to somewhere else; `..` is normalised, links are not followed.
 - **Targets ignore where a command runs.** `ssh host`, `pct exec` and `docker exec` are unwrapped and the inner command is judged, but a target named in the plan is not tied to a host or container.
 - **Inline Python is matched by pattern.** Aliased imports (`from os import remove as r`) can slip through; planned for v0.3.
+- **A GET is a read.** `curl https://host/api?action=delete` or a `X-HTTP-Method-Override: DELETE` header can change something; the classifier sees a GET and lets it through.
 - **SQL is not parsed.** A `SELECT` that calls a function with side effects counts as whatever the client command is judged to be.
 
 ## Tests

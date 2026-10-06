@@ -55,6 +55,10 @@ SECRET_PATHS = [
     r"\.kube/config\b", r"\.aws/", r"\.docker/config",
     r"wireguard/", r"\bwg\d*\.conf\b",                       # WireGuard: holds the private key
     r"acme\.json\b",                                         # Traefik: certificate private keys
+    r"\.envrc\b", r"\.pgpass\b", r"\.my\.cnf\b",              # direnv, PostgreSQL, MySQL client passwords
+    r"/pve/priv/", r"\bpriv/token\.cfg\b",                    # Proxmox: API token secrets, cluster keys
+    r"\bgh/hosts\.ya?ml\b", r"\.pypirc\b", r"\.npmrc\b",       # gh, PyPI and npm tokens
+    r"\.vault-token\b", r"tailscaled\.state\b", r"/age/keys\.txt\b", r"\.git-credentials\b",
 ]
 
 # Environment variable names that look secret.
@@ -93,6 +97,9 @@ RISKY = [
     # password managers and secret stores (not when the value is captured: X=$(security ...))
     (r"\bpass\s+show\b|\b(pass-cli|gopass)\b.*\b(show|get|view)\b|\bop\s+(read|item\s+get)\b|\bbw\s+get\b"
      r"|(?<!\$\()\bsecurity\s+find-[a-z-]*password\b.*\s-[wg]\b", "password manager"),
+    (r"\brclone\s+config\s+(show|dump)\b", "rclone config (holds tokens and passwords)"),
+    (r"\bsops\b.*\s(-d|--decrypt)\b|\bsops\s+decrypt\b|\bage\b.*\s(-d|--decrypt)\b|\bgpg\b.*\s(-d|--decrypt)\b"
+     r"|\bansible-vault\s+(view|decrypt)\b", "decrypted secrets"),
     (r"\bkubectl\b.*\bget\s+secrets?\b|\bvault\s+(kv\s+get|read)\b|\baws\s+(secretsmanager|ssm)\s+get", "secret store"),
 ]
 
@@ -124,7 +131,17 @@ LITERAL_SECRET = (r"\b(AKIA|ASIA)[0-9A-Z]{16}\b"
                   r"|\b(sk-(ant-|proj-)?|ghp_|gho_|ghs_|ghu_|github_pat_|glpat-|xox[abpr]-|hf_)[A-Za-z0-9_-]{20,}"
                   r"|\bAIza[0-9A-Za-z_-]{35}"
                   r"|\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\."
-                  r"|-----BEGIN [A-Z ]*PRIVATE KEY-----")
+                  r"|-----BEGIN [A-Z ]*PRIVATE KEY-----"
+                  r"|\btskey-[A-Za-z0-9]+-[A-Za-z0-9-]{10,}")             # Tailscale auth and API keys
+
+# A password written literally after the option or in the URL that carries it. "$VAR", "$(…)" and file: are fine.
+VALUE = r"""['"]?(?![$'"]|file:)"""
+CLEAR_CREDENTIAL = (r"\b(?:curl|wget|http|https|xh)\b.*\s(?:-u|--user|--proxy-user|-U)(?:\s+|=)?" + VALUE + r"[^\s:'\"$]+:" + VALUE + r"[^\s'\"]+"
+                    r"|\b(?:mysql|mariadb|mysqldump|mysqladmin)\b.*\s(?:-p|--password=)" + VALUE + r"[^\s'\"-][^\s'\"]*"
+                    r"|\bsshpass\s+-p\s*" + VALUE + r"[^\s'\"]+"
+                    r"|--auth-?key(?:\s+|=)" + VALUE + r"[^\s'\"]{8,}"
+                    r"|\b[a-z][a-z0-9+.-]*://[^\s/:@$'\"]+:" + VALUE + r"[^\s/@'\"]+@"
+                    r"|\b(?:PGPASSWORD|MYSQL_PWD|SSHPASS|REDISCLI_AUTH)=" + VALUE + r"[^\s'\"]+")
 
 # Grep in content mode with a pattern that hunts for secrets prints the matching lines: refused.
 SECRET_HUNT = r"(pass(word|wd)?|secret|token|api[_-]?key|private[_-]?key|credential|bearer|auth)"
@@ -270,8 +287,8 @@ def risky_labels(text):
 
 def check_bash(cmd):
     """Return a refusal reason, or None if the command may run."""
-    if re.search(LITERAL_SECRET, cmd):
-        return ("secret-guard: this command contains a secret value in clear (API key, token, JWT or private key). "
+    if re.search(LITERAL_SECRET, cmd) or re.search(CLEAR_CREDENTIAL, cmd):
+        return ("secret-guard: this command contains a secret value in clear (API key, token, JWT, private key or password). "
                 "Do not type secrets into commands: read them from a mode-600 file or the keychain into a variable, "
                 "or pass a file (`-H @file`). If the value is already exposed, rotate it.")
     stmts, comment, balanced = scan(cmd)

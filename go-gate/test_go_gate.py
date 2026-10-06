@@ -145,6 +145,7 @@ def run_hook(event, gate_dir):
     r = subprocess.run([sys.executable, os.path.join(HERE, "go_gate.py")], input=json.dumps(event),
                        capture_output=True, text=True, env=env)
     out = json.loads(r.stdout) if r.stdout.strip() else {}
+    run_hook.context = out.get("hookSpecificOutput", {}).get("additionalContext")
     return r.returncode, out.get("hookSpecificOutput", {}).get("permissionDecision", "allow")
 
 
@@ -200,6 +201,25 @@ class Hook(unittest.TestCase):
 
     def act(self, cmd="docker compose up -d web"):
         return run_hook({"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {"command": cmd}}, self.dir)[1]
+
+    def test_go_restates_the_approved_plan(self):
+        self.propose("Scope: id=p1 ; targets=web ; actions=deploy ; ttl=30")
+        self.prompt(telegram("GO"))
+        self.assertIn("p1", run_hook.context)
+        self.assertIn("web", run_hook.context)
+        self.assertIn("deploy", run_hook.context)
+        self.prompt(telegram("merci"))
+        self.assertIsNone(run_hook.context)
+
+    def test_missing_dependency_fails_closed_in_block_mode(self):
+        alone = tempfile.mkdtemp()                       # go_gate.py without secret_guard.py anywhere
+        src = rtext(os.path.join(HERE, "go_gate.py"))
+        src = src.replace('os.path.expanduser("~/.claude/hooks/secret-guard.py")', '"/nonexistent/secret-guard.py"')
+        wtext(os.path.join(alone, "go_gate.py"), src)
+        env = dict(os.environ, GO_GATE_DIR=self.dir)
+        ev = json.dumps({"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {"command": "rm -rf /opt/x"}})
+        r = subprocess.run([sys.executable, os.path.join(alone, "go_gate.py")], input=ev, capture_output=True, text=True, env=env)
+        self.assertEqual(r.returncode, 2)
 
     def test_reads_always_pass(self):
         self.assertEqual(self.act("docker ps -a"), "allow")
