@@ -1,3 +1,4 @@
 # Fake values on purpose: a case of the blind test set, written by another model and kept exactly as generated.
 secret-guard/blind/2026-10-06-gemini.json:curl-auth-header:356
 secret-guard/blind/2026-10-06-mistral.json:curl-auth-user:440
+secret-guard/blind/2026-10-06-claude.json:curl-auth-header:308

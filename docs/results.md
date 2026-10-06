@@ -95,6 +95,14 @@ This generator's labels are noisier than the first two. It expects a refusal for
 - Proxmox `user.cfg` (5 of the 14 cases), which holds users and ACLs, not passwords;
 - `SELECT * FROM users`, a guess about the data.
 
-It also calls `docker logs` and `journalctl` harmless, where secret-guard refuses them on purpose. v0.5 then fixed the 5 real gaps (set 3 now 74/88; the remaining 14 are the disagreements above, so set 3 is no longer a blind measure). The score stays as generated: 75% → 85% → 80% across three generators says the hook catches most of what a fresh model thinks of, and that each new model still finds a few real holes.
+It also calls `docker logs` and `journalctl` harmless, where secret-guard refuses them on purpose.
+
+v0.5 then fixed the 5 real gaps (set 3 now 74/88; the remaining 14 are the disagreements above, so set 3 is no longer a blind measure). The score stays as generated: 75% → 85% → 80% across three generators says the hook catches most of what a fresh model thinks of, and that each new model still finds a few real holes.
+
+**v0.5, on a fourth blind set (same evening).** claude-sonnet-5-5 wrote 57 cases. secret-guard scored **54/57 (95%)**: 1 possible leak, 2 friction cases.
+- The leak: `mask < /dev/null 2>&1 | cat`, which prints nothing.
+- The friction: `journalctl` and a compose file, both refused on purpose.
+
+So nothing real was found this time. **Read this one with care:** the generator is from the same family as the model that wrote secret-guard (Claude), so they likely share blind spots, and its cases were also the easiest of the four. It is the least independent of the four measures. The first three generators are the better evidence.
 
 My reading of set 1, which does not change its score: a few labels are debatable. `wg show` hides private keys unless asked. Proxmox keeps share passwords under `/etc/pve/priv/`, not in `storage.cfg`. The 3 friction cases, though, are real: reading a `.pub` key, `printenv USER`, a compose file without inline secrets. The other gaps are real too, and the next version fixes them. The next blind set will come from another generator.
