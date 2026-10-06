@@ -55,6 +55,7 @@ SECRET_PATHS = [
     r"(^|/)(wp-)?config\.php\b", r"(^|/)(g)?shadow-?\b",       # PHP app configs, password hashes
     r"grafana\.ini\b", r"(^|/)app\.ini\b", r"\.n8n/config\b",   # Grafana, Gitea, n8n (encryption key)
     r"cloudflared/[^\s/]*\.json\b", r"\.cloudflared/",          # tunnel credentials
+    r"\.nmconnection\b", r"system-connections/",                 # NetworkManager: Wi-Fi PSK, VPN secrets
     r"\.kube/config\b", r"\.aws/", r"\.docker/config",
     r"wireguard/", r"\bwg\d*\.conf\b",                       # WireGuard: holds the private key
     r"acme\.json\b",                                         # Traefik: certificate private keys
@@ -109,6 +110,13 @@ RISKY = [
      r"|\bgcloud\s+auth\s+(print-access-token|print-identity-token)\b|\bdocker\s+login\b.*\s-p\s", "CLI that prints a token"),
     (r"\brestic\b.*\s(dump|cat)\b|\bborg\s+extract\b.*--stdout|\bkopia\s+(show|content\s+show)\b", "backup contents"),
     (r"\bredis-cli\b.*\s(get|getdel|getex|mget|hget|hgetall|hmget|hvals|config\s+get)\s", "Redis values"),
+    (r"\bocc\b.*\bconfig:(system|app):get\b|\bocc\b.*\bconfig:list\b.*--private", "Nextcloud config values"),
+    (r"\bbw\s+(unlock|login)\b|\bbw\s+get\b", "password manager"),
+    (r"\bborg\s+key\s+export\b|\brestic\s+key\s+(list|add)\b.*--json|\bgpg\b.*--export-secret-keys?\b",
+     "backup or encryption keys"),
+    (r"\bnmcli\b.*(\s-s\b|--show-secrets)|\bwpa_cli\b.*\bget_network\b.*\bpsk\b", "Wi-Fi / VPN secrets"),
+    (r"\bgit\b.*\b(log|show|diff|blame|grep)\b.*(-p\b|--patch|\s-S|\s-G|--follow)?.*(\.env\b|secrets?\.(ya?ml|json)|credentials)",
+     "secret file in git history"),
     (r"\btailscale\s+debug\s+(local-creds|prefs|authkey)\b|\bqm\s+cloudinit\s+dump\b|\bpveum\s+(user\s+)?token\s+add\b|\bpvesh\s+create\s+/access/users/\S+/token"
      r"|\bdocker\s+swarm\s+join-token\b|\bkubeadm\s+token\s+create\b|\bgh\s+auth\s+token\b", "command that prints a new or local secret"),
     (r"(?i)\bselect\b[^;\n]{0,200}?(?<!length\()(?<!count\()\b\w*(api_?key|password|passwd|secret|token)\w*\b[^;\n]{0,200}?\bfrom\b",

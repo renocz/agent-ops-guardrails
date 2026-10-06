@@ -8,6 +8,8 @@ It is a ~250-line, standard-library Python script. The script itself is not the 
 
 > "LLM council" is not a new idea: see Karpathy's [llm-council](https://github.com/karpathy/llm-council) and its many forks. This is one narrow use of it: a review gate in front of an agent that can break things, with the boring details that made it work.
 
+> **Status: stable.** The hooks got most of the attention after 05/10, and the council's code has barely changed since. Its one open question has been measured: whether the cross-review step is worth its cost (see [below](#is-the-cross-review-step-worth-it)).
+
 ## How it works
 
 ```mermaid
@@ -26,6 +28,21 @@ flowchart TD
     F & I & OK & N --> Y["4 · Synthesis by a chair<br/>copies the verdict, never downgrades<br/>a lone BLOCKING point"]
     Y --> O["📄 Markdown report + JSON line<br/>for the agent"]
 ```
+
+### Is the cross-review step worth it?
+
+Step 2 costs 4 of the 9 calls of a run. It was measured on 28 saved reports (06/10/2026). A judge model (gemini-3.1-pro) took each point of the chair's synthesis and checked whether it already appeared in an independent review, or only in the cross-reviews.
+
+| | |
+|---|---|
+| Runs where step 2 added at least one point or correction | **27 of 28** |
+| Synthesis points found only in the cross-reviews | 83 of 526 (16%) |
+| Wrong claims of an independent review that a cross-review corrected | 57 |
+| Wrong claims introduced by a cross-review, rejected by the chair | 15 |
+
+So it stays on. It finds about one point in six, mostly corrections and things all members missed. It also adds about one wrong claim every two runs, which the chair has caught so far.
+
+Limits: the judge is a model, and some "cross-only" points are procedural reminders of little value. To save the calls, set `"cross_review": false` in the config.
 
 Each review lists its problems as `BLOCKING:`, `TO FIX:` or `MINOR:` and ends with `VERDICT: APPROVE` or `VERDICT: FIX`. A real `BLOCKING:` line counts as a FIX vote even if the member wrote APPROVE. An answer with no verdict line counts as absent, never as an approval.
 

@@ -8,6 +8,7 @@
     "claude-x"
   ],
   "chair": "gpt-x",
+  "cross_review": true,
   "language": "English",
   "context": "Context: a self-hosted homelab (hypervisor, containers, backups, VPN) run by an AI agent under the control of a demanding human. Rules: no change without explicit approval, dry-run first, never display a secret, everything is documented.",
   "reports_dir": "./council-reports",

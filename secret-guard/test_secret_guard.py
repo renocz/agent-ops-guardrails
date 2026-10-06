@@ -160,6 +160,19 @@ BASH = [
     ("qm config 100", True),
     ("docker login --password-stdin -u bob registry.example.org", True),
     ("pass-cli item list --vault claude", True),
+    # third external audit (06/10)
+    ("docker exec nc php occ config:system:get dbpassword", False),
+    ("docker exec nc php occ status", True),
+    ("bw unlock", False),
+    ("bw status", True),
+    ("borg key export /srv/repo", False),
+    ("borg list /srv/repo", True),
+    ("git log -p -- .env", False),
+    ("git log --oneline -- .env", False),
+    ("git log --oneline -- src/app.py", True),
+    ("nmcli -s connection show home", False),
+    ("nmcli connection show", True),
+    ("cat /etc/NetworkManager/system-connections/home.nmconnection", False),
 ]
 
 READS = [

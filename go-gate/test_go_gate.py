@@ -126,6 +126,11 @@ BASH = [
     ("wget -qO- https://app.example.org/api/v1/restart", "change"),
     ("curl -s https://app.example.org/api/v1/status", "read"),
     ("curl -sI https://example.com/hooks.html", "read"),
+    # third external audit (06/10): no false positives on ordinary reads
+    ("curl --unix-socket /var/run/docker.sock http://localhost/containers/json", "read"),
+    ("curl -s https://app.example.org/api/sync/status", "read"),
+    ("curl -s https://app.example.org/api/v1/restart", "change"),
+    ("curl -s https://app.example.org/hooks/abc/status", "change"),
     # opaque
     ("bash deploy.sh", "opaque"),
     ("eval \"$CMD\"", "opaque"),
@@ -153,6 +158,7 @@ def run_hook(event, gate_dir):
                        capture_output=True, text=True, env=env)
     out = json.loads(r.stdout) if r.stdout.strip() else {}
     run_hook.context = out.get("hookSpecificOutput", {}).get("additionalContext")
+    run_hook.notice = out.get("systemMessage")
     return r.returncode, out.get("hookSpecificOutput", {}).get("permissionDecision", "allow")
 
 
@@ -215,6 +221,8 @@ class Hook(unittest.TestCase):
         self.assertIn("p1", run_hook.context)
         self.assertIn("web", run_hook.context)
         self.assertIn("deploy", run_hook.context)
+        self.assertIn("p1", run_hook.notice)                     # shown to the human in the terminal
+        self.assertNotIn("Start your reply", run_hook.notice)
         self.prompt(telegram("merci"))
         self.assertIsNone(run_hook.context)
 

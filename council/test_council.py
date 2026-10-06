@@ -62,6 +62,22 @@ class Verdicts(unittest.TestCase):
         self.assertIn("ISOLATED ALERT", res["verdict"])
         self.assertIn("BLOCKING: restores the whole host", res["report"])
 
+    def test_cross_review_can_be_switched_off(self):
+        calls = []
+
+        class Counting(FakeClient):
+            def chat(self, model, system, user, max_tokens=None):
+                calls.append("rank" if "rank the reviews" in system else "other")
+                return super().chat(model, system, user, max_tokens)
+
+        reviews = {m: "VERDICT: APPROVE" for m in ("m1", "m2", "m3", "m4")}
+        oc.run(PROPOSAL, "t", dict(oc.DEFAULTS, members=list(reviews), chair="m1"), Counting(reviews))
+        self.assertEqual(calls.count("rank"), 4)
+        calls.clear()
+        res = oc.run(PROPOSAL, "t", dict(oc.DEFAULTS, members=list(reviews), chair="m1", cross_review=False), Counting(reviews))
+        self.assertEqual(calls.count("rank"), 0)
+        self.assertTrue(res["verdict"].startswith("APPROVE"))
+
     def test_quorum_when_members_fail(self):
         cfg = dict(oc.DEFAULTS, members=["m1", "m2", "m3", "m4"], chair="m1")
         res = oc.run(PROPOSAL, "t", cfg, FakeClient({"m1": "VERDICT: APPROVE", "m2": "VERDICT: APPROVE"}, fail=["m3", "m4"]))

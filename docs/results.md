@@ -1,5 +1,21 @@
 # Results so far (late September – early October 2026)
 
+## At a glance
+
+| Component | Measure | Value | Date | How independent |
+|---|---|---|---|---|
+| leak-check | Real secrets found in real transcripts (49 secrets, 41 transcripts, 2 machines) | **3 leaks** (2 still valid, rotated) | 06/10 | High: exact values, no model involved |
+| secret-guard | Agreement with a blind set from gemini-3.1-pro (60 cases) | 75% | 06/10 | Good: another vendor, never seen before the score |
+| secret-guard | Same, gpt-6.1-sol (60 cases) | 85% | 06/10 | Good |
+| secret-guard | Same, mistral-large-3 (88 cases; noisier labels) | 80% | 06/10 | Good, but labels disputed in places |
+| secret-guard | Same, claude-sonnet-5-5 (57 cases) | 95% | 06/10 | Low: same family as the author |
+| secret-guard | Extra refusals when replaying past calls (friction) | 0–0.17% per version | 06/10 | High: real history |
+| go-gate | Changes within 2 h of a short explicit GO (simulation, 4,693 changes) | 45% | 06/10 | Medium: proximity in time, not a replay |
+| council | Backtest on 3 real past mistakes | 2 of 3 caught; 3 of 3 with full context | 29/09 | Medium: the agent picked the cases |
+| council | Runs where the cross-review step added a point or a correction | 27 of 28 runs; 16% of synthesis points; 15 wrong claims added | 06/10 | Medium: judged by a model |
+
+Blind-set scores measure **agreement with another model's labels**, so they say how much of what a fresh model thinks of is covered. They don't count leaks. leak-check counts leaks.
+
 About 20 runs, roughly $3 in total, and four members from four vendors. Each run is logged with two questions:
 - did it find a real problem the agent had missed?
 - did it change the decision?
@@ -58,9 +74,9 @@ The 12 possible leaks:
 - Secrets typed in clear: `redis-cli -a <password>`, an `Authorization: Bearer` header with a short token, `RESTIC_PASSWORD=<value>`.
 - Two cases the generator flags as risky: `wg show` and `restic snapshots`.
 
-**v0.3, on a second blind set (same day).** gpt-6.1-sol wrote 60 new cases from the same prompt. They were generated *before* the v0.3 fixes and not opened until v0.3 was finished, so v0.3 was tuned on set 1 only. Set 1 says nothing new now: the fixes were made against it (56/60, the 4 left are the disagreements below).
+**Revision 3 (after fixing set 1), on a second blind set (same day).** gpt-6.1-sol wrote 60 new cases from the same prompt. They were generated *before* the revision 3 fixes and not opened until revision 3 was finished, so revision 3 was tuned on set 1 only. Set 1 says nothing new now: the fixes were made against it (56/60, the 4 left are the disagreements below).
 
-| v0.3 on set 2 (unseen) | |
+| Revision 3 on set 2 (unseen) | |
 |---|---|
 | Agreement | **51/60 (85%)** |
 | Expected refused, but allowed (possible leaks) | 8 |
@@ -75,9 +91,9 @@ The 8 possible leaks:
 
 The friction case: `grep -c '^API_KEY='` only prints a count. The trend matters more than either number: each blind set still finds a new layer. Set 3 will come from a third generator.
 
-**v0.4, on a third blind set (same evening).** mistral-large-3 wrote 88 cases. As before, they were generated before the v0.4 fixes and opened only after them. v0.4 was tuned on set 2 (now 60/60, so no longer informative).
+**Revision 4 (after fixing set 2), on a third blind set (same evening).** mistral-large-3 wrote 88 cases. As before, they were generated before the revision 4 fixes and opened only after them. revision 4 was tuned on set 2 (now 60/60, so no longer informative).
 
-| v0.4 on set 3 (unseen) | |
+| Revision 4 on set 3 (unseen) | |
 |---|---|
 | Agreement | **70/88 (80%)** |
 | Expected refused, but allowed (possible leaks) | 14 |
@@ -97,9 +113,9 @@ This generator's labels are noisier than the first two. It expects a refusal for
 
 It also calls `docker logs` and `journalctl` harmless, where secret-guard refuses them on purpose.
 
-v0.5 then fixed the 5 real gaps (set 3 now 74/88; the remaining 14 are the disagreements above, so set 3 is no longer a blind measure). The score stays as generated: 75% → 85% → 80% across three generators says the hook catches most of what a fresh model thinks of, and that each new model still finds a few real holes.
+Revision 5 then fixed the 5 real gaps (set 3 now 74/88; the remaining 14 are the disagreements above, so set 3 is no longer a blind measure). The score stays as generated: 75% → 85% → 80% across three generators says the hook catches most of what a fresh model thinks of, and that each new model still finds a few real holes.
 
-**v0.5, on a fourth blind set (same evening).** claude-sonnet-5-5 wrote 57 cases. secret-guard scored **54/57 (95%)**: 1 possible leak, 2 friction cases.
+**Revision 5, on a fourth blind set (same evening).** claude-sonnet-5-5 wrote 57 cases. secret-guard scored **54/57 (95%)**: 1 possible leak, 2 friction cases.
 - The leak: `mask < /dev/null 2>&1 | cat`, which prints nothing.
 - The friction: `journalctl` and a compose file, both refused on purpose.
 

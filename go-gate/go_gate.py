@@ -288,7 +288,7 @@ def classify_stage(stage, depth, bodies=()):
         sub = next((x for x in args if not x.startswith("-")), "")
         return ("read", "") if sub in SYSTEMCTL_READ else ("change", f"systemctl {sub}")
     if c == "curl" or c == "wget":
-        if any(re.search(ACTION_URL, a, re.I) for a in args if "://" in a or a.startswith("/")) or \
+        if any(is_action_url(a) for a in args if "://" in a) or \
                 any(re.search(r"(?i)x-http-method(-override)?\s*:\s*(post|put|patch|delete)", a) for a in args):
             return "change", f"{c} to an action URL"
         if c == "wget":
@@ -392,9 +392,21 @@ def python_kind(code):
     return ("change", f"python {m.group(0)[:20]}") if m else ("read", "")
 
 
-ACTION_URL = (r"/(webhook|webhook-test|hooks?|trigger|triggers|run|exec|execute|restart|reboot|shutdown|start|stop|"
-              r"delete|remove|purge|reset|refresh|scan|rescan|sync|import|deploy|update|upgrade|install|command)(/|\?|$)"
-              r"|[?&](action|cmd|command|op|do|method)=")      # a GET to these can change state
+ACTION_ANYWHERE = {"webhook", "webhook-test", "hook", "hooks", "trigger", "triggers"}
+ACTION_LAST = {"run", "exec", "execute", "restart", "reboot", "shutdown", "start", "stop", "delete", "remove", "purge",
+               "reset", "refresh", "scan", "rescan", "sync", "import", "deploy", "update", "upgrade", "install", "command"}
+
+
+def is_action_url(arg):
+    """A GET that can change state: a webhook or trigger anywhere in the path, an action word as the last path
+    segment (/api/v1/restart, not /api/sync/status), or an action-style query parameter (?action=delete)."""
+    m = re.search(r"://[^/\s?#]*(/[^\s?#]*)?(\?[^\s#]*)?", arg.strip("'\""))
+    if not m:
+        return False
+    segs = [x.lower() for x in (m.group(1) or "").split("/") if x]
+    if any(x in ACTION_ANYWHERE for x in segs) or (segs and segs[-1] in ACTION_LAST):
+        return True
+    return bool(re.search(r"[?&](action|cmd|command|op|do|method)=", m.group(2) or "", re.I))
 
 
 CURL_VALUE_OPTS = set("XdFTocuHeAbxmwrKEyYzCPQD")  # curl short options that take a value
@@ -825,7 +837,9 @@ def main():
             decision, why = on_pre_tool(data, cfg, state)
         save_state(full)
         if context:
-            print(json.dumps({"hookSpecificOutput": {"hookEventName": "UserPromptSubmit", "additionalContext": context}}))
+            notice = re.sub(r" Start your reply.*$", "", context)
+            print(json.dumps({"systemMessage": notice,
+                              "hookSpecificOutput": {"hookEventName": "UserPromptSubmit", "additionalContext": context}}))
         if decision == "deny":
             print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
                                                      "permissionDecisionReason": why}}))

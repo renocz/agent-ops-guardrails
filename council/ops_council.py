@@ -37,6 +37,7 @@ DEFAULTS = {
     "api_key_env": "OPS_COUNCIL_API_KEY",          # name of the env var holding the key (the key itself is never in the config)
     "members": ["openai/gpt-x", "google/gemini-x", "mistral/mistral-large-x", "anthropic/claude-x"],
     "chair": "openai/gpt-x",
+    "cross_review": True,          # step 2; measured on 28 runs (06/10/2026): added a point or a correction in 27 of them
     "language": "English",
     "context": "Context: a self-hosted infrastructure run by an AI agent under the control of a demanding human. "
                "Rules: no change without explicit approval, dry-run first, never display a secret, everything is documented.",
@@ -215,7 +216,7 @@ def run(proposal, title, cfg, client):
         return client.chat(m, sys2, f"Proposal:\n{proposal}\n\nReviews to assess:\n{body}", 2000)
 
     with cf.ThreadPoolExecutor(len(members)) as ex:
-        futs = {ex.submit(cross, m): m for m in members if not down(reviews[m])}
+        futs = {ex.submit(cross, m): m for m in members if not down(reviews[m]) and cfg.get("cross_review", True)}
         for f in cf.as_completed(futs):
             m = futs[f]
             try:

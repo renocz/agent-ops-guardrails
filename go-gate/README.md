@@ -2,7 +2,7 @@
 
 A Claude Code hook that lets the agent **change** things only inside a plan the human approved with a GO. Reads stay free.
 
-> **Status: v0.2.1, experimental. Observe mode by default.** Run it in observe mode for a week on your own work before you switch on blocking. Our own numbers are below: blocking on day one would have refused about half of the agent's past changes.
+> **Status: experimental. Observe mode by default.** Run it in observe mode for a week on your own work before you switch on blocking. Our own numbers are below: blocking on day one would have refused about half of the agent's past changes.
 
 ## Why
 
@@ -117,7 +117,7 @@ Then tell the agent the convention, in CLAUDE.md or its system prompt: *"End eve
 - **A compound command is checked action by action:** in `git add web; docker compose down`, both actions must be inside the plan.
 - **Scratch paths are judged by their text.** `/tmp/x` counts as scratch even if it is a symlink to somewhere else; `..` is normalised, links are not followed.
 - **Targets ignore where a command runs.** `ssh host`, `pct exec` and `docker exec` are unwrapped and the inner command is judged, but a target named in the plan is not tied to a host or container.
-- **Inline Python is matched by pattern.** Aliased imports (`from os import remove as r`) can slip through; planned for v0.3.
+- **Inline Python is matched by pattern.** Aliased imports (`from os import remove as r`) can slip through; planned for a later release.
 - **A GET is a read, unless the URL looks like an action.** Webhooks, triggers and action words in the path (`/webhook/`, `/restart`, `/delete`…), `?action=`-style parameters and `X-HTTP-Method-Override` count as changes. Any other GET with a side effect still passes as a read.
 - **SQL is not parsed.** A `SELECT` that calls a function with side effects counts as whatever the client command is judged to be.
 
