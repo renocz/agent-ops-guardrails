@@ -25,7 +25,8 @@ jobs:
 
   hook-gym:
     # External benchmark for Claude Code hooks (https://pypi.org/project/hook-gym/).
-    # secret-guard only targets secret leaks, so we report the credentials category and our own homelab cases.
+    # secret-guard only targets secret leaks, so we report the credentials and secrets categories and our own homelab cases.
+    # --hooks and --cases go before "run": placed after it, as the 0.1.0 README shows, the tool only prints its usage.
     # Informational: a partial score does not fail the build.
     runs-on: ubuntu-latest
     steps:
@@ -33,21 +34,26 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
-      - name: install hook-gym (pinned)
-        run: pip install "hook-gym==0.1.0"
+      - name: install hook-gym (pinned sdist, checksum verified)
+        # The 0.1.0 wheel ships without the built-in cases, so we take the sdist, which has them.
+        run: |
+          curl -sSLo hook_gym.tar.gz https://files.pythonhosted.org/packages/12/b1/eacec1de5b79272ed09c87106427cf8fd3e8da59bb48c1517a1cdbd7b89e/hook_gym-0.1.0.tar.gz
+          echo "0ab3b312b391aba77fa27331fab26de57dbca1eb6f6656c947b5532d5849d52c  hook_gym.tar.gz" | sha256sum -c -
+          tar xzf hook_gym.tar.gz -C /tmp
+          pip install /tmp/hook_gym-0.1.0
       - name: point a settings file at secret-guard
         run: |
           sed "s#HOOK#$GITHUB_WORKSPACE/secret-guard/secret_guard.py#g" ci/hook-gym-settings.json > /tmp/settings.json
           cat /tmp/settings.json
       - name: hook-gym, built-in credentials cases
-        run: hook-gym run --hooks /tmp/settings.json --tag credentials --report gym-builtin.md 2>&1 | tee gym-builtin.log || true
+        run: hook-gym --hooks /tmp/settings.json --cases /tmp/hook_gym-0.1.0/cases run --tag credentials --tag secrets --report gym-builtin.md 2>&1 | tee gym-builtin.log || true
       - name: hook-gym, homelab cases from this repo
-        run: hook-gym run --hooks /tmp/settings.json --cases ci/hook-gym-cases --report gym-homelab.md 2>&1 | tee gym-homelab.log || true
+        run: hook-gym --hooks /tmp/settings.json --cases ci/hook-gym-cases run --report gym-homelab.md 2>&1 | tee gym-homelab.log || true
       - name: summary
         run: |
           for f in gym-builtin gym-homelab; do
             echo "### $f" >> "$GITHUB_STEP_SUMMARY"
             if [ -f "$f.md" ]; then cat "$f.md" >> "$GITHUB_STEP_SUMMARY"; else echo '```' >> "$GITHUB_STEP_SUMMARY"; cat "$f.log" >> "$GITHUB_STEP_SUMMARY"; echo '```' >> "$GITHUB_STEP_SUMMARY"; fi
-            line=$(grep -i -m1 -E "overall|error|usage|no such" "$f.log" || tail -1 "$f.log")
+            line=$(grep -i -m1 -E "overall|error|usage|not found|no hooks|no test" "$f.log" || tail -1 "$f.log")
             echo "::notice title=$f::$line"
           done
