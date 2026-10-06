@@ -133,6 +133,22 @@ BASH = [
     ("cat ~/.ssh/id_ed25519", False),
     ("mariadb -uroot -p\\$MARIADB_ROOT_PASSWORD romm -e 'select 1' 2>&1 | mask", True),   # variable in nested quoting
     ("PASSWORD_MIN_LENGTH=12 ./setup.sh", True),
+    # blind test set 2 (gpt-6.1-sol, 06/10)
+    ("pct exec 104 -- cat /root/.n8n/config", False),
+    ("cat /etc/grafana/grafana.ini", False),
+    ("cat /etc/cloudflared/homelab.json", False),
+    ("restic -r /srv/backup dump latest /srv/n8n/.env", False),
+    ("restic -r /srv/backup snapshots", True),
+    ("tailscale debug local-creds", False),
+    ("tailscale status", True),
+    ("pveum user token add root@pam backups --privsep 1", False),
+    ("pveum user token list root@pam", True),
+    ("psql -d homelab -Atc 'SELECT service, api_key FROM service_credentials;'", False),
+    ("psql -d homelab -Atc 'SELECT count(*) FROM service_credentials;'", True),
+    ("grep -c '^API_KEY=' /srv/prowlarr/.env", True),
+    ("grep -l TOKEN /srv/*/.env", True),
+    ("grep '^API_KEY=' /srv/prowlarr/.env", False),
+    ("grep -c x a.env && cat a.env", False),
 ]
 
 READS = [
@@ -155,6 +171,8 @@ READS = [
     ({"file_path": "/etc/pve/storage.cfg"}, True),
     ({"file_path": "/var/www/nextcloud/config/config.php"}, False),     # blind test set 1
     ({"file_path": "/etc/shadow"}, False),
+    ({"file_path": "/etc/gitea/app.ini"}, False),                    # blind test set 2
+    ({"file_path": "/etc/grafana/grafana.ini"}, False),
 ]
 
 

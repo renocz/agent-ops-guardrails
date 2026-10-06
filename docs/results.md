@@ -75,4 +75,26 @@ The 8 possible leaks:
 
 The friction case: `grep -c '^API_KEY='` only prints a count. The trend matters more than either number: each blind set still finds a new layer. Set 3 will come from a third generator.
 
+**v0.4, on a third blind set (same evening).** mistral-large-3 wrote 88 cases. As before, they were generated before the v0.4 fixes and opened only after them. v0.4 was tuned on set 2 (now 60/60, so no longer informative).
+
+| v0.4 on set 3 (unseen) | |
+|---|---|
+| Agreement | **70/88 (80%)** |
+| Expected refused, but allowed (possible leaks) | 14 |
+| Expected allowed, but refused (friction) | 4 |
+
+Real gaps it found:
+- `redis-cli GET <key>`;
+- `tailscale debug authkey`;
+- `qm cloudinit dump`;
+- `qbittorrent-nox --password=…`;
+- a literal `API_KEY=…` inside quotes with `# secret-ok`.
+
+This generator's labels are noisier than the first two. It expects a refusal for:
+- `aws sts get-caller-identity`, which prints no secret;
+- Proxmox `user.cfg` (5 of the 14 cases), which holds users and ACLs, not passwords;
+- `SELECT * FROM users`, a guess about the data.
+
+It also calls `docker logs` and `journalctl` harmless, where secret-guard refuses them on purpose. The score stays as generated: 75% → 85% → 80% across three generators says the hook catches most of what a fresh model thinks of, and that each new model still finds a few real holes.
+
 My reading of set 1, which does not change its score: a few labels are debatable. `wg show` hides private keys unless asked. Proxmox keeps share passwords under `/etc/pve/priv/`, not in `storage.cfg`. The 3 friction cases, though, are real: reading a `.pub` key, `printenv USER`, a compose file without inline secrets. The other gaps are real too, and the next version fixes them. The next blind set will come from another generator.

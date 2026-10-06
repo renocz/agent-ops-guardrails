@@ -53,6 +53,8 @@ SECRET_PATHS = [
     r"/etc/[a-z-]*\.env\b",
     r"\.pem\b", r"\.key\b", r"id_(rsa|ed25519|ecdsa)\b(?!\.pub)",  # private keys (not the .pub)
     r"(^|/)(wp-)?config\.php\b", r"(^|/)(g)?shadow-?\b",       # PHP app configs, password hashes
+    r"grafana\.ini\b", r"(^|/)app\.ini\b", r"\.n8n/config\b",   # Grafana, Gitea, n8n (encryption key)
+    r"cloudflared/[^\s/]*\.json\b", r"\.cloudflared/",          # tunnel credentials
     r"\.kube/config\b", r"\.aws/", r"\.docker/config",
     r"wireguard/", r"\bwg\d*\.conf\b",                       # WireGuard: holds the private key
     r"acme\.json\b",                                         # Traefik: certificate private keys
@@ -105,6 +107,11 @@ RISKY = [
     (r"\bgh\s+auth\s+(token|status\b.*(-t|--show-token))\b|\bcloudflared\s+tunnel\s+token\b"
      r"|\baws\s+configure\s+(export-credentials|get\s+\S*(secret|key|token))|\baws\s+sts\s+(get-session-token|assume-role)\b"
      r"|\bgcloud\s+auth\s+(print-access-token|print-identity-token)\b|\bdocker\s+login\b.*\s-p\s", "CLI that prints a token"),
+    (r"\brestic\b.*\s(dump|cat)\b|\bborg\s+extract\b.*--stdout|\bkopia\s+(show|content\s+show)\b", "backup contents"),
+    (r"\btailscale\s+debug\s+(local-creds|prefs)\b|\bpveum\s+(user\s+)?token\s+add\b|\bpvesh\s+create\s+/access/users/\S+/token"
+     r"|\bdocker\s+swarm\s+join-token\b|\bkubeadm\s+token\s+create\b|\bgh\s+auth\s+token\b", "command that prints a new or local secret"),
+    (r"(?i)\bselect\b[^;\n]{0,200}?(?<!length\()(?<!count\()\b\w*(api_?key|password|passwd|secret|token)\w*\b[^;\n]{0,200}?\bfrom\b",
+     "SQL selecting secret columns"),
     (r"(?i)\bpg_(shadow|authid)\b|\brolpassword\b|\bmysql\.user\b|\bauthentication_string\b", "password hashes (SQL)"),
     (r"\bkubectl\b.*\bget\s+secrets?\b|\bvault\s+(kv\s+get|read)\b|\baws\s+(secretsmanager|ssm)\s+get", "secret store"),
 ]
@@ -292,8 +299,21 @@ def is_masked(stmt):
     return True
 
 
+COUNT_ONLY_GREP = re.compile(r"\b(grep|egrep|rg)\s+(-\w*[clLq]\w*\s+)")
+
+
+def count_only(text):
+    """Every reader in the statement is a grep/rg that only counts, lists names or tests."""
+    readers = re.findall(r"\b(" + READERS + r")\b", text)
+    return bool(readers) and all(r in ("grep", "egrep", "rg") for r in readers) and \
+        len(COUNT_ONLY_GREP.findall(text)) >= len(readers)
+
+
 def risky_labels(text):
-    return [label for rx, label in RISKY if re.search(rx, text, re.I)]
+    labels = [label for rx, label in RISKY if re.search(rx, text, re.I)]
+    if count_only(text):                              # grep -c / -l / -q on a secret file prints no value
+        labels = [x for x in labels if x != "file that may contain secrets"]
+    return labels
 
 
 def check_bash(cmd):
