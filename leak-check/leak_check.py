@@ -35,7 +35,8 @@ import argparse, fnmatch, glob, json, os, re, shutil, sys, tempfile
 
 SECRET_NAME = re.compile(r"(?i)(KEY|TOKEN|SECRET|PASS|PASSWD|PASSWORD|PWD|CREDENTIAL|_AUTH$|^AUTH$|DSN|COOKIE|SALT|PRIVATE_?KEY|PRIVATE$)")
 NOT_SECRET_NAME = re.compile(r"(?i)(_ID|CLIENTID|_USER|USERNAME|_NAME|_URL|_URI|_HOST|_PORT|_FILE|_PATH|_DIR)$")
-NOT_A_VALUE = re.compile(r"(?i)^(true|false|yes|no|none|null|changeme|example|\$\{?.*|/.*|[a-z][a-z0-9+.-]*://.*|\d+|.*\{\{.*\}\}.*|.*\{%.*%\}.*)$")  # last two: templates (Prowlarr definitions, Jinja)
+NOT_A_VALUE = re.compile(r"(?i)^(true|false|yes|no|none|null|changeme|example|bearer|basic|os\.environ/.*|env:.*|sk-1234|"
+                         r"<[^<>]*>|\*{3,}.*|x{6,}|\[?redacted\]?|\[?hidden\]?|\$\{?.*|/.*|[a-z][a-z0-9+.-]*://.*|\d+|.*\{\{.*\}\}.*|.*\{%.*%\}.*)$")  # last two: templates (Prowlarr definitions, Jinja)
 URL_PASSWORD = re.compile(r"[a-z][a-z0-9+.-]*://[^/\s:@]+:([^@\s/]+)@", re.I)
 KEY_LINE = re.compile(r"^[A-Za-z0-9+/=]{40,}$")
 LINE = re.compile(r"""^\s*(?:-\s+)?(?:export\s+)?["']?([A-Za-z_][A-Za-z0-9_]*)["']?\s*(?:=|:\s)\s*(.*)$""")
@@ -106,7 +107,7 @@ def files_of(pattern):
 def collect_values(cfg):
     """{value: (name, kind)} with kind in env / url / file / key. Values never leave this process."""
     found, ml = {}, cfg["min_length"]
-    ml_named = cfg.get("min_length_named", 6)
+    ml_named = cfg.get("min_length_named", 8)      # 6 caught LiteLLM's sk-1234 placeholder in a real run (07/10)
     MISSING.clear()
     SKIPPED.clear()
 
@@ -142,7 +143,8 @@ def collect_values(cfg):
         if v.lstrip().startswith("{"):                                  # rclone: token = {"access_token":…}
             try:
                 for k2, v2 in json_items(json.loads(v)):
-                    add_value(k2, v2, f"{f}:{key}", kind)
+                    if re.search(r"(?i)token$|secret|password", k2):   # access/refresh tokens, not token_type
+                        add(v2, f"{f}:{key}:{k2}", kind)
             except ValueError:
                 pass
 

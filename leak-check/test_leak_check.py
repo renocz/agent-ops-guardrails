@@ -122,10 +122,11 @@ class LeakCheck(unittest.TestCase):
         self.assertEqual(self.inv("d.json", json.dumps({"tokens": [FAKE + "t"]})), ["tokens"])
 
     def test_rclone_token_and_docker_auth(self):
-        tok = json.dumps({"access_token": FAKE + "a", "refresh_token": FAKE + "r"})
+        tok = json.dumps({"access_token": FAKE + "a", "token_type": "Bearer", "refresh_token": FAKE + "r", "expiry": "x"})
         got = self.inv("rclone.conf", "[gd]\ntype = drive\ntoken = " + tok + "\n")
         self.assertIn("token:access_token", got)
         self.assertIn("token:refresh_token", got)
+        self.assertFalse([g for g in got if g.endswith("token_type")])   # "Bearer" is not a secret
         import base64
         auth = base64.b64encode(("alice:" + FAKE + "d").encode()).decode()
         got = self.inv("config.json", json.dumps({"auths": {"r.io": {"auth": auth}}}))
@@ -146,6 +147,10 @@ class LeakCheck(unittest.TestCase):
         w(f"{self.d}/s/settings.old.json", "{}")
         cfg = dict(self.cfg, env_files=[], value_files=[], config_files=[f"{self.d}/s/*"])
         self.assertEqual(len(lc.scan(cfg)["skipped_sources"]), 2)
+
+    def test_references_and_placeholders_are_not_values(self):
+        self.assertEqual(self.inv("c.yaml", "  api_key: os.environ/OPENAI_API_KEY\n  master_key: sk-1234\n"
+                                  "  sessionSecret: <hidden>\n  password: ********\n  token: [REDACTED]\n"), [])   # real run, 07/10
 
     def test_rotated_value_leaking_again_is_new(self):
         state = f"{self.d}/st.json"
