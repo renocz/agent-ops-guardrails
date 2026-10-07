@@ -19,5 +19,5 @@ s~(\s-u\s+[^\s:]+:)\S+~$1<m>~g;
 s~((?:key|token|secret|password|passwd|pwd|passphrase|cookie|credential)[A-Za-z0-9_]*["']?\s*[:=]\s*)(["'])[^"']*\2~$1$2<m>$2~gi;
 s~((?:key|token|secret|password|passwd|pwd|auth|cookie|bearer|session|credential)[A-Za-z0-9_]*["']?\s*[:=]\s*["']?)[^\s,"'}\]]{3,}~$1<m>~gi;
 # A line that is one bare token of 16+ characters mixing letters and digits (external audit of v0.8: a value cut out of
-# its key=value line). Pure hex (hashes, container ids) and paths are left alone.
-s{^(\s*)(?=[A-Za-z0-9+/_=.~-]{16,}\s*$)(?=[^\n]*[A-Za-z])(?=[^\n]*\d)(?![0-9a-fA-F]+\s*$)[^\s/]+(\s*)$}{$1<m>$2};
+# its key=value line). Pure hex (hashes, container ids), paths and dotted names (file names) are left alone.
+s{^(\s*)(?=[A-Za-z0-9+/_=~-]{16,}\s*$)(?=[^\n]*[A-Za-z])(?=[^\n]*\d)(?![0-9a-fA-F]+\s*$)[^\s/.]+(\s*)$}{$1<m>$2};

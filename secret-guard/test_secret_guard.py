@@ -307,6 +307,14 @@ class SecretGuard(unittest.TestCase):
             self.assertNotIn(secret, out)
         self.assertIn("normal line", out)
 
+    def test_mask_bare_token_but_not_file_names(self):
+        import subprocess
+        here = os.path.dirname(os.path.abspath(__file__))
+        out = subprocess.run([os.path.join(here, "mask")], input="Zq7Wk9Zq7Wk9Zq7Wk9\nsecret-guard.py.bak-20261006\n"
+                             "0123456789abcdef0123456789abcdef\nCHG-2026-0096\n", capture_output=True, text=True).stdout
+        self.assertEqual(out.splitlines(), ["<m>", "secret-guard.py.bak-20261006", "0123456789abcdef0123456789abcdef",
+                                            "CHG-2026-0096"])
+
     def test_grep_content_hunting_secrets(self):
         self.assertIsNotNone(sg.check_read("Grep", {"pattern": "API_KEY", "path": ".", "output_mode": "content"}))
         self.assertIsNone(sg.check_read("Grep", {"pattern": "API_KEY", "path": ".", "output_mode": "files_with_matches"}))

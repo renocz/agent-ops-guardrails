@@ -59,7 +59,7 @@ MASK = [(r"eyJ[A-Za-z0-9_-]{15,}(?:\.[A-Za-z0-9_-]*){0,2}", "<jwt>"),
         (r"(?i)(://[^/\s:@]+:)[^@\s/]+@", r"\1<masked>@"),
         (r"(?i)((?:key|token|secret|password|passwd|cookie|bearer|apikey|api_key|auth)[A-Za-z0-9_]*[\"']?\s*[:=]\s*[\"']?)[^\s,\"'}\]]{3,}", r"\1<masked>"),
         (r"(?i)(<(?:ApiKey|Password|Token|Secret|ClientSecret)>)[^<]+(</)", r"\1<masked>\2"),
-        (r"(?m)^(\s*)(?=[A-Za-z0-9+/_=.~-]{16,}\s*$)(?=[^\n]*[A-Za-z])(?=[^\n]*\d)(?![0-9a-fA-F]+\s*$)[^\s/]+(\s*)$", r"\1<masked>\2")]
+        (r"(?m)^(\s*)(?=[A-Za-z0-9+/_=~-]{16,}\s*$)(?=[^\n]*[A-Za-z])(?=[^\n]*\d)(?![0-9a-fA-F]+\s*$)[^\s/.]+(\s*)$", r"\1<masked>\2")]
 
 REQUIRED = (("'Request:' (the human's request, verbatim)", r"(?im)^\W*(request|demande de l.utilisateur)\s*:[ \t]*\S.{3,}"),
             ("'GO:' (given or not, and for what)", r"(?im)^\W*GO\s*:[ \t]*\S.{1,}"))   # v0.9: not empty
