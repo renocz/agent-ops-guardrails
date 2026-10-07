@@ -138,6 +138,10 @@ BASH = [
     ("python3 -c 'print(1+1)'", True),
     ("ls -la /etc/pve/priv # secret-ok", True),
     ("cat .env 2>&1 | mask", True),
+    # Gemini audit of v0.9 (07/10)
+    ("cat .{env,txt}", False),
+    ("awk -F= '{print $ 2}' .env 2>&1 | mask", False),
+    ("cat {README,CHANGELOG}.md", True),
     # external audit of v0.2 (06/10): secret files and tools that print decrypted secrets
     ("cat ~/.pgpass", False),
     ("cat ~/.my.cnf", False),

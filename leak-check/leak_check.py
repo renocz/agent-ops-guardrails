@@ -192,7 +192,9 @@ def collect_values(cfg):
                     items = []
             elif f.endswith(".xml"):
                 items = [(m.group(1), m.group(2).strip()) for m in xml_tag.finditer(text)]
-                items += [(m.group(1), m.group(2).strip()) for m in XML_ATTR.finditer(text)]   # Plex: PlexOnlineToken="…"
+                # Plex: PlexOnlineToken="…". A bare key="…" or id="…" attribute is an index, not a secret (Gemini audit)
+                items += [(m.group(1), m.group(2).strip()) for m in XML_ATTR.finditer(text)
+                          if m.group(1).lower() not in ("key", "id", "keyid", "name") and len(m.group(2).strip()) >= 12]
                 # ASP.NET data-protection key files keep the key in <value>, under a <key> element
                 if "<key " in text and "<masterKey" in text:
                     items += [("masterKey", m.group(2).strip()) for m in xml_tag.finditer(text) if m.group(1) == "value"]

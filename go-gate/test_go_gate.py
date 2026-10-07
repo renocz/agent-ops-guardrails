@@ -193,6 +193,9 @@ class Classifier(unittest.TestCase):
         self.assertEqual(g.classify("mcp__some__delete_item", {})[0], "change")
         self.assertEqual(g.classify("mcp__lab__get_and_delete_secret", {})[0], "change")     # GG-08
         self.assertEqual(g.classify("mcp__lab__get_status", {})[0], "read")
+        self.assertEqual(g.classify("mcp__github__get_commit", {})[0], "read")              # Gemini audit of v0.9
+        self.assertEqual(g.classify("mcp__x__list_settings", {})[0], "read")
+        self.assertEqual(g.classify("mcp__x__getAndDeleteSecret", {})[0], "change")
         for code, kind in (("from os import remove as r; r('/srv/x')", "change"),           # GG-01
                            ("import pathlib; pathlib.Path('/srv/x').unlink()", "change"),
                            ("getattr(__import__('os'), 'remove')('/srv/x')", "change"),
@@ -203,7 +206,10 @@ class Classifier(unittest.TestCase):
                            ("open('/srv/x', mode='w')", "change"),
                            ("print('y', file=open('/srv/x', 'a'))", "change"),
                            ("print(open('/etc/hosts').read()[:50])", "read"),
-                           ("print(open('/etc/hosts', 'r').read()[:50])", "read")):
+                           ("print(open('/etc/hosts', 'r').read()[:50])", "read"),
+                           ("import sys; print('log', file=sys.stderr)", "read"),          # Gemini audit of v0.9
+                           ("import os.path; print(os.path.basename('/a/b'))", "read"),
+                           ("import os.path; os.remove('/srv/x')", "change")):
             self.assertEqual(g.classify("Bash", {"command": f'python3 -c "{code}"'})[0], kind, code)
 
 
@@ -213,6 +219,7 @@ class Scope(unittest.TestCase):
         self.assertEqual((p["id"], p["targets"], p["actions"], p["ttl"]), ("upd-web", ["web", "/opt/stacks/web"], ["deploy", "git"], 30))
         self.assertEqual(g.parse_scope("Périmètre : id=x ; actions=edit ; durée=2h")["ttl"], 120)
         self.assertIsNone(g.parse_scope("no scope here"))
+        self.assertEqual(g.parse_scope("Scope: id=upd-réseau ; actions=edit")["id"], "upd-rseau")   # ASCII ids
         self.assertIsNone(g.parse_scope("Scope: id=x ; actions=everything"))       # unknown category only
 
     def test_covers(self):
@@ -399,6 +406,10 @@ class Hook(unittest.TestCase):
         try:
             self.assertEqual(g.classify("Write", {"file_path": link})[0], "change")             # GG-02
             self.assertEqual(g.classify("Bash", {"command": f"echo x > {link}"})[0], "change")
+            st = os.path.join(self.dir, "state.json")
+            for cmd in (f"F={st}; echo x > $F", f"F={st}; cp /tmp/a $F", f"cp /tmp/a {st}"):     # Gemini audit of v0.9
+                kind, detail = g.classify("Bash", {"command": cmd})
+                self.assertEqual(g.category("Bash", {"command": cmd}, kind, detail), "protected", cmd)
             self.assertEqual(g.category("Write", {"file_path": link}, "change", "protected go-gate state"), "protected")
         finally:
             if old is None:

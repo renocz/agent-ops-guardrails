@@ -152,6 +152,9 @@ class LeakCheck(unittest.TestCase):
         self.assertEqual(self.inv("c.yaml", "  api_key: os.environ/OPENAI_API_KEY\n  master_key: sk-1234\n"
                                   "  sessionSecret: <hidden>\n  password: ********\n  token: [REDACTED]\n"), [])   # real run, 07/10
 
+    def test_xml_index_attributes_are_not_secrets(self):
+        self.assertEqual(self.inv("x.xml", '<a key="1234567890" id="abcdefghijklmn" ApiToken="' + FAKE + 'z"/>'), ["ApiToken"])
+
     def test_rotated_value_leaking_again_is_new(self):
         state = f"{self.d}/st.json"
         r1 = lc.only_new({"leaks": [{"secret": "x:API_TOKEN", "transcript": "t", "occurrences": 1, "vid": "aaa"}]}, state)

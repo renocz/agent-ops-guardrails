@@ -349,11 +349,22 @@ GLOB_WORD = re.compile(r"""(?<![\w$])([^\s'"|;&<>()]*[*?\[][^\s'"|;&<>()]*)""")
 SAFE_VARS = r"\$\{?(HOME|PWD|USER|TMPDIR|LOGNAME)\}?"
 
 
+def brace_expanded(text, limit=64):
+    """`.{env,txt}` -> `.env .txt`, as Bash does before running (Gemini audit of v0.9). Plain lists only, bounded."""
+    for _ in range(8):
+        m = re.search(r"([^\s{}'\"]*)\{([^{}\s]*,[^{}\s]*)\}([^\s{}'\"]*)", text)
+        if not m:
+            break
+        parts = m.group(2).split(",")[:limit]
+        text = text[:m.start()] + " ".join(m.group(1) + p + m.group(3) for p in parts) + text[m.end():]
+    return text
+
+
 def unquoted(text):
     """The command with quote characters and backslashes removed: `c""at .en''v` and `c\\at` both read `cat .env`.
     String concatenations are joined first: `".e"+"nv"`, `'.e' . 'nv'` (Perl/PHP) and `".e" "nv"` read `.env`."""
     text = re.sub(r"""(["'])\s*[+.]?\s*(["'])""", "", text)
-    return re.sub(r"""["'\\]""", "", text)
+    return brace_expanded(re.sub(r"""["'\\]""", "", text))
 
 
 def without_heredoc_bodies(cmd):
@@ -449,7 +460,7 @@ def dynamic_reader(stmt, known=None):
 MASK_REDEFINED = (r"(^|[\s;&|({])(function\s+)?" + re.escape(MASK_CMD) + r"\s*\(\s*\)|\balias\s+" + re.escape(MASK_CMD)
                   + r"=|(^|[;&|({\n]\s*)(export\s+)?PATH=[^\s;&|]*\s*(;|&&|\n|$)|\bexport\s+PATH=|\benable\s+-f\b|\bhash\s+-p\b")
 # Extracting the bare value before the mask leaves nothing it can recognise (`cut -d= -f2 .env | mask`).
-VALUE_EXTRACTION = (r"\bcut\b[^|]*-f\s*['\"]?[2-9]|\bawk\b[^|]*\$([2-9]|NF)\b|\bsed\b[^|]*s(.)\^?(\[\^?[=:]\]\*|\.\*)[=:]"
+VALUE_EXTRACTION = (r"\bcut\b[^|]*-f\s*['\"]?[2-9]|\bawk\b[^|]*\$\s*([2-9]|NF)\b|\bsed\b[^|]*s(.)\^?(\[\^?[=:]\]\*|\.\*)[=:]"
                     r"|\b(grep|rg)\b[^|]*\s-[a-zA-Z]*o|\bjq\b[^|]*\s-[a-zA-Z]*r|\byq\b[^|]*\s-r|\bcut\b[^|]*-c\s*\d")
 FILE_LABELS = ("file that may contain secrets", "input redirected from a secret file", "copy of a secret file to stdout",
                "reader on a path known only at run time")

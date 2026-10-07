@@ -189,8 +189,40 @@ def is_scratch(path):
     return bool(re.search(SCRATCH, r)) or "/scratchpad/" in r or p.startswith("$TMPDIR")
 
 
+KNOWN_VARS = {}               # literal assignments of the command being classified (NAME=value), set by classify()
+
+
+def literal_assignments(cmd):
+    """NAME=value with a literal value (no $, `, quotes around expansions): `F=~/.claude/settings.json`."""
+    out = {}
+    for name, val in re.findall(r"(?:^|[\s;&|(])([A-Za-z_]\w*)=((?:'[^']*'|\"[^\"$`]*\"|[^\s;&|$`'\"()])+)", cmd):
+        out.setdefault(name, val.strip("'\""))
+    return out
+
+
+def resolve_vars(word):
+    return re.sub(r"\$\{?([A-Za-z_]\w*)\}?", lambda m: KNOWN_VARS.get(m.group(1), m.group(0)), word)
+
+
+def touches_protected(stage):
+    """Gemini audit of v0.9 (07/10): `F=~/.claude/settings.json; echo x > $F` escaped the check. Every word of a
+    changing stage is resolved (literal variables, ~, symlinks) and checked against the protected paths."""
+    for w in re.findall(r"[^\s'\"<>|;&()]+", stage.replace(">", " ")):
+        w = resolve_vars(w)
+        if ("/" in w or w.startswith("~")) and "$" not in w and is_protected(w):
+            return True
+    return False
+
+
 def classify_stage(stage, depth, bodies=()):
     """Kind of one pipeline stage: read / change / opaque, with a short reason. `bodies`: its heredoc bodies."""
+    k = _classify_stage(stage, depth, bodies)
+    if k[0] in ("change", "opaque") and touches_protected(stage):
+        return "change", "protected go-gate state, hooks or settings"
+    return k
+
+
+def _classify_stage(stage, depth, bodies=()):
     stage = stage.strip()
     if not stage:
         return "read", ""
@@ -208,6 +240,7 @@ def classify_stage(stage, depth, bodies=()):
     unquoted = re.sub(r"'[^']*'|\"(?:\\.|[^\"\\])*\"", "Q", stage)
     raw = re.findall(r"\S+", unquoted)
     for tgt in write_targets(raw):
+        tgt = resolve_vars(tgt)
         if is_protected(tgt):
             return "change", "protected go-gate state, hooks or settings"
         if not is_scratch(tgt):
@@ -423,7 +456,7 @@ PY_PURE = {"json", "re", "sys", "math", "datetime", "collections", "itertools", 
            "glob", "fnmatch", "argparse", "struct", "binascii", "secrets", "random", "copy", "heapq", "bisect"}
 # open() is a read only with no mode or a literal read mode (council review of v0.9: `open(p, m)` or a variable mode writes)
 PY_OPEN_WRITE = re.compile(r"\bopen\s*\((?:[^()]|\([^()]*\))*?,\s*(?!['\"](?:r|rb|rt|br|tr)['\"])[^)\s]"
-                           r"|\bopen\s*\([^)]*\bmode\s*=\s*(?!['\"](?:r|rb|rt)['\"])|\bprint\s*\([^)]*\bfile\s*=")
+                           r"|\bopen\s*\([^)]*\bmode\s*=\s*(?!['\"](?:r|rb|rt)['\"])|\bprint\s*\([^)]*\bfile\s*=\s*(?!sys\.(?:stdout|stderr)\b)")
 PY_DYNAMIC = re.compile(r"\b(getattr|setattr|globals|locals|vars|compile|__builtins__|__dict__|breakpoint|input)\b")
 
 
@@ -439,6 +472,8 @@ def python_kind(code):
     for a, b in mods:
         for x in (a or b).split(","):
             x = x.strip().split(" as ")[0].strip()
+            if x in ("os.path", "posixpath"):          # path arithmetic only (Gemini audit of v0.9)
+                continue
             if x:
                 names.add(x.split(".")[0])
     impure = sorted(n for n in names if n not in PY_PURE)
@@ -590,12 +625,23 @@ MCP_READ = re.compile(r"__(get|list|search|read|query|find|scrape|fetch|describe
 # External audit of v0.8 (07/10): `mcp__lab__get_and_delete_secret` was a read because it starts with get.
 MCP_WRITE = re.compile(r"(delete|remove|drop|purge|destroy|write|update|upsert|create|insert|set|send|post|put|patch|exec|"
                        r"run|kill|reset|move|rename|upload|trash|revoke|rotate|restart|stop|start|deploy|apply|commit)", re.I)
+def mcp_writes(method):
+    """A write verb as a verb of the method name: its first word, or a word after and/then/or (`get_and_delete_x`).
+    `get_commit` or `list_settings` name an object, not an action (Gemini audit of v0.9)."""
+    words = [w.lower() for w in re.split(r"[_\-.]|(?<=[a-z])(?=[A-Z])", method) if w]
+    verbs = words[:1] + [words[i + 1] for i, w in enumerate(words[:-1]) if w in ("and", "then", "or")]
+    return any(MCP_WRITE.fullmatch(v) for v in verbs)
+
+
 BROWSER_READ_ACTIONS = {"screenshot", "scroll", "zoom", "hover", "wait", "mouse_move", "scroll_to"}
 MEMORY_DIR = re.compile(r"^" + re.escape(os.path.expanduser("~/.claude/projects/")) + r"[^/]+/memory/")   # agent notes
 
 
 def classify(tool, tool_input):
     CHANGES.clear()
+    KNOWN_VARS.clear()
+    if tool == "Bash":
+        KNOWN_VARS.update(literal_assignments(tool_input.get("command", "")))
     if tool.endswith("claude-in-chrome__computer"):
         a = tool_input.get("action", "")
         return ("read", "") if a in BROWSER_READ_ACTIONS else ("change", f"browser {a}")
@@ -614,7 +660,7 @@ def classify(tool, tool_input):
         return "read", ""
     if TALK_TOOLS.search(tool):
         return "talk", ""
-    if tool.startswith("mcp__") and MCP_READ.search(tool) and not MCP_WRITE.search(tool.rsplit("__", 1)[-1]):
+    if tool.startswith("mcp__") and MCP_READ.search(tool) and not mcp_writes(tool.rsplit("__", 1)[-1]):
         return "read", ""
     return "change", tool
 
@@ -735,7 +781,7 @@ def parse_scope(text):
         k = k.lower()
         vals = [x.strip() for x in re.split(r"[,\s]+", v) if x.strip()]
         if k in ("id",):
-            plan["id"] = re.sub(r"[^\w.-]", "", v)[:40] or None
+            plan["id"] = re.sub(r"[^A-Za-z0-9_.-]", "", v.encode("ascii", "ignore").decode())[:40] or None
         elif k in ("targets", "cibles", "hôtes", "hotes", "hosts", "services", "chemins", "paths"):
             plan["targets"] += vals
         elif k in ("actions",):
