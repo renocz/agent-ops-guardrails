@@ -2,7 +2,7 @@
 
 One version scheme: **a repository tag per release**. Components have no version of their own. Commit messages from 06/10/2026 that say "secret-guard v0.3/v0.4/v0.5" refer to the intermediate revisions listed under v0.6.
 
-## v0.9 (unreleased)
+## v0.9 (07/10/2026)
 
 **After a sixth external audit** (gpt, 07/10), which ran the hooks against fake secrets and reported, among others, 16 commands that printed a secret past secret-guard, a deletion go-gate classed as a read, and secrets leak-check never inventoried. Every finding below was reproduced before being fixed, and each fix has a test built from the audit's exact case. Thank you to the auditor.
 
@@ -13,6 +13,7 @@ One version scheme: **a repository tag per release**. Components have no version
 - **council:** one blocking member gives HUMAN REVIEW REQUIRED (not "APPROVE, …"); blockers are copied into the report mechanically; a cross-review blocker reaches the verdict; contradictory verdict lines are invalid; same-family members and empty Request/GO are refused; the final request body is masked and overrides can't replace messages.
 - **Friction, measured:** the 5,062 Bash commands of my own past sessions were replayed through v0.8 and v0.9. secret-guard refuses 2.7% more of them, mostly `# secret-ok` on reads of secret files (refused on purpose now); a first draft refused 16% and was narrowed before release. go-gate classes 0.8% more of them as changes (Python importing local or file-system modules).
 - **After the council's review of v0.9:** `open(path, "w")`, a variable mode or `print(file=…)` makes Python a change; a channel GO dated in the future is ignored; an expired plan's GO tells the agent it was not applied.
+- **First real runs, before release:** the new leak-check readers first reported 19, then 3, "new leaks" on my setup: all placeholders (rclone's `token_type: Bearer`, an `os.environ/…` reference, LiteLLM's `sk-1234`, `<hidden>` values in a redacted config). They are not values any more, with tests. And the offline orchestration test, run on the real server, sent its fake alerts through the real channel because the settings file overrode it; tests now set `LC_ENV_FILE=/dev/null`.
 - **Docs and CI:** the pasted-alert rule is the same everywhere; the leak count is reconciled (7 distinct secrets); GitHub Actions pinned by commit; the hook-gym job fails if the harness does not run.
 
 ## v0.8 (07/10/2026)
