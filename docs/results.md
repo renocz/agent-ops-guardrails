@@ -5,7 +5,8 @@
 | Component | Measure | Value | Date | How independent |
 |---|---|---|---|---|
 | leak-check | Real secrets found in real transcripts, v1 (49 values, 41 transcripts) | **3 leaks** (2 still valid, rotated) | 06/10 | High for what it checks, but v1 found 1 of 5 planted secrets |
-| leak-check | Same, v2: JSON decoded, URL passwords, private keys, canary 5/5 (98 values, 82 files) | **+1 leak**: an SSH private key (rotated) | 06/10 | High for what it checks; a floor, not a total |
+| leak-check | v2 → v0.8: decoded JSON, URL tokens, compose/app configs, keys; end-to-end witness (210 values) | **+5 leaks** (3 OIDC client secrets, rotation pending; a Plex token kept); the v0.7 "SSH key" was a false positive, retracted | 06/10 | High for what it checks; a floor, not a total |
+| leak-check | Inventory coverage: share of gitleaks findings (128 values, live config) that leak-check inventories | **53%** (most of the rest explained, see the leak-check README) | 06/10 | High: a deterministic scanner as judge |
 | secret-guard | Agreement with a blind set from gemini-3.1-pro (60 cases) | 75% | 06/10 | Good: another vendor, never seen before the score |
 | secret-guard | Same, gpt-6.1-sol (60 cases) | 85% | 06/10 | Good |
 | secret-guard | Same, mistral-large-3 (88 cases; noisier labels) | 80% | 06/10 | Good, but labels disputed in places |

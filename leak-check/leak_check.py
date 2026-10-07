@@ -12,11 +12,14 @@ Modes
   scan      look for the real values in the targets (exact match, after decoding JSON lines).
   selftest  plant fake secrets of every supported shape in a scratch transcript and check that scan finds them all.
 
-Exit code: 0 no leak, 1 leak found (or self-test failed), 2 error. Configured sources that match nothing or can't be
-read are listed in "missing_sources" and on stderr: a scan with missing sources must not be read as "no leak".
+Exit code: 0 no leak, 1 leak found (or self-test failed), 2 error, 3 no leak found BUT some configured source was missing
+or unreadable (listed in "missing_sources"): a scan with missing sources is not a "no leak".
 
 Configuration (JSON, --config): {
-  "env_files":   ["/opt/stacks/*/.env", "/etc/*.env"],     # KEY=VALUE files
+  "env_files":   ["/opt/stacks/*/.env", "/opt/stacks/*/compose.yaml"],  # KEY=VALUE, KEY: value and - KEY=value lines
+  "json_files":  ["/etc/cloudflared/*.json"],             # strings under keys whose name looks secret
+  "config_files": ["/opt/stacks/*/*/config/*"],           # app configs, read by extension: .json as JSON, .xml by tag,
+                                                          #   anything else line by line (YAML, TOML, INI, .conf, .js)
   "value_files": ["/root/.n8n-api-key"],                   # files whose whole content is one secret
   "key_files":   ["/root/.ssh/id_*"],                      # private keys (PEM / OpenSSH): each base64 line is checked
   "targets":     ["/root/.claude/projects/**/*.jsonl", "/root/.bash_history"],   # what to scan
@@ -24,15 +27,34 @@ Configuration (JSON, --config): {
   "ignore_names": []
 }
 What counts as a secret in KEY=VALUE files: values of keys whose name looks secret (TOKEN, PASS, KEY, SECRET...), except
-identifiers (*_ID, *_USER, *_URL...); and, whatever the key, the password of any scheme://user:password@host value.
+identifiers (*_ID, *_USER, *_URL...); whatever the key, the password of any scheme://user:password@host value; and in
+URL-like keys (*_URL, *WEBHOOK*, *_DSN...), the token-looking parts of the URL (path segments and query values of 20+
+characters mixing letters and digits, as in Discord/Slack/ntfy webhooks, healthcheck pings or api.telegram.org/bot<token>).
 """
-import argparse, fnmatch, glob, json, os, re, sys, tempfile
+import argparse, fnmatch, glob, json, os, re, shutil, sys, tempfile
 
-SECRET_NAME = re.compile(r"(?i)(KEY|TOKEN|SECRET|PASS|PASSWD|PASSWORD|PWD|CREDENTIAL|AUTH|DSN|COOKIE|SALT|PRIVATE)")
+SECRET_NAME = re.compile(r"(?i)(KEY|TOKEN|SECRET|PASS|PASSWD|PASSWORD|PWD|CREDENTIAL|_AUTH$|^AUTH$|DSN|COOKIE|SALT|PRIVATE_?KEY|PRIVATE$)")
 NOT_SECRET_NAME = re.compile(r"(?i)(_ID|CLIENTID|_USER|USERNAME|_NAME|_URL|_URI|_HOST|_PORT|_FILE|_PATH|_DIR)$")
 NOT_A_VALUE = re.compile(r"(?i)^(true|false|yes|no|none|null|changeme|example|\$\{?.*|/.*|[a-z][a-z0-9+.-]*://.*|\d+)$")
 URL_PASSWORD = re.compile(r"[a-z][a-z0-9+.-]*://[^/\s:@]+:([^@\s/]+)@", re.I)
 KEY_LINE = re.compile(r"^[A-Za-z0-9+/=]{40,}$")
+LINE = re.compile(r"""^\s*(?:-\s+)?(?:export\s+)?["']?([A-Za-z_][A-Za-z0-9_]*)["']?\s*(?:=|:\s)\s*(.*)$""")
+URL_KEY = re.compile(r"(?i)(URL|URI|WEBHOOK|HOOK|ENDPOINT|DSN|PING)")
+
+
+def url_tokens(v):
+    """Token-looking parts of a URL: path segments or query values of 20+ characters with letters and digits."""
+    m = re.search(r"[a-z][a-z0-9+.-]*://[^/\s?#]*(/[^\s?#]*)?(\?[^\s#]*)?", v, re.I)
+    if not m:
+        return []
+    parts = [x for x in (m.group(1) or "").split("/") if x]
+    parts += [kv.split("=", 1)[1] for kv in (m.group(2) or "")[1:].split("&") if "=" in kv]
+    out = []
+    for x in parts:
+        x = re.sub(r"^bot(?=\d+:)", "", x)                     # api.telegram.org/bot<id>:<token>
+        if len(x) >= 20 and re.search(r"[A-Za-z]", x) and re.search(r"\d", x):
+            out.append(x)
+    return out
 MISSING = []                   # configured sources that matched nothing or could not be read; filled by collect_values
 
 
@@ -95,15 +117,68 @@ def collect_values(cfg):
                 MISSING.append(f"{f} ({type(e).__name__})")
                 continue
             for line in lines:
-                m = re.match(r"\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$", line)
+                m = LINE.match(line)
                 if not m or m.group(1) in cfg["ignore_names"]:
                     continue
-                key, v = m.group(1), m.group(2).strip().strip("'\"")
+                key, v = m.group(1), re.sub(r"\s+#.*$", "", m.group(2)).strip().strip("'\"")
                 for pw in URL_PASSWORD.findall(v):                 # credentials inside a URL, whatever the key
                     if not pw.startswith("$"):
                         add(pw, f"{f}:{key} (password in URL)", "url")
+                if URL_KEY.search(key):
+                    for tok in url_tokens(v):
+                        add(tok, f"{f}:{key} (token in URL)", "url")
                 if SECRET_NAME.search(key) and not NOT_SECRET_NAME.search(key):
                     add(v, f"{f}:{key}", "env")
+    xml_tag = re.compile(r"<([A-Za-z_][\w.-]*)>([^<]{12,})</\1>")
+    for pattern in cfg.get("config_files", []):
+        for f in files_of(pattern):
+            if f.endswith((".db", ".sqlite", ".sqlite3", ".db-wal", ".db-shm", ".log", ".png", ".jpg", ".gz", ".zip")) \
+                    or re.search(r"\.(bak|old|orig)\b|~$", os.path.basename(f)) or os.path.getsize(f) > 2_000_000:
+                continue                     # databases, logs, binaries and backup copies (old, usually revoked values)
+            try:
+                text = read_text(f)
+            except OSError as e:
+                MISSING.append(f"{f} ({type(e).__name__})")
+                continue
+            if f.endswith(".json"):
+                try:
+                    items = list(json_items(json.loads(text)))
+                except ValueError:
+                    items = []
+            elif f.endswith(".xml"):
+                items = [(m.group(1), m.group(2).strip()) for m in xml_tag.finditer(text)]
+                # ASP.NET data-protection key files keep the key in <value>, under a <key> element
+                if "<key " in text and "<masterKey" in text:
+                    items += [("masterKey", m.group(2).strip()) for m in xml_tag.finditer(text) if m.group(1) == "value"]
+            else:
+                items = []
+                for line in text.splitlines():
+                    m = LINE.match(line)
+                    if m:
+                        items.append((m.group(1), re.sub(r"\s+#.*$", "", m.group(2)).strip().strip(",;").strip("'\"")))
+            for key, v in items:
+                if URL_KEY.search(key) or "://" in v:
+                    for pw in URL_PASSWORD.findall(v):
+                        if not pw.startswith("$"):
+                            add(pw, f"{f}:{key} (password in URL)", "url")
+                if URL_KEY.search(key):
+                    for tok in url_tokens(v):
+                        add(tok, f"{f}:{key} (token in URL)", "url")
+                if (SECRET_NAME.search(key) or key == "masterKey") and not NOT_SECRET_NAME.search(key):
+                    add(v, f"{f}:{key}", "config")
+    for pattern in cfg.get("json_files", []):
+        for f in files_of(pattern):
+            try:
+                data = read_json(f)
+            except (OSError, ValueError) as e:
+                MISSING.append(f"{f} ({type(e).__name__})")
+                continue
+            for key, v in json_items(data):
+                if SECRET_NAME.search(key) and not NOT_SECRET_NAME.search(key):
+                    add(v, f"{f}:{key}", "json")
+                elif URL_KEY.search(key):
+                    for tok in url_tokens(v):
+                        add(tok, f"{f}:{key} (token in URL)", "url")
     for pattern in cfg["value_files"]:
         for f in files_of(pattern):
             try:
@@ -126,13 +201,30 @@ def collect_values(cfg):
     return found
 
 
+def json_items(obj):
+    """(key, string value) pairs anywhere in a JSON document."""
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            if isinstance(v, str):
+                yield str(k), v
+            else:
+                yield from json_items(v)
+    elif isinstance(obj, list):
+        for v in obj:
+            yield from json_items(v)
+
+
 def add_key_lines(text, f, add):
-    """A private key leaks line by line: each base64 body line of 40+ characters is a value to look for."""
+    """A private key leaks line by line: each base64 body line of 40+ characters is a value to look for, except the
+    lines that are not secret. Every unencrypted OpenSSH ed25519 key starts with the SAME first line (format header),
+    and the second carries the public key; a PEM key's first line is mostly the algorithm header. Matching those would
+    report every key of the same type as leaked (it happened: 06/10/2026)."""
     if "PRIVATE KEY" not in text:
         return
-    for i, line in enumerate(text.splitlines()):
-        if KEY_LINE.match(line.strip()):
-            add(line.strip(), f"{f} (private key, line {i + 1})", "key")
+    body = [(i, l.strip()) for i, l in enumerate(text.splitlines()) if KEY_LINE.match(l.strip())]
+    skip = 2 if "OPENSSH PRIVATE KEY" in text else 1
+    for i, line in body[skip:]:
+        add(line, f"{f} (private key, line {i + 1})", "key")
 
 
 def strings(obj):
@@ -193,21 +285,36 @@ PEM_BEGIN, PEM_END = "-----BEGIN OPENSSH " + "PRIVATE KEY-----", "-----END OPENS
 def selftest():
     """Plant one fake secret of every supported shape, write them the way a transcript would, and scan."""
     d = tempfile.mkdtemp(prefix="leak-check-selftest-")
+    try:
+        return _selftest(d)
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def _selftest(d):
     os.makedirs(f"{d}/t", exist_ok=True)
     pw_url, pw_quote, pw_bslash, plain = CANARY + "u", CANARY + 'q"q', CANARY + "b\\b", CANARY + "p"
-    key_body = [("A" + CANARY + "k" * 30)[:64], ("B" + CANARY + "m" * 30)[:64]]
+    key_body = [(c + CANARY + "k" * 40)[:64] for c in "ABCD"]
+    hook, yml, lst, js = CANARY + "w" * 3, CANARY + "y", CANARY + "l", CANARY + "j"
     with open(f"{d}/.env", "w") as f:
-        f.write(f"DATABASE_URL=postgres://app:{pw_url}@db/app\nAPI_TOKEN='{pw_quote}'\nDB_PASSWORD={pw_bslash}\nREDIS_PASS={plain}\n")
+        f.write(f"DATABASE_URL=postgres://app:{pw_url}@db/app\nAPI_TOKEN='{pw_quote}'\nDB_PASSWORD={pw_bslash}\nREDIS_PASS={plain}\n"
+                f"DISCORD_WEBHOOK_URL=https://discord.example/api/webhooks/123/{hook}\n")
+    with open(f"{d}/compose.yaml", "w") as f:
+        f.write(f"services:\n  db:\n    environment:\n      POSTGRES_PASSWORD: {yml}\n      - MYSQL_ROOT_PASSWORD={lst}\n")
+    with open(f"{d}/tunnel.json", "w") as f:
+        json.dump({"AccountTag": "x", "TunnelSecret": js}, f)
     with open(f"{d}/id_test", "w") as f:
         f.write(PEM_BEGIN + "\n" + "\n".join(key_body) + "\n" + PEM_END + "\n")
     with open(f"{d}/t/s.jsonl", "w") as f:
         for cmd in (f"psql postgres://app:{pw_url}@db/app", f"curl -H 'X-Token: {pw_quote}'", f"echo {pw_bslash}",
-                    f"redis-cli -a {plain}", "cat id_test\n" + PEM_BEGIN + "\n" + "\n".join(key_body)):
+                    f"redis-cli -a {plain}", "cat id_test\n" + PEM_BEGIN + "\n" + "\n".join(key_body),
+                    f"curl https://discord.example/api/webhooks/123/{hook}", f"docker inspect db -> {yml} {lst}", f"cat tunnel.json {js}"):
             f.write(json.dumps({"message": {"content": [{"type": "tool_result", "content": cmd}]}}) + "\n")
-    cfg = {"env_files": [f"{d}/.env"], "value_files": [], "key_files": [f"{d}/id_*"], "min_length": 12,
-           "ignore_names": [], "targets": [f"{d}/t/*.jsonl"]}
+    cfg = {"env_files": [f"{d}/.env", f"{d}/compose.yaml"], "json_files": [f"{d}/tunnel.json"], "value_files": [],
+           "key_files": [f"{d}/id_*"], "min_length": 12, "ignore_names": [], "targets": [f"{d}/t/*.jsonl"]}
     r = scan(cfg)
-    want = {"DATABASE_URL (password in URL)", "API_TOKEN", "DB_PASSWORD", "REDIS_PASS", "id_test (private key)"}
+    want = {"DATABASE_URL (password in URL)", "API_TOKEN", "DB_PASSWORD", "REDIS_PASS", "id_test (private key)",
+            "DISCORD_WEBHOOK_URL (token in URL)", "POSTGRES_PASSWORD", "MYSQL_ROOT_PASSWORD", "TunnelSecret"}
     got = {h["secret"].split(":", 1)[-1].replace(f"{d}/", "") for h in r["leaks"]}
     missed = sorted(want - got)
     return {"mode": "selftest", "planted": len(want), "found": len(want & got), "missed": missed}
@@ -252,7 +359,7 @@ def main():
             print(f"LEAK {h['secret']} in {h['transcript']} ({h['occurrences']}x)")
         print(json.dumps({k: v for k, v in r.items() if k not in ("leaks", "new_leaks")} |
                          {"leaks": len(r["leaks"]), "new_leaks": len(r.get("new_leaks", r["leaks"]))}))
-        sys.exit(1 if r["leaks"] else 0)
+        sys.exit(1 if r["leaks"] else 3 if r.get("missing_sources") else 0)
     except SystemExit:
         raise
     except Exception as e:

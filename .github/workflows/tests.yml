@@ -26,6 +26,8 @@ jobs:
         run: cd go-gate && python -m unittest -v test_go_gate.py
       - name: leak-check tests (fake secrets only)
         run: cd leak-check && python -m unittest -v test_leak_check.py
+      - name: leak-check orchestration scripts (syntax)
+        run: bash -n leak-check/contrib/run-server.sh && bash -n leak-check/contrib/run-laptop.sh
 
   hook-gym:
     # External benchmark for Claude Code hooks (https://pypi.org/project/hook-gym/).

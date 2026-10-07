@@ -61,18 +61,74 @@ class LeakCheck(unittest.TestCase):
         self.assertEqual(self.names(lc.scan(cfg)), ["API_TOKEN", "DB_PASSWORD"])
 
     def test_private_key_lines(self):
-        body = [("A" + FAKE * 4)[:64], ("B" + FAKE[::-1] * 4)[:64]]
+        body = [(c + FAKE * 4)[:64] for c in "ABC"] + [("D" + FAKE[::-1] * 4)[:64]]
         w(f"{self.d}/id_test", PEM_BEGIN + "\n" + "\n".join(body) + "\n" + PEM_END + "\n")
         w(f"{self.d}/id_test.pub", "ssh-ed25519 AAAA public\n")
-        transcript(f"{self.t}/s.jsonl", "cat id_test\n" + body[1])
+        transcript(f"{self.t}/s.jsonl", "cat id_test\n" + body[3])
         cfg = dict(self.cfg, key_files=[f"{self.d}/id_*"], env_files=[], value_files=[])
         r = lc.scan(cfg)
         self.assertEqual(self.names(r), ["id_test (private key)"])
-        self.assertEqual(r["inventory"], {"key": 2})
+        self.assertEqual(r["inventory"], {"key": 2})              # header and public-key lines are not counted
+
+    def test_shared_key_header_is_not_a_leak(self):
+        body = [(c + FAKE * 4)[:64] for c in "ABCD"]
+        w(f"{self.d}/id_test", PEM_BEGIN + "\n" + "\n".join(body) + "\n" + PEM_END + "\n")
+        transcript(f"{self.t}/s.jsonl", "another key of the same type starts with\n" + body[0] + "\n" + body[1])
+        cfg = dict(self.cfg, key_files=[f"{self.d}/id_*"], env_files=[], value_files=[])
+        self.assertEqual(lc.scan(cfg)["leaks"], [])
 
     def test_plain_text_targets(self):
         w(f"{self.d}/hist", f"ls\nmysql -p{FAKE}\n")
         self.assertEqual(self.names(lc.scan(self.cfg, [f"{self.d}/hist"])), ["DB_PASSWORD"])
+
+    # the five shapes of the fifth external audit (06/10): none of them was inventoried before
+    def test_compose_yaml_and_list_forms(self):
+        w(f"{self.d}/c/compose.yaml", f"services:\n  db:\n    environment:\n      POSTGRES_PASSWORD: {FAKE}y\n"
+                                      f"      - MYSQL_ROOT_PASSWORD={FAKE}l  # comment\n    image: postgres:16\n")
+        vals = lc.collect_values(dict(self.cfg, env_files=[f"{self.d}/c/compose.yaml"], value_files=[]))
+        self.assertEqual(sorted(n.split(":")[-1] for n, _k in vals.values()), ["MYSQL_ROOT_PASSWORD", "POSTGRES_PASSWORD"])
+
+    def test_config_options_are_not_secrets(self):
+        w(f"{self.d}/o/compose.yaml", "      TINYAUTH_AUTH_TRUSTEDPROXIES: 172.16.0.0/12,10.0.0.0/8\n"
+                                      "      PRIVATE_TRACKER_HANDLING: skip_and_keep_seeding\n"
+                                      f"      PLEX_TOKEN: {FAKE}x\n")
+        vals = lc.collect_values(dict(self.cfg, env_files=[f"{self.d}/o/compose.yaml"], value_files=[]))
+        self.assertEqual([n.split(":")[-1] for n, _k in vals.values()], ["PLEX_TOKEN"])
+
+    def test_tokens_inside_url_keys(self):
+        uuid = "3f2b9c1e-" + "7a4d-4e8b-9c2f-1a2b3c4d5e6f"
+        w(f"{self.d}/h/.env", f"DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/123/{FAKE}w\n"
+                              f"HEALTHCHECK_URL=https://hc-ping.com/{uuid}\nTG_URL=https://api.telegram.org/bot12345:{FAKE}t/sendMessage\n"
+                              "HOMEPAGE_URL=https://example.org/docs/getting-started\n")
+        vals = lc.collect_values(dict(self.cfg, env_files=[f"{self.d}/h/.env"], value_files=[]))
+        self.assertEqual(sorted(n.split(":")[-1] for n, _k in vals.values()),
+                         ["DISCORD_WEBHOOK_URL (token in URL)", "HEALTHCHECK_URL (token in URL)", "TG_URL (token in URL)"])
+
+    def test_json_secret_keys(self):
+        w(f"{self.d}/j/tunnel.json", json.dumps({"AccountTag": "acc1234567890abcdef", "TunnelSecret": FAKE + "j",
+                                                  "TunnelID": "id1234567890abcdef12"}))
+        vals = lc.collect_values(dict(self.cfg, env_files=[], value_files=[], json_files=[f"{self.d}/j/*.json"]))
+        self.assertEqual([n.split(":")[-1] for n, _k in vals.values()], ["TunnelSecret"])
+
+    def test_app_config_files(self):
+        w(f"{self.d}/app/config/config.xml", f"<Config><Port>8989</Port><ApiKey>{FAKE}x</ApiKey></Config>")
+        w(f"{self.d}/app/config/settings.json", json.dumps({"main": {"apiKey": FAKE + "s", "applicationUrl": "https://x"}}))
+        w(f"{self.d}/app/config/config.toml", f'api_key = "{FAKE}t"\nport = 7474\n')
+        w(f"{self.d}/app/config/rclone.conf", f"[gdrive]\ntype = drive\ntoken = {FAKE}r\n")
+        vals = lc.collect_values(dict(self.cfg, env_files=[], value_files=[], config_files=[f"{self.d}/app/config/*"]))
+        self.assertEqual(sorted(n.split(":")[-1] for n, _k in vals.values()), ["ApiKey", "apiKey", "api_key", "token"])
+
+    def test_missing_source_exit_code_3(self):
+        cfgf = f"{self.d}/cfg.json"
+        lc.write_json(cfgf, self.cfg)
+        r = subprocess.run([sys.executable, os.path.join(HERE, "leak_check.py"), "scan", "--config", cfgf,
+                            "--targets", f"{self.d}/nothing/*.jsonl"], capture_output=True, text=True)
+        self.assertEqual(r.returncode, 3)
+
+    def test_selftest_leaves_nothing_behind(self):
+        before = set(os.listdir(tempfile.gettempdir()))
+        lc.selftest()
+        self.assertEqual({x for x in set(os.listdir(tempfile.gettempdir())) - before if x.startswith("leak-check-selftest")}, set())
 
     def test_hidden_folders_are_scanned(self):
         transcript(f"{self.d}/home/.claude/projects/p/s.jsonl", FAKE)
