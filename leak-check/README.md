@@ -15,7 +15,7 @@ It runs where the secrets live, as root and outside the agent's reach. It reads 
 | A Telegram bot token, used by 7 services | 4 server transcripts | was valid: rotated |
 | The Cloudflare tunnel token | 2 laptop transcripts | was valid: tunnel secret rotated |
 | A Proxmox API token | 1 server transcript | already revoked |
-| 3 OIDC client secrets (dashboard, recipes, log viewer) | a laptop file Claude Code wrote itself (`auto-mode-classifier-error.txt`) | rotation pending (needs the owner's passkey) |
+| 3 OIDC client secrets (dashboard, recipes, log viewer) | a laptop file Claude Code wrote itself (`auto-mode-classifier-error.txt`) | rotated (new secrets 06/10, old ones deleted 07/10) |
 | A Plex token | 1 laptop transcript (18 times) | kept: rotating it signs out every device; moved out of the compose file |
 
 secret-guard had missed all of them.

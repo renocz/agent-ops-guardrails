@@ -2,17 +2,18 @@
 
 One version scheme: **a repository tag per release**. Components have no version of their own. Commit messages from 06/10/2026 that say "secret-guard v0.3/v0.4/v0.5" refer to the intermediate revisions listed under v0.6.
 
-## v0.8 (unreleased)
+## v0.8 (07/10/2026)
 
 - **leak-check, after a fifth external audit** (5 common homelab shapes, 0 inventoried):
   - new readers: `KEY: value` and `- KEY=value` (compose files), JSON secret keys, app config files (.json, .xml, YAML/TOML/INI/.conf/.js), token-looking parts of webhook and ping URLs;
   - private-key header and public-key lines are no longer treated as secret;
   - exit code 3 when a source is missing;
   - the self-test cleans up after itself and plants 9 shapes;
+  - values that are templates (`{{ … }}`, `{% … %}`) are not secrets (a real false positive: a Prowlarr indexer definition);
   - the orchestration scripts are published (`contrib/run-server.sh`, `contrib/run-laptop.sh`), with an end-to-end witness and a 26-hour no-pass alert.
 - **Correction:** the SSH key leak reported in v0.7 was a false positive (a header line shared by every OpenSSH ed25519 key). It is retracted in the README, the results and the changelog.
 - **Coverage measured:** gitleaks over the same folders flags 128 values. leak-check inventories 68 of them (53%), and most of the rest are explained.
-- **New real leaks found:** 3 OIDC client secrets (rotation pending) and a Plex token (moved out of the compose file; not rotated, by choice).
+- **New real leaks found:** 3 OIDC client secrets (rotated on 06/10, old secrets deleted on 07/10) and a Plex token (moved out of the compose file; not rotated, by choice).
 
 ## v0.7 (06/10/2026)
 
