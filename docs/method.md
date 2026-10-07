@@ -12,7 +12,7 @@ Every change follows the same steps:
 1. **Analyse.** Read-only: the reference doc, the running state, logs, and who depends on what.
 2. **Plan.** A short message in plain words: what changes and why, impact and downtime, risk, the dry-run result, the rollback, and how it will be verified.
 3. **GO.** Nothing changes without an explicit "go" from the human in the conversation.
-   - A few standing exceptions are written down. For example, pasting an automated security alert counts as a GO for that update.
+   - A pasted automated alert is **not** a GO: the agent verifies it and proposes a plan, and the human answers GO (see the [FAQ](faq.md#does-a-pasted-alert-count-as-a-go)).
    - Any new **external exposure** is always the human's decision.
 4. **Dry-run.** `docker compose up -d --no-deps --dry-run <svc>` shows which containers would be recreated. Scripts that edit files print their diff first.
 5. **Execute.** Back up before writing (a `.bak` file, or a ZFS snapshot for upgrades). Stop on the first surprise.

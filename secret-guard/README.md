@@ -42,7 +42,9 @@ For Bash, commands such as `crontab -l`, `docker inspect`, `env` / `printenv VAR
 - `cat .env; ls 2>&1 | mask` is refused, because only `ls` is masked;
 - a `mask` that sits in a comment or a quoted string does not count.
 
-When the output provably holds no values, for example `grep -c`, a hash, or key names only, the agent may end the command with `# secret-ok`. This is a visible claim that a reviewer can check. It only counts as the very last thing in the command.
+When the output provably holds no values, for example `grep -c`, a hash, or key names only, the agent may end the command with `# secret-ok`. This is a visible claim that a reviewer can check. It only counts as the very last thing in the command, and since v0.9 it is logged (`~/.local/state/secret-guard/marker.log`) and cannot cover a command that reads a secret file, unless every reader only counts (`grep -c/-l/-q`).
+
+**Since v0.9 (external audit of v0.8, 16 demonstrated bypasses):** the rules also read the command with its quotes removed (`c""at .en""v`), expand its globs (`cat .e[n]v`, against the working directory and a list of usual secret file names), treat input redirected from a secret file as a read (`read x < .env`, `tee < .env`), know more readers (`dd`, `tee`, `paste`, `openssl`…), refuse a reader whose path is only known at run time (`cat "$f"`, `cat $(printf …)`) unless it is masked, refuse inline scripts that open files (`python3 -c '…read_text()'`), refuse a command that redefines `mask` or `PATH`, and refuse a value cut out of its line before the mask (`cut -d= -f2 .env | mask`). The mask itself now also hides a line that is one bare token. These are patterns on text: they raise the cost of a disguise, they do not make the hook a security boundary.
 
 `mask` is a small Perl filter. It redacts:
 - common key formats and JWTs;

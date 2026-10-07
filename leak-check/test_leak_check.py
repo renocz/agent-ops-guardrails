@@ -102,6 +102,65 @@ class LeakCheck(unittest.TestCase):
         vals = lc.collect_values(dict(self.cfg, env_files=[], value_files=[], config_files=[f"{self.d}/def/*.yml"]))
         self.assertEqual([n.split(":")[-1] for n, _k in vals.values()], ["apikey"])
 
+    # --- external audit of v0.8 by gpt (07/10): values that were never inventoried --------------------------------
+    def inv(self, name, text, kind="config_files"):
+        w(f"{self.d}/a/{name}", text)
+        cfg = dict(self.cfg, env_files=[], value_files=[], config_files=[], json_files=[], key_files=[])
+        cfg[kind] = [f"{self.d}/a/{name}"]
+        return sorted(n.split(":", 1)[-1].replace(f"{self.d}/a/", "") for n, _k in lc.collect_values(cfg).values())
+
+    def test_short_password_under_a_secret_name(self):
+        self.assertEqual(len(self.inv("a.env", "PASSWORD=hunter22\nPIN_CODE=1234\nPORT_PASSWORD_MIN=8\n", "env_files")), 1)
+
+    def test_yaml_block_xml_attribute_pgpass_token_cfg_json_list(self):
+        self.assertEqual(self.inv("c.yml", "api_token: |\n  " + FAKE + "y\nother: 1\n"), ["api_token"])
+        self.assertEqual(self.inv("Preferences.xml", '<Preferences PlexOnlineToken="' + FAKE + 'x" Port="32400"/>'),
+                         ["PlexOnlineToken"])
+        self.assertEqual(self.inv(".pgpass", "localhost:5432:db:app:" + FAKE + "g\n"), ["PGPASS_PASSWORD"])
+        self.assertEqual(self.inv("token.cfg", "root@pam!agent " + "a1b2c3d4-0000-4000-8000-" + "123456789abc" + "\n"),
+                         ["PROXMOX_TOKEN_SECRET"])
+        self.assertEqual(self.inv("d.json", json.dumps({"tokens": [FAKE + "t"]})), ["tokens"])
+
+    def test_rclone_token_and_docker_auth(self):
+        tok = json.dumps({"access_token": FAKE + "a", "refresh_token": FAKE + "r"})
+        got = self.inv("rclone.conf", "[gd]\ntype = drive\ntoken = " + tok + "\n")
+        self.assertIn("token:access_token", got)
+        self.assertIn("token:refresh_token", got)
+        import base64
+        auth = base64.b64encode(("alice:" + FAKE + "d").encode()).decode()
+        got = self.inv("config.json", json.dumps({"auths": {"r.io": {"auth": auth}}}))
+        self.assertEqual(got, ["auth", "auth (decoded password)"])
+
+    def test_json_files_url_password(self):
+        self.assertEqual(self.inv("e.json", json.dumps({"DATABASE_URL": "postgres://u:" + FAKE + "u@h/db"}), "json_files"),
+                         ["DATABASE_URL (password in URL)"])
+
+    def test_one_line_pem_key(self):
+        body = ("MC4CAQAwBQYDK2VwBCIEI" + FAKE * 3)[:64]
+        w(f"{self.d}/k/ed.pem", "-----BEGIN " + "PRIVATE KEY-----\n" + body + "\n-----END " + "PRIVATE KEY-----\n")
+        cfg = dict(self.cfg, env_files=[], value_files=[], key_files=[f"{self.d}/k/ed.pem"])
+        self.assertEqual(len(lc.collect_values(cfg)), 1)
+
+    def test_skipped_files_are_reported(self):
+        w(f"{self.d}/s/app.sqlite", "x")
+        w(f"{self.d}/s/settings.old.json", "{}")
+        cfg = dict(self.cfg, env_files=[], value_files=[], config_files=[f"{self.d}/s/*"])
+        self.assertEqual(len(lc.scan(cfg)["skipped_sources"]), 2)
+
+    def test_rotated_value_leaking_again_is_new(self):
+        state = f"{self.d}/st.json"
+        r1 = lc.only_new({"leaks": [{"secret": "x:API_TOKEN", "transcript": "t", "occurrences": 1, "vid": "aaa"}]}, state)
+        r2 = lc.only_new({"leaks": [{"secret": "x:API_TOKEN", "transcript": "t", "occurrences": 1, "vid": "bbb"}]}, state)
+        r3 = lc.only_new({"leaks": [{"secret": "x:API_TOKEN", "transcript": "t", "occurrences": 2, "vid": "bbb"}]}, state)
+        self.assertEqual((len(r1["new_leaks"]), len(r2["new_leaks"]), len(r3["new_leaks"])), (1, 1, 0))
+
+    def test_old_state_without_value_ids_does_not_realert(self):
+        state = f"{self.d}/old.json"
+        with open(state, "w") as f:
+            json.dump(["x:API_TOKEN|t"], f)
+        r = lc.only_new({"leaks": [{"secret": "x:API_TOKEN", "transcript": "t", "occurrences": 1, "vid": "aaa"}]}, state)
+        self.assertEqual(r["new_leaks"], [])
+
     def test_tokens_inside_url_keys(self):
         uuid = "3f2b9c1e-" + "7a4d-4e8b-9c2f-1a2b3c4d5e6f"
         w(f"{self.d}/h/.env", f"DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/123/{FAKE}w\n"
@@ -154,7 +213,7 @@ class LeakCheck(unittest.TestCase):
         w(f"{self.d}/p/.env", "export API_TOKEN='" + FAKE + "'\n# OLD_PASSWORD=" + FAKE[::-1] + "x\n"
                               "DB_PASSWORD=12345678901234\nREDIS_PASSWORD=${REDIS_PASS}\n")
         vals = lc.collect_values(dict(self.cfg, env_files=[f"{self.d}/p/.env"], value_files=[]))
-        self.assertEqual([n.split(":")[-1] for n, _k in vals.values()], ["API_TOKEN"])
+        self.assertEqual(sorted(n.split(":")[-1] for n, _k in vals.values()), ["API_TOKEN", "DB_PASSWORD"])  # v0.9: digits count
 
     def test_state_reports_only_new_findings(self):
         transcript(f"{self.t}/s.jsonl", FAKE)

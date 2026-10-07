@@ -162,8 +162,15 @@ def run_hook(event, gate_dir):
     return r.returncode, out.get("hookSpecificOutput", {}).get("permissionDecision", "allow")
 
 
-def telegram(text, uid="42"):
-    return f'<channel source="plugin:telegram:telegram" chat_id="1" message_id="9" user="u" user_id="{uid}" ts="x">\n{text}\n</channel>'
+_MID = [100]
+
+
+def telegram(text, uid="42", mid=None, ts=None):
+    """A channel message as the Telegram plugin delivers it: unique message_id, current UTC time."""
+    _MID[0] += 1
+    mid = mid or str(_MID[0])
+    ts = ts or time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime())
+    return f'<channel source="plugin:telegram:telegram" chat_id="1" message_id="{mid}" user="u" user_id="{uid}" ts="{ts}">\n{text}\n</channel>'
 
 
 class Classifier(unittest.TestCase):
@@ -184,6 +191,20 @@ class Classifier(unittest.TestCase):
         self.assertEqual(g.classify("mcp__claude-in-chrome__computer", {"action": "screenshot"})[0], "read")
         self.assertEqual(g.classify("mcp__claude-in-chrome__computer", {"action": "left_click"})[0], "change")
         self.assertEqual(g.classify("mcp__some__delete_item", {})[0], "change")
+        self.assertEqual(g.classify("mcp__lab__get_and_delete_secret", {})[0], "change")     # GG-08
+        self.assertEqual(g.classify("mcp__lab__get_status", {})[0], "read")
+        for code, kind in (("from os import remove as r; r('/srv/x')", "change"),           # GG-01
+                           ("import pathlib; pathlib.Path('/srv/x').unlink()", "change"),
+                           ("getattr(__import__('os'), 'remove')('/srv/x')", "change"),
+                           ("import json,sys; print(json.load(sys.stdin)['a'])", "read"),
+                           ("print(1+1)", "read"),
+                           ("open('/srv/x', 'w').write('y')", "change"),             # council review of v0.9
+                           ("m = 'a'; open('/srv/x', m).write('y')", "change"),
+                           ("open('/srv/x', mode='w')", "change"),
+                           ("print('y', file=open('/srv/x', 'a'))", "change"),
+                           ("print(open('/etc/hosts').read()[:50])", "read"),
+                           ("print(open('/etc/hosts', 'r').read()[:50])", "read")):
+            self.assertEqual(g.classify("Bash", {"command": f'python3 -c "{code}"'})[0], kind, code)
 
 
 class Scope(unittest.TestCase):
@@ -312,10 +333,78 @@ class Hook(unittest.TestCase):
         self.assertEqual(self.act(), "allow")
 
     def test_plan_proposed_through_chat_tool(self):
-        run_hook({"hook_event_name": "PreToolUse", "tool_name": "mcp__plugin_telegram_telegram__reply",
-                  "tool_input": {"text": "Plan…\nPérimètre : id=p2 ; targets=web ; actions=deploy"}}, self.dir)
+        ti = {"text": "Plan…\nPérimètre : id=p2 ; targets=web ; actions=deploy"}
+        run_hook({"hook_event_name": "PreToolUse", "tool_name": "mcp__plugin_telegram_telegram__reply", "tool_input": ti},
+                 self.dir)
+        run_hook({"hook_event_name": "PostToolUse", "tool_name": "mcp__plugin_telegram_telegram__reply", "tool_input": ti,
+                  "tool_response": "sent (id: 3435)"}, self.dir)
         self.prompt(telegram("OK"))
         self.assertEqual(self.act(), "allow")
+
+    # --- external audit of v0.8 by gpt (07/10) -------------------------------------------------------------------
+    def test_undelivered_plan_is_not_pending(self):
+        ti = {"text": "Scope: id=p2 ; targets=web ; actions=deploy"}
+        run_hook({"hook_event_name": "PreToolUse", "tool_name": "mcp__plugin_telegram_telegram__reply", "tool_input": ti},
+                 self.dir)
+        self.prompt(telegram("GO"))
+        self.assertEqual(self.act(), "deny")                        # never sent: GG-06
+        run_hook({"hook_event_name": "PostToolUse", "tool_name": "mcp__plugin_telegram_telegram__reply", "tool_input": ti,
+                  "tool_response": {"error": "chat not found"}}, self.dir)
+        self.prompt(telegram("GO"))
+        self.assertEqual(self.act(), "deny")                        # send failed
+
+    def test_old_pending_plan_expires(self):
+        self.propose()
+        st = json.loads(rtext(os.path.join(self.dir, "state.json")))
+        st["sessions"]["no-session"]["pending"]["proposed_at"] = time.time() - 24 * 3600
+        wjson(os.path.join(self.dir, "state.json"), st)
+        self.prompt(telegram("GO"))
+        self.assertIn("NOT applied", run_hook.context)             # the agent is told, not left guessing
+        self.assertEqual(self.act(), "deny")                        # GG-05
+
+    def test_go_dated_in_the_future_is_ignored(self):
+        self.propose()
+        self.prompt(telegram("GO", ts="2099-01-01T00:00:00.000Z"))
+        self.assertEqual(self.act(), "deny")
+
+    def test_replayed_or_old_go_is_ignored(self):
+        self.propose()
+        self.prompt(telegram("GO", ts="2000-01-01T00:00:00.000Z"))
+        self.assertEqual(self.act(), "deny")                        # GG-04: old message
+        self.prompt(telegram("GO", mid="777"))
+        self.assertEqual(self.act(), "allow")
+        self.prompt(telegram("stop"))
+        self.propose()
+        self.prompt(telegram("GO", mid="777"))
+        self.assertEqual(self.act(), "deny")                        # same message_id used twice
+
+    def test_unicode_look_alikes_are_not_go(self):
+        for text in ("yeſ", "G\u041e", "GO\u200b", "ＧＯ"):
+            self.propose()
+            self.prompt(telegram(text))
+            self.assertEqual(self.act(), "deny", repr(text))      # GG-09
+
+    def test_every_object_must_be_in_scope(self):
+        self.propose()
+        self.prompt(telegram("GO"))
+        self.assertEqual(self.act("docker restart web"), "allow")
+        self.assertEqual(self.act("docker restart db web"), "deny")   # GG-07
+
+    def test_gate_state_cannot_be_written_through_a_link(self):
+        link = os.path.join(tempfile.mkdtemp(), "x.json")
+        os.symlink(os.path.join(self.dir, "state.json"), link)
+        env = dict(os.environ, GO_GATE_DIR=self.dir)
+        old = os.environ.get("GO_GATE_DIR")
+        os.environ["GO_GATE_DIR"] = self.dir
+        try:
+            self.assertEqual(g.classify("Write", {"file_path": link})[0], "change")             # GG-02
+            self.assertEqual(g.classify("Bash", {"command": f"echo x > {link}"})[0], "change")
+            self.assertEqual(g.category("Write", {"file_path": link}, "change", "protected go-gate state"), "protected")
+        finally:
+            if old is None:
+                os.environ.pop("GO_GATE_DIR")
+            else:
+                os.environ["GO_GATE_DIR"] = old
 
     def test_stop_revokes(self):
         self.propose()

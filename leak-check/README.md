@@ -22,6 +22,10 @@ secret-guard had missed all of them.
 
 **A correction.** v0.7 reported a leaked SSH private key. That was a false positive: every unencrypted OpenSSH ed25519 key starts with the same base64 line, and leak-check matched that shared header line. The key was rotated anyway, which did no harm. Since v0.8, header and public-key lines are never treated as secret.
 
+## Since v0.9 (external audit of v0.8)
+
+New readers: YAML block values (`key: |`), XML attributes (Plex `PlexOnlineToken="…"`), `.pgpass`, Proxmox `priv/token.cfg`, strings in JSON lists, the tokens inside an rclone `token = {…}`, Docker `auth` decoded to its password, URL passwords in `json_files`, and one-line PEM keys (Ed25519 PKCS#8). A value under a key that says it is secret counts from 6 characters (10 for all-digit values). Files left out on purpose (databases, backups, files over 2 MB) are listed in `skipped_sources`, never silently counted as checked. Each leak carries a keyed fingerprint of the value (local random key in `~/.local/state/leak-check/value-id.key` of the user running the scan, kept with the root-only report), so a rotated secret that leaks again is a new finding. Back the key up with the state: a lost key only makes the known leaks alert once more. The orchestration counts a laptop pass as healthy only with the witness, a manifest of the files that were sent, and at least one transcript; a failed scan never re-reads the previous report; a first pass that never comes raises an alert.
+
 ## Coverage, measured independently
 
 [gitleaks](https://github.com/gitleaks/gitleaks) was run once over the same server folders (`/opt/stacks`, `/etc`). Its findings were compared with leak-check's inventory, by value, without printing any.

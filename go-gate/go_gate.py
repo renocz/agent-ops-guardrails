@@ -154,11 +154,39 @@ def write_targets(tokens):
     return targets
 
 
+def protected_paths():
+    """The gate's state and config, the hooks and the Claude Code settings: no plan can cover writing them."""
+    gate = os.path.expanduser(os.environ.get("GO_GATE_DIR", "~/.claude/go-gate"))
+    return [os.path.realpath(x) for x in (gate, os.path.expanduser("~/.claude/hooks"),
+            os.path.expanduser("~/.claude/settings.json"), os.path.expanduser("~/.claude/settings.local.json"),
+            os.path.expanduser("~/.config/secret-guard"))]
+
+
+def real(path):
+    p = os.path.expanduser(path.strip("'\""))
+    try:
+        return os.path.realpath(p)                 # follows symlinks: /tmp/link -> ~/.claude/go-gate/state.json
+    except (OSError, ValueError):
+        return os.path.normpath(p)
+
+
+def is_protected(path):
+    r = real(path)
+    return any(r == x or r.startswith(x + os.sep) for x in protected_paths())
+
+
 def is_scratch(path):
+    """External audit of v0.8 (07/10): judged on the real location, so a symlink in /tmp does not make its target scratch."""
     p = os.path.expanduser(path.strip("'\""))
     if ".." in p:
         p = os.path.normpath(p)
-    return bool(re.search(SCRATCH, p)) or "/scratchpad/" in p or p.startswith("$TMPDIR")
+    if is_protected(p):
+        return False
+    textual = bool(re.search(SCRATCH, p)) or "/scratchpad/" in p or p.startswith("$TMPDIR")
+    if not textual:
+        return False
+    r = real(p)
+    return bool(re.search(SCRATCH, r)) or "/scratchpad/" in r or p.startswith("$TMPDIR")
 
 
 def classify_stage(stage, depth, bodies=()):
@@ -180,6 +208,8 @@ def classify_stage(stage, depth, bodies=()):
     unquoted = re.sub(r"'[^']*'|\"(?:\\.|[^\"\\])*\"", "Q", stage)
     raw = re.findall(r"\S+", unquoted)
     for tgt in write_targets(raw):
+        if is_protected(tgt):
+            return "change", "protected go-gate state, hooks or settings"
         if not is_scratch(tgt):
             return "change", f"writes {tgt[:40]}"
     toks = [t for t in toks if not re.fullmatch(r"\d*[<>]+&?\d*|&>>?|\d*>>?\S+|<<<?-?\S*", t)]
@@ -387,9 +417,36 @@ PY_ACTS = re.compile(r"open\([^)]*['\"][wax+]|\.write(_text|_bytes)?\(|\bos\.(re
                      r"__import__|\.unlink\(|\.rename\(|\.mkdir\(|\.touch\(|\bsqlite3\b|\bpsycopg|json\.dump\(")
 
 
+PY_PURE = {"json", "re", "sys", "math", "datetime", "collections", "itertools", "functools", "statistics", "csv",
+           "base64", "hashlib", "textwrap", "string", "time", "decimal", "fractions", "pprint", "difflib", "unicodedata",
+           "zoneinfo", "calendar", "operator", "typing", "dataclasses", "enum", "uuid", "ipaddress", "html", "shlex",
+           "glob", "fnmatch", "argparse", "struct", "binascii", "secrets", "random", "copy", "heapq", "bisect"}
+# open() is a read only with no mode or a literal read mode (council review of v0.9: `open(p, m)` or a variable mode writes)
+PY_OPEN_WRITE = re.compile(r"\bopen\s*\((?:[^()]|\([^()]*\))*?,\s*(?!['\"](?:r|rb|rt|br|tr)['\"])[^)\s]"
+                           r"|\bopen\s*\([^)]*\bmode\s*=\s*(?!['\"](?:r|rb|rt)['\"])|\bprint\s*\([^)]*\bfile\s*=")
+PY_DYNAMIC = re.compile(r"\b(getattr|setattr|globals|locals|vars|compile|__builtins__|__dict__|breakpoint|input)\b")
+
+
 def python_kind(code):
-    m = PY_ACTS.search(code)
-    return ("change", f"python {m.group(0)[:20]}") if m else ("read", "")
+    """External audit of v0.8 (07/10): `from os import remove as r; r(...)` passed the action list. Python counts as a
+    read only when every module it imports is pure (no file, process or network access) and it uses no dynamic access."""
+    m = PY_ACTS.search(code) or PY_OPEN_WRITE.search(code)
+    if m:
+        return "change", f"python {m.group(0)[:20]}"
+    mods = re.findall(r"^\s*from\s+([\w.]+)\s+import|^\s*import\s+([\w., ]+)", code, re.M)
+    mods += re.findall(r"(?:;|\bexec\b)\s*from\s+([\w.]+)\s+import|;\s*import\s+([\w., ]+)", code)
+    names = set()
+    for a, b in mods:
+        for x in (a or b).split(","):
+            x = x.strip().split(" as ")[0].strip()
+            if x:
+                names.add(x.split(".")[0])
+    impure = sorted(n for n in names if n not in PY_PURE)
+    if impure:
+        return "change", f"python import {impure[0]}"[:30]
+    if PY_DYNAMIC.search(code):
+        return "change", "python dynamic access"
+    return "read", ""
 
 
 ACTION_ANYWHERE = {"webhook", "webhook-test", "hook", "hooks", "trigger", "triggers"}
@@ -530,6 +587,9 @@ MCP_READ = re.compile(r"__(get|list|search|read|query|find|scrape|fetch|describe
                       r"tabs_context|read_page|get_page_text|read_console|read_network|query-docs|resolve-library)")
 
 
+# External audit of v0.8 (07/10): `mcp__lab__get_and_delete_secret` was a read because it starts with get.
+MCP_WRITE = re.compile(r"(delete|remove|drop|purge|destroy|write|update|upsert|create|insert|set|send|post|put|patch|exec|"
+                       r"run|kill|reset|move|rename|upload|trash|revoke|rotate|restart|stop|start|deploy|apply|commit)", re.I)
 BROWSER_READ_ACTIONS = {"screenshot", "scroll", "zoom", "hover", "wait", "mouse_move", "scroll_to"}
 MEMORY_DIR = re.compile(r"^" + re.escape(os.path.expanduser("~/.claude/projects/")) + r"[^/]+/memory/")   # agent notes
 
@@ -545,6 +605,8 @@ def classify(tool, tool_input):
         return classify_bash(tool_input.get("command", ""))
     if tool in ("Write", "Edit", "MultiEdit", "NotebookEdit"):
         p = tool_input.get("file_path") or tool_input.get("notebook_path") or ""
+        if is_protected(p):
+            return "change", "protected go-gate state, hooks or settings"
         if is_scratch(p) or MEMORY_DIR.match(os.path.expanduser(p)):
             return "read", "scratch or memory write"
         return "change", f"{tool} {p[-50:]}"
@@ -552,7 +614,7 @@ def classify(tool, tool_input):
         return "read", ""
     if TALK_TOOLS.search(tool):
         return "talk", ""
-    if tool.startswith("mcp__") and MCP_READ.search(tool):
+    if tool.startswith("mcp__") and MCP_READ.search(tool) and not MCP_WRITE.search(tool.rsplit("__", 1)[-1]):
         return "read", ""
     return "change", tool
 
@@ -576,11 +638,12 @@ def classify(tool, tool_input):
 import fcntl, json, time
 
 GATE_DIR = os.path.expanduser(os.environ.get("GO_GATE_DIR", "~/.claude/go-gate"))
-DEFAULTS = {"mode": "observe", "owner_ids": [], "ttl_minutes": 120, "max_ttl_minutes": 240}
+DEFAULTS = {"mode": "observe", "owner_ids": [], "ttl_minutes": 120, "max_ttl_minutes": 240, "pending_minutes": 120}
 CATEGORIES = ("edit", "git", "deploy", "api", "browser", "delete", "script", "doc")
 SCOPE_LINE = re.compile(r"^\W*(?:scope|p[ée]rim[èe]tre)\s*:\s*(.+)$", re.I | re.M)
-AFFIRM = re.compile(r"^\s*(go|ok|okay|oui|yes|vas[- ]y)\b[\s!.]*(.*)$", re.I | re.S)
-STRICT_GO = re.compile(r"^\s*(go|ok|okay|oui|yes|vas[- ]y)(?:\s+([\w.-]{1,40}))?\s*[!.]*\s*$", re.I)
+AFFIRM = re.compile(r"^\s*(go|ok|okay|oui|yes|vas[- ]y)\b[\s!.]*(.*)$", re.I | re.S | re.A)
+# re.A: an ASCII grammar, so `yeſ` (long s) or a Cyrillic O never count (external audit of v0.8)
+STRICT_GO = re.compile(r"^\s*(go|ok|okay|oui|yes|vas[- ]y)(?:\s+([\w.-]{1,40}))?\s*[!.]*\s*$", re.I | re.A)
 RESERVATION = re.compile(r"\b(mais|sauf|seulement|uniquement|pas|only|but|except|without|sans|attends?|wait)\b|\?",
                          re.I)
 REVOKE = re.compile(r"^\s*(?:(stop|annule|annuler|cancel)\b|(non|no)\s*[!.]*\s*$)", re.I)
@@ -690,6 +753,8 @@ def category(tool, tool_input, kind, detail):
     if kind == "opaque":
         return "script"
     d = detail.lower()
+    if d.startswith("protected"):
+        return "protected"                     # not a plan category: never covered
     if tool in ("Write", "Edit", "MultiEdit", "NotebookEdit"):
         p = (tool_input.get("file_path") or tool_input.get("notebook_path") or "").lower()
         return "doc" if re.search(r"\.(md|txt|rst)$", p) else "edit"
@@ -716,7 +781,37 @@ def covers(plan, tool, tool_input, cat, text=None):
     if not targets:
         return True
     blob = (text if text is not None else json.dumps(tool_input, ensure_ascii=False)).lower()
-    return any(t.lower() in blob for t in targets)
+    if not any(t.lower() in blob for t in targets):
+        return False
+    # External audit of v0.8 (07/10): `docker restart db web` passed with targets=web. For verbs that take several
+    # objects, every object must match a target.
+    for objs in multi_objects(text or ""):
+        if any(not any(t.lower() in o.lower() or o.lower() in t.lower() for t in targets) for o in objs):
+            return False
+    return True
+
+
+MULTI_VERBS = re.compile(r"\b(docker(?:\s+compose)?|podman|systemctl|pct|qm|kubectl\s+delete\s+\w+)\s+"
+                         r"(restart|stop|start|kill|rm|rmi|down|up|pull|destroy|shutdown|reboot|disable|enable|"
+                         r"mask|reload|pause|unpause|delete)\b((?:\s+[^\s;&|]+)*)")
+
+
+def multi_objects(text):
+    """Objects named after a multi-object verb (options and their values left out)."""
+    out = []
+    for m in MULTI_VERBS.finditer(text):
+        words, objs, skip = m.group(3).split(), [], False
+        for w in words:
+            if skip:
+                skip = False
+                continue
+            if w.startswith("-"):
+                skip = w in ("-f", "--file", "-t", "--time", "-p", "--project-name", "--timeout", "-n")
+                continue
+            objs.append(w.strip("'\""))
+        if objs:
+            out.append(objs)
+    return out
 
 
 def owner_message(prompt, cfg):
@@ -727,6 +822,38 @@ def owner_message(prompt, cfg):
     uid = re.search(r'\buser_id="([^"]+)"', m.group(1))
     if uid and uid.group(1) in [str(x) for x in cfg.get("owner_ids", [])]:
         return m.group(2)
+    return None
+
+
+def channel_meta(prompt):
+    """message_id and ts of a channel message header, when present."""
+    m = re.match(r'\s*<channel\b([^>]*)>', prompt or "")
+    if not m:
+        return None, None
+    mid = re.search(r'\bmessage_id="([^"]+)"', m.group(1))
+    ts = re.search(r'\bts="([^"]+)"', m.group(1))
+    return (mid.group(1) if mid else None), (ts.group(1) if ts else None)
+
+
+def stale_channel_go(prompt, state, max_age=900):
+    """External audit of v0.8 (07/10): a replayed or old channel message must not approve a plan. Refused when its
+    message_id was already used, or its timestamp is older than the plan or than 15 minutes."""
+    mid, ts = channel_meta(prompt)
+    if mid is None and ts is None:
+        return None                                            # terminal prompt
+    if mid and mid in state.get("used_message_ids", []):
+        return "go-message-already-used"
+    if ts:
+        import datetime
+        try:
+            t = datetime.datetime.fromisoformat(ts.replace("Z", "+00:00")).timestamp()
+        except ValueError:
+            return "go-message-without-valid-time"
+        pending = state.get("pending") or {}
+        if t < pending.get("proposed_at", 0) - 5 or t < time.time() - max_age:
+            return "go-message-too-old"
+        if t > time.time() + 120:                               # council review of v0.9: a GO dated in the future
+            return "go-message-from-the-future"
     return None
 
 
@@ -741,7 +868,7 @@ def on_prompt(data, cfg, state):
         if had:
             log({"event": "revoked"})
         return
-    m = STRICT_GO.match(text)                  # only "GO" or "GO <plan id>": any other word means it is not plain
+    m = STRICT_GO.match(text) if text.isascii() else None   # only "GO" or "GO <plan id>", in plain ASCII
     if not m:
         if AFFIRM.match(text) and len(text.split()) <= 12:
             log({"event": "go-not-plain-ignored"})
@@ -749,9 +876,23 @@ def on_prompt(data, cfg, state):
     if not pending:
         log({"event": "go-without-pending-plan"})
         return
+    if now - pending.get("proposed_at", 0) > cfg["pending_minutes"] * 60:
+        # External audit of v0.8 and real cases (06-07/10): a bare GO activated a plan proposed hours before.
+        state.pop("pending", None)
+        log({"event": "go-for-expired-plan-ignored", "plan": pending.get("id")})
+        pid = re.sub(r"[^\w.-]", "", pending.get("id") or "-")[:40]
+        return (f"go-gate: this GO was NOT applied: plan '{pid}' was proposed more than {cfg['pending_minutes']} min ago "
+                "and has expired. Tell the user, and propose the plan again if it is still wanted.")
     if m.group(2) and m.group(2) != pending.get("id"):
         log({"event": "go-for-another-plan-ignored"})
         return
+    stale = stale_channel_go(data.get("prompt", ""), state)
+    if stale:
+        log({"event": stale + "-ignored"})
+        return
+    mid, _ts = channel_meta(data.get("prompt", ""))
+    if mid:
+        state["used_message_ids"] = (state.get("used_message_ids", []) + [mid])[-200:]
     ttl = min(pending.get("ttl") or cfg["ttl_minutes"], cfg["max_ttl_minutes"])
     state["active"] = dict(pending, approved_at=now, expires=now + ttl * 60)
     state.pop("pending", None)
@@ -771,14 +912,29 @@ def remember_scope(text, state):
     return False
 
 
+def on_post_tool(data, state):
+    """External audit of v0.8 (07/10): a plan is pending only once the human could read it. A chat tool call that failed
+    (error, or no "sent" in its response) records nothing."""
+    tool, ti = data.get("tool_name", ""), data.get("tool_input") or {}
+    if not TALK_TOOLS.search(tool):
+        return
+    resp = data.get("tool_response")
+    text = json.dumps(resp, ensure_ascii=False) if not isinstance(resp, str) else resp
+    if re.search(r"(?i)\b(error|failed|denied)\b", text or "") or not re.search(r"(?i)\bsent\b|message_id|\bid\b", text or ""):
+        log({"event": "plan-not-delivered"})
+        return
+    if remember_scope(str(ti.get("text", "")), state):
+        mid = re.search(r"id:?\s*\"?(\d+)", text or "")
+        state["pending"]["message_id"] = mid.group(1) if mid else None
+        log({"event": "plan-proposed", "plan": state["pending"].get("id")})
+
+
 def on_pre_tool(data, cfg, state):
     """Returns (decision, reason); decision in allow / deny."""
     tool, ti = data.get("tool_name", ""), data.get("tool_input") or {}
     kind, detail = classify(tool, ti)
     if kind == "talk":
-        if remember_scope(str(ti.get("text", "")), state):
-            log({"event": "plan-proposed", "plan": state["pending"].get("id")})
-        return "allow", ""
+        return "allow", ""                     # the plan is recorded in PostToolUse, once the message was delivered
     if kind == "read":
         return "allow", ""
     items = [(k, d, st) for k, d, st in CHANGES] if tool == "Bash" and CHANGES else [(kind, detail, None)]
@@ -835,6 +991,8 @@ def main():
                 log({"event": "plan-proposed", "plan": state["pending"].get("id")})
         elif ev == "PreToolUse":
             decision, why = on_pre_tool(data, cfg, state)
+        elif ev == "PostToolUse":
+            on_post_tool(data, state)
         save_state(full)
         if context:
             notice = re.sub(r" Start your reply.*$", "", context)

@@ -50,7 +50,7 @@ The classifier is **default-deny**. A Bash command is a read only if every stage
 - with no redirection to a file outside `/tmp` or the scratchpad;
 - with nothing writing inside `$( … )`.
 
-Wrappers whose inner command is a literal string are unwrapped and judged on that inner command: `ssh host '…'`, `pct exec N -- …`, `docker exec c …`, `bash -c '…'`. A wrapper that can't be unwrapped is **opaque** and needs `actions=script`: `bash script.sh`, `eval`, `$CMD`. Inline Python (`python3 -c`, `python3 - <<EOF`, or a script file that exists) counts as a read unless it contains a write, delete, network or subprocess call.
+Wrappers whose inner command is a literal string are unwrapped and judged on that inner command: `ssh host '…'`, `pct exec N -- …`, `docker exec c …`, `bash -c '…'`. A wrapper that can't be unwrapped is **opaque** and needs `actions=script`: `bash script.sh`, `eval`, `$CMD`. Inline Python (`python3 -c`, `python3 - <<EOF`, or a script file that exists) counts as a read only when it imports nothing beyond pure modules (`json`, `re`, `sys`, `math`, `datetime`, `collections`…) and uses no dynamic access (`getattr`, `__import__`, `globals`…). Since v0.9: `from os import remove as r` used to pass as a read.
 
 ## Our numbers (simulation before installing)
 
@@ -95,7 +95,8 @@ Then add to `~/.claude/settings.json`:
   "hooks": {
     "UserPromptSubmit": [{ "hooks": [{ "type": "command", "command": "python3 ~/.claude/hooks/go-gate.py", "timeout": 10 }] }],
     "Stop":             [{ "hooks": [{ "type": "command", "command": "python3 ~/.claude/hooks/go-gate.py", "timeout": 10 }] }],
-    "PreToolUse":       [{ "matcher": "*", "hooks": [{ "type": "command", "command": "python3 ~/.claude/hooks/go-gate.py", "timeout": 10 }] }]
+    "PreToolUse":       [{ "matcher": "*", "hooks": [{ "type": "command", "command": "python3 ~/.claude/hooks/go-gate.py", "timeout": 10 }] }],
+    "PostToolUse":      [{ "matcher": "mcp__plugin_telegram_telegram__reply", "hooks": [{ "type": "command", "command": "python3 ~/.claude/hooks/go-gate.py", "timeout": 10 }] }]
   }
 }
 ```
@@ -117,7 +118,9 @@ Then tell the agent the convention, in CLAUDE.md or its system prompt: *"End eve
 - **A compound command is checked action by action:** in `git add web; docker compose down`, both actions must be inside the plan.
 - **Scratch paths are judged by their text.** `/tmp/x` counts as scratch even if it is a symlink to somewhere else; `..` is normalised, links are not followed.
 - **Targets ignore where a command runs.** `ssh host`, `pct exec` and `docker exec` are unwrapped and the inner command is judged, but a target named in the plan is not tied to a host or container.
-- **Inline Python is matched by pattern.** Aliased imports (`from os import remove as r`) can slip through; planned for a later release.
+- **Since v0.9 (external audit of v0.8):** a plan sent through a chat tool becomes pending only after the send succeeded (PostToolUse); a pending plan expires after `pending_minutes` (120); a channel GO older than 15 minutes, older than the plan, or with a message_id already used is ignored; the GO words are matched as plain ASCII (`yeſ` or a Cyrillic O no longer count); for verbs with several objects (`docker restart db web`) every object must be in scope; an MCP tool whose name holds a write verb (`get_and_delete_…`) is a change; writes to the gate's state, the hooks or the settings are never covered by a plan, symlinks included.
+- **Install and recovery.** Writes to the hooks and settings are never covered by a plan, so in block mode a human installs or updates the hooks (or switches to observe mode first). `ssh other-host '…'` is judged on the inner command; the host itself is not tied to the plan.
+- **Still true:** the gate runs with the agent's rights and reads the text it writes. An agent that controls its own settings can switch it off, and the sender of a channel message is trusted from the message header. Only a separate process, owning the approval state, would change that.
 - **A GET is a read, unless the URL looks like an action.** Webhooks, triggers and action words in the path (`/webhook/`, `/restart`, `/delete`…), `?action=`-style parameters and `X-HTTP-Method-Override` count as changes. Any other GET with a side effect still passes as a read.
 - **SQL is not parsed.** A `SELECT` that calls a function with side effects counts as whatever the client command is judged to be.
 

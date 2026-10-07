@@ -32,7 +32,7 @@ Research on multi-agent debate, and my own trials, found that extra rounds add l
 ### Why is the verdict computed instead of decided by a "chair" model?
 In the first version, the chair (also a member) wrote the verdict. When the council reviewed its own design, it flagged this as judge and party. A computed verdict is predictable and auditable:
 - FIX FIRST if 2 or more members ask for a fix;
-- APPROVE WITH ONE ISOLATED ALERT if exactly 1 does;
+- HUMAN REVIEW REQUIRED if exactly 1 does (before v0.9: "APPROVE WITH ONE ISOLATED ALERT");
 - APPROVE if none does;
 - INCOMPLETE if fewer than 3 members gave a valid answer.
 
@@ -116,7 +116,7 @@ No. It only sees the commands and file reads the agent asks for, before they run
 - other tools or MCP servers that return data.
 
 ### How was it tested?
-- Unit tests cover 195 cases, including every bypass found during the reviews and two external evaluations.
+- Unit tests cover 235 cases, including every bypass found during the reviews and two external evaluations.
 - CI runs an independent harness, [Hook Gym](https://pypi.org/project/hook-gym/), on its credentials and secrets cases and on this repo's homelab cases. Scores: 12/12 on ours, 6/11 on theirs. **Read 12/12 with care:** our homelab cases are the probes of the first external evaluation, written after the fixes. A second evaluation of v0.2 found 15 more holes on probes it had never shown us (`~/.pgpass`, `/etc/pve/priv/`, `rclone config show`, `sops -d`, `curl -u admin:pw`, `mysql -pS3cret`, Tailscale keys…). They are fixed now, which proves the point: a pattern list closes one layer per audit. A score on cases we never saw is the number that matters; see [results](results.md).
 - Before each deployment, it was replayed against about 5,700 real past commands to compare its decisions with the previous version.
 - It went through 5 multi-model council reviews, which found 7 real gaps. An external evaluation then found 13 more common homelab cases it missed (`printenv VAR`, WireGuard keys, `acme.json`, logs…). All of them are fixed and tested.

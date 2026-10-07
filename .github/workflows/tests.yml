@@ -14,8 +14,8 @@ jobs:
       matrix:
         python: ["3.9", "3.12"]
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-python@v6
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6
         with:
           python-version: ${{ matrix.python }}
       - name: council tests (offline, no API calls)
@@ -26,8 +26,8 @@ jobs:
         run: cd go-gate && python -m unittest -v test_go_gate.py
       - name: leak-check tests (fake secrets only)
         run: cd leak-check && python -m unittest -v test_leak_check.py
-      - name: leak-check orchestration scripts (syntax)
-        run: bash -n leak-check/contrib/run-server.sh && bash -n leak-check/contrib/run-laptop.sh
+      - name: leak-check orchestration scripts (syntax + offline run)
+        run: bash -n leak-check/contrib/run-server.sh && bash -n leak-check/contrib/run-laptop.sh && bash leak-check/contrib/test_contrib.sh
 
   hook-gym:
     # External benchmark for Claude Code hooks (https://pypi.org/project/hook-gym/).
@@ -36,8 +36,8 @@ jobs:
     # Informational: a partial score does not fail the build.
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-python@v6
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6
         with:
           python-version: "3.12"
       - name: install hook-gym (pinned sdist, checksum verified)
@@ -55,7 +55,10 @@ jobs:
         run: hook-gym --hooks /tmp/settings.json --cases /tmp/hook_gym-0.1.0/cases run --tag credentials --tag secrets --report gym-builtin.md 2>&1 | tee gym-builtin.log || true
       - name: hook-gym, homelab cases from this repo
         run: hook-gym --hooks /tmp/settings.json --cases ci/hook-gym-cases run --report gym-homelab.md 2>&1 | tee gym-homelab.log || true
+      - name: the harness ran (a missing report fails the job; the score itself stays informational)
+        run: test -s gym-builtin.md && test -s gym-homelab.md
       - name: summary
+        if: always()
         run: |
           for f in gym-builtin gym-homelab; do
             echo "### $f" >> "$GITHUB_STEP_SUMMARY"

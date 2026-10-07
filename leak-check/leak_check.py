@@ -56,6 +56,9 @@ def url_tokens(v):
             out.append(x)
     return out
 MISSING = []                   # configured sources that matched nothing or could not be read; filled by collect_values
+SKIPPED = []                   # files of config_files deliberately left out (database, backup, too big), with the reason
+XML_ATTR = re.compile(r"""\b([A-Za-z_][\w.-]*)\s*=\s*["']([^"'<>]{6,})["']""")
+TOKEN_CFG = re.compile(r"^\s*\S+@\S+!\S+\s+([A-Za-z0-9-]{20,})\s*$")          # Proxmox priv/token.cfg: user@realm!id secret
 
 
 def read_json(path):
@@ -103,11 +106,45 @@ def files_of(pattern):
 def collect_values(cfg):
     """{value: (name, kind)} with kind in env / url / file / key. Values never leave this process."""
     found, ml = {}, cfg["min_length"]
+    ml_named = cfg.get("min_length_named", 6)
     MISSING.clear()
+    SKIPPED.clear()
 
-    def add(v, name, kind):
-        if len(v) >= ml and not NOT_A_VALUE.match(v):
+    def add(v, name, kind, named=False):
+        """named: the value sits under a key that says it is secret (PASSWORD=…). External audit of v0.8 (07/10):
+        a short or all-digit password is still a password there, so the length floor is lower and digits count."""
+        if named and v.isdigit():
+            ok = len(v) >= 10                    # shorter digit strings (ports, PINs, dates) match transcripts by chance
+        else:
+            ok = len(v) >= (ml_named if named else ml) and not NOT_A_VALUE.match(v)
+        if ok:
             found.setdefault(v, (name, kind))
+
+    def add_value(key, v, f, kind):
+        """One key/value pair from any reader: URL passwords, URL tokens, the value itself, and what it contains."""
+        if URL_KEY.search(key) or "://" in v:
+            for pw in URL_PASSWORD.findall(v):
+                if not pw.startswith("$"):
+                    add(pw, f"{f}:{key} (password in URL)", "url")
+        if URL_KEY.search(key):
+            for tok in url_tokens(v):
+                add(tok, f"{f}:{key} (token in URL)", "url")
+        if (SECRET_NAME.search(key) or key == "masterKey") and not NOT_SECRET_NAME.search(key):
+            add(v, f"{f}:{key}", kind, named=True)
+            if key.lower() == "auth":                                   # Docker config.json: base64 of user:password
+                try:
+                    import base64
+                    dec = base64.b64decode(v + "=" * (-len(v) % 4), validate=True).decode()
+                    if ":" in dec:
+                        add(dec.split(":", 1)[1], f"{f}:{key} (decoded password)", kind, named=True)
+                except Exception:
+                    pass
+        if v.lstrip().startswith("{"):                                  # rclone: token = {"access_token":…}
+            try:
+                for k2, v2 in json_items(json.loads(v)):
+                    add_value(k2, v2, f"{f}:{key}", kind)
+            except ValueError:
+                pass
 
     for pattern in cfg["env_files"]:
         for f in files_of(pattern):
@@ -128,13 +165,19 @@ def collect_values(cfg):
                     for tok in url_tokens(v):
                         add(tok, f"{f}:{key} (token in URL)", "url")
                 if SECRET_NAME.search(key) and not NOT_SECRET_NAME.search(key):
-                    add(v, f"{f}:{key}", "env")
+                    add(v, f"{f}:{key}", "env", named=True)
     xml_tag = re.compile(r"<([A-Za-z_][\w.-]*)>([^<]{12,})</\1>")
     for pattern in cfg.get("config_files", []):
         for f in files_of(pattern):
-            if f.endswith((".db", ".sqlite", ".sqlite3", ".db-wal", ".db-shm", ".log", ".png", ".jpg", ".gz", ".zip")) \
-                    or re.search(r"\.(bak|old|orig)\b|~$", os.path.basename(f)) or os.path.getsize(f) > 2_000_000:
-                continue                     # databases, logs, binaries and backup copies (old, usually revoked values)
+            if f.endswith((".db", ".sqlite", ".sqlite3", ".db-wal", ".db-shm", ".log", ".png", ".jpg", ".gz", ".zip")):
+                SKIPPED.append(f"{f} (database, log or binary)")
+                continue
+            if re.search(r"\.(bak|old|orig)\b|~$", os.path.basename(f)):
+                SKIPPED.append(f"{f} (backup copy: delete it, or list it in value_files if it may still hold live values)")
+                continue
+            if os.path.getsize(f) > 2_000_000:
+                SKIPPED.append(f"{f} (larger than 2 MB)")
+                continue                     # all listed in the report: a skipped file is never silently "checked"
             try:
                 text = read_text(f)
             except OSError as e:
@@ -147,25 +190,33 @@ def collect_values(cfg):
                     items = []
             elif f.endswith(".xml"):
                 items = [(m.group(1), m.group(2).strip()) for m in xml_tag.finditer(text)]
+                items += [(m.group(1), m.group(2).strip()) for m in XML_ATTR.finditer(text)]   # Plex: PlexOnlineToken="…"
                 # ASP.NET data-protection key files keep the key in <value>, under a <key> element
                 if "<key " in text and "<masterKey" in text:
                     items += [("masterKey", m.group(2).strip()) for m in xml_tag.finditer(text) if m.group(1) == "value"]
             else:
-                items = []
-                for line in text.splitlines():
+                items, lines = [], text.splitlines()
+                for i, line in enumerate(lines):
                     m = LINE.match(line)
                     if m:
-                        items.append((m.group(1), re.sub(r"\s+#.*$", "", m.group(2)).strip().strip(",;").strip("'\"")))
+                        v = re.sub(r"\s+#.*$", "", m.group(2)).strip().strip(",;").strip("'\"")
+                        if v in ("|", ">", "|-", ">-", "|+", ">+"):          # YAML block scalar: the value is below
+                            ind = len(line) - len(line.lstrip())
+                            block = []
+                            for nxt in lines[i + 1:]:
+                                if nxt.strip() and len(nxt) - len(nxt.lstrip()) <= ind:
+                                    break
+                                block.append(nxt.strip())
+                            items += [(m.group(1), b) for b in block if b]
+                            continue
+                        items.append((m.group(1), v))
+                    if "pgpass" in os.path.basename(f) and line.count(":") >= 4 and not line.lstrip().startswith("#"):
+                        items.append(("PGPASS_PASSWORD", line.split(":", 4)[4]))   # host:port:db:user:password
+                    t = TOKEN_CFG.match(line)
+                    if t:
+                        items.append(("PROXMOX_TOKEN_SECRET", t.group(1)))
             for key, v in items:
-                if URL_KEY.search(key) or "://" in v:
-                    for pw in URL_PASSWORD.findall(v):
-                        if not pw.startswith("$"):
-                            add(pw, f"{f}:{key} (password in URL)", "url")
-                if URL_KEY.search(key):
-                    for tok in url_tokens(v):
-                        add(tok, f"{f}:{key} (token in URL)", "url")
-                if (SECRET_NAME.search(key) or key == "masterKey") and not NOT_SECRET_NAME.search(key):
-                    add(v, f"{f}:{key}", "config")
+                add_value(key, v, f, "config")
     for pattern in cfg.get("json_files", []):
         for f in files_of(pattern):
             try:
@@ -174,11 +225,7 @@ def collect_values(cfg):
                 MISSING.append(f"{f} ({type(e).__name__})")
                 continue
             for key, v in json_items(data):
-                if SECRET_NAME.search(key) and not NOT_SECRET_NAME.search(key):
-                    add(v, f"{f}:{key}", "json")
-                elif URL_KEY.search(key):
-                    for tok in url_tokens(v):
-                        add(tok, f"{f}:{key} (token in URL)", "url")
+                add_value(key, v, f, "json")
     for pattern in cfg["value_files"]:
         for f in files_of(pattern):
             try:
@@ -201,17 +248,21 @@ def collect_values(cfg):
     return found
 
 
-def json_items(obj):
-    """(key, string value) pairs anywhere in a JSON document."""
+def json_items(obj, parent=""):
+    """(key, string value) pairs anywhere in a JSON document. Strings in a list keep the list's key
+    ({"tokens": ["…"]}, external audit of v0.8)."""
     if isinstance(obj, dict):
         for k, v in obj.items():
             if isinstance(v, str):
                 yield str(k), v
             else:
-                yield from json_items(v)
+                yield from json_items(v, str(k))
     elif isinstance(obj, list):
         for v in obj:
-            yield from json_items(v)
+            if isinstance(v, str):
+                yield parent, v
+            else:
+                yield from json_items(v, parent)
 
 
 def add_key_lines(text, f, add):
@@ -223,6 +274,8 @@ def add_key_lines(text, f, add):
         return
     body = [(i, l.strip()) for i, l in enumerate(text.splitlines()) if KEY_LINE.match(l.strip())]
     skip = 2 if "OPENSSH PRIVATE KEY" in text else 1
+    if len(body) <= skip:              # one-line PEM body (Ed25519 PKCS#8): that line IS the key (external audit of v0.8)
+        skip = 0
     for i, line in body[skip:]:
         add(line, f"{f} (private key, line {i + 1})", "key")
 
@@ -272,10 +325,31 @@ def scan(cfg, targets=None):
             n = text.count(v)
             if n:
                 key = name.split(" (private key, line")[0] + (" (private key)" if kind == "key" else "")
-                per_secret[key] = per_secret.get(key, 0) + n
-        hits += [{"secret": k, "transcript": t, "occurrences": n} for k, n in per_secret.items()]
+                c, ids = per_secret.get(key, (0, set()))
+                per_secret[key] = (c + n, ids | {value_id(v)})
+        hits += [{"secret": k, "transcript": t, "occurrences": n, "vid": ",".join(sorted(ids))}
+                 for k, (n, ids) in per_secret.items()]
     return {"mode": "scan", "secrets_checked": len(values), "inventory": inventory, "files_scanned": len(files),
-            "missing_sources": list(MISSING), "leaks": hits}
+            "missing_sources": list(MISSING), "skipped_sources": list(SKIPPED), "leaks": hits}
+
+
+def value_id(v):
+    """A keyed fingerprint of a value, so a rotated secret leaking again is a new finding. The key is local and random;
+    the id stays in the root-only report and state, never in an alert (external audit of v0.8, 07/10)."""
+    import hashlib, hmac
+    path = os.path.expanduser(os.environ.get("LEAK_CHECK_KEY", "~/.local/state/leak-check/value-id.key"))
+    try:
+        key = open(path, "rb").read()
+    except OSError:
+        os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
+        key = os.urandom(32)
+        old = os.umask(0o077)
+        try:
+            with open(path, "wb") as f:
+                f.write(key)
+        finally:
+            os.umask(old)
+    return hmac.new(key, v.encode(), hashlib.sha256).hexdigest()[:12]
 
 
 CANARY = "Cn4ry" + "Xk9" * 5
@@ -325,8 +399,12 @@ def only_new(report, state_file):
         seen = set(read_json(state_file))
     except (OSError, ValueError):
         seen = set()
-    keys = {f"{h['secret']}|{h['transcript']}": h for h in report["leaks"]}
-    report["new_leaks"] = [h for k, h in keys.items() if k not in seen]
+    keys = {f"{h['secret']}|{h['transcript']}|{h.get('vid', '')}": h for h in report["leaks"]}
+    with_ids = {k.rsplit("|", 1)[0] for k in seen if k.count("|") >= 2}
+    def known(k):
+        base = k.rsplit("|", 1)[0]
+        return k in seen or (base in seen and base not in with_ids)      # state written before value ids existed
+    report["new_leaks"] = [h for k, h in keys.items() if not known(k)]
     write_json(state_file, sorted(seen | set(keys)))
     return report
 
@@ -357,7 +435,10 @@ def main():
             write_json(a.report, r, 1)
         for h in r.get("new_leaks", r["leaks"]):
             print(f"LEAK {h['secret']} in {h['transcript']} ({h['occurrences']}x)")
-        print(json.dumps({k: v for k, v in r.items() if k not in ("leaks", "new_leaks")} |
+        if r.get("skipped_sources"):
+            print("NOTE files not read: " + "; ".join(r["skipped_sources"])[:800], file=sys.stderr)
+        print(json.dumps({k: v for k, v in r.items() if k not in ("leaks", "new_leaks", "skipped_sources")} |
+                         {"skipped_sources": len(r.get("skipped_sources", []))} |
                          {"leaks": len(r["leaks"]), "new_leaks": len(r.get("new_leaks", r["leaks"]))}))
         sys.exit(1 if r["leaks"] else 3 if r.get("missing_sources") else 0)
     except SystemExit:

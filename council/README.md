@@ -22,7 +22,7 @@ flowchart TD
     R1 & R2 & R3 & R4 --> X["2 · Anonymous cross-ranking<br/>each member ranks the others, shuffled"]
     X --> V{"3 · Verdict computed from the votes<br/>(no model decides)"}
     V -->|"≥ 2 FIX"| F["FIX FIRST"]
-    V -->|"exactly 1 FIX"| I["APPROVE, WITH ONE<br/>ISOLATED ALERT"]
+    V -->|"exactly 1 FIX"| I["HUMAN REVIEW<br/>REQUIRED"]
     V -->|"0 FIX"| OK["APPROVE"]
     V -->|"< 3 valid answers"| N["INCOMPLETE"]
     F & I & OK & N --> Y["4 · Synthesis by a chair<br/>copies the verdict, never downgrades<br/>a lone BLOCKING point"]
@@ -52,7 +52,8 @@ The rules that came from real failures:
 |---|---|
 | The proposal must quote the human's request **verbatim** (`Request:`) and say whether a **GO** was given (`GO:`). Otherwise it is refused. | Without that context, reviewers flagged "built without approval" on a plan the human had explicitly asked for, and missed the real flaw. |
 | The verdict is **computed from the votes**. The chair only writes the summary. | The first version let the chair, who is also a member, decide. In its own review, the council flagged that as judge and party. |
-| A BLOCKING point raised by **one** member is shown as an *isolated alert* and never merged away. | A summary-by-consensus rule had quietly downgraded a lone, correct objection. |
+| A BLOCKING point raised by **one** member makes the verdict **HUMAN REVIEW REQUIRED** (since v0.9; it read "APPROVE, WITH ONE ISOLATED ALERT" before). Every BLOCKING line is also copied word for word into the report, so it never depends on the chair's summary, and a blocker first raised in the cross-review is added to the verdict. | A summary-by-consensus rule had quietly downgraded a lone, correct objection. An external audit of v0.8 showed the chair could still write "No alerts", and that a late blocker left the verdict unchanged. |
+| Two contradictory `VERDICT:` lines make the answer invalid (ABSENT). Members from the same family (same provider prefix or model family) are refused unless `allow_same_family` is set. An empty `Request:` or `GO:` is refused. Every message of the final request is masked, system context included, and `model_overrides` cannot replace `messages` or `model`. | External audit of v0.8 (07/10). |
 | Secret-looking values in the proposal are masked **before** anything leaves the machine (the `context` string from your config is sent as written) (best effort: common key formats, `Bearer`, `--token`, `key=`/`password:`, URL credentials, PEM). | The proposal goes to four external providers. Regexes are not a guarantee: never paste a secret on purpose. |
 | Members come from **different vendors**. No personas, no multi-round debate. | Clones share their blind spots, and extra debate rounds added little. |
 | Quorum: fewer than 3 valid answers → `INCOMPLETE`. An answer without a recognisable verdict counts as absent, never as an approval. | One member returned empty answers for a week (see [results](../docs/results.md)). |

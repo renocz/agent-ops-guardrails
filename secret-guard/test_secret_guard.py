@@ -49,7 +49,7 @@ BASH = [
     ("cat .env &>/dev/null 2>&1 | mask", True),
     # found by the council review: an escaped '#' is an argument, not a comment, so it is no marker
     ("cat .env \\# secret-ok", False),
-    ("cat .env #secret-ok", True),
+    ("cat .env #secret-ok", False),               # v0.9: the marker cannot cover reading a secret file
     # a literal brace is not a group and must not swallow the separators that follow it
     ("echo { ; cat .env; ls 2>&1 | mask", False),
     ("echo }; cat .env; ls 2>&1 | mask", False),
@@ -97,6 +97,47 @@ BASH = [
     ("git ls-files | wc -l; scp a host:/tmp; ssh host 'pct push 1 a b'", True),   # git + push in unrelated commands
     ("python3 -c 'import secrets; print(secrets.token_hex(4))'", True),
     ("cat .env | grep -v x 2>&1 | mask", False),
+    # external audit of v0.8 by gpt (07/10): the 16 commands that printed a fake .env value, then their neighbours
+    ("cat .env # secret-ok", False),
+    ("cat .e[n]v", False),
+    ('cat .en""v', False),
+    ('c""at .env', False),
+    ('f=.e; f+=nv; cat "$f"', False),
+    ("cat $(printf '\\056env')", False),
+    ("python3 -c 'import pathlib; print(pathlib.Path(\".e\"+\"nv\").read_text(),end=\"\")'", False),
+    ("dd if=.env status=none", False),
+    ("cp .env /dev/stdout", False),
+    ("tee < .env", False),
+    ("while IFS= read -r x; do printf '%s\\n' \"$x\"; done < .env", False),
+    ("mapfile -t a < .env; printf '%s\\n' \"${a[@]}\"", False),
+    ('read -r x < .env; echo "$x"', False),
+    ("mask() { cat; }; cat .env 2>&1 | mask", False),
+    ("cut -d= -f2 .env 2>&1 | mask", False),
+    ("base64 .e[n]v", False),
+    ("alias mask=cat; cat .env 2>&1 | mask", False),
+    ("PATH=/tmp/x:$PATH; cat .env 2>&1 | mask", False),
+    ("awk -F= '{print $2}' .env 2>&1 | mask", False),
+    ("grep -o '=.*' .env 2>&1 | mask", False),
+    ("perl -ne 'print' < .env", False),
+    ('for f in *.md; do cat "$f"; done', True),        # the loop list is literal: its paths can be checked
+    ('for f in .e*; do cat "$f"; done', False),
+    ('f=$(ls | head -1); cat "$f"', False),            # a path known only at run time: mask it
+    ("ls -la /root/app.env.bak 2>&1 | awk '{print $5}' | mask", True),   # a listing, not a read
+    ("S=/tmp/work; sed -n 1,5p $S/notes.txt", True),
+    ("cat > /tmp/x.py <<'EOF'\nprint(open('.env').read())\nEOF\npython3 /tmp/x.py 2>&1 | mask", False),   # as in v0.8: group it, { …; } 2>&1 | mask
+    ("python3 - <<'EOF'\nprint(open('.env').read())\nEOF", False),       # a body fed to an interpreter runs
+    ("cat > /tmp/notes.md <<'EOF'\nThe app reads .env with cat at start.\nEOF", False),  # body lines still judged (v0.8 rule)
+    ("cat > /tmp/x.py <<'EOF'\nprint(open('.e' + 'nv').read())\nEOF\npython3 /tmp/x.py", False),   # written, then run
+    ('for f in *.md; do cat "$f" 2>&1 | mask; done', True),
+    ("grep -c KEY .e[n]v # secret-ok", True),          # counting is still fine with the marker
+    ("cat README.md", True),
+    ("cat *.md", True),
+    ("head -5 $HOME/notes.txt", True),
+    ("awk '{print $2}' data.csv", True),
+    ("cp .env .env.bak-20261007", True),
+    ("python3 -c 'print(1+1)'", True),
+    ("ls -la /etc/pve/priv # secret-ok", True),
+    ("cat .env 2>&1 | mask", True),
     # external audit of v0.2 (06/10): secret files and tools that print decrypted secrets
     ("cat ~/.pgpass", False),
     ("cat ~/.my.cnf", False),

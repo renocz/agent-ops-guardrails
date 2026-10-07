@@ -11,7 +11,7 @@
 #
 # Limit: this job runs as the user, so the agent could stop it. The server notices: a missing witness or no pass for
 # 26 hours raises an alert.
-set -u
+set -u -o pipefail
 : "${LC_REMOTE:?set LC_REMOTE}"
 SCRIPT=${LC_SERVER_SCRIPT:-/opt/leak-check/contrib/run-server.sh}
 L=$HOME/.local/share/leak-check
@@ -20,12 +20,17 @@ mkdir -p "$L"
 cd "$HOME" || exit 2
 w=$($LC_REMOTE "$SCRIPT" witness) || exit 2
 printf '{"witness": "%s"}\n' "$w" > "$L/witness.jsonl"
-files=()
-for f in ${LC_FILES:-.claude/projects .zsh_history .claude/go-gate/log.jsonl}; do [ -e "$f" ] && files+=("$f"); done
-files+=(.local/share/leak-check/witness.jsonl)
-COPYFILE_DISABLE=1 tar --no-xattrs -czf - "${files[@]}" 2>/dev/null \
-  | $LC_REMOTE sh -c "'rm -rf /var/lib/leak-check/incoming/laptop && mkdir -p -m 700 /var/lib/leak-check/incoming/laptop && tar xzf - -C /var/lib/leak-check/incoming/laptop'" \
+files=(); expected=(); missing=()
+for f in ${LC_FILES:-.claude/projects .zsh_history .claude/go-gate/log.jsonl}; do
+  expected+=("$f"); if [ -e "$f" ]; then files+=("$f"); else missing+=("$f"); fi
+done
+# a manifest, so the server can tell "nothing to scan" from "the transcripts never arrived" (external audit of v0.8)
+python3 -c 'import json,sys; a=sys.argv[1:]; i=a.index("--"); print(json.dumps({"expected": a[:i], "missing": a[i+1:]}))' \
+  "${expected[@]}" -- "${missing[@]+"${missing[@]}"}" > "$L/manifest.json"
+files+=(.local/share/leak-check/witness.jsonl .local/share/leak-check/manifest.json)
+COPYFILE_DISABLE=1 tar --no-xattrs -czf - "${files[@]}" \
+  | $LC_REMOTE sh -c "'rm -rf /var/lib/leak-check/incoming/laptop && mkdir -p -m 700 /var/lib/leak-check/incoming/laptop && head -c 4000000000 | tar xzf - --no-same-owner --no-same-permissions -C /var/lib/leak-check/incoming/laptop'" \
   && $LC_REMOTE "$SCRIPT" laptop
 rc=$?
-rm -f "$L/witness.jsonl"
+rm -f "$L/witness.jsonl" "$L/manifest.json"
 exit $rc

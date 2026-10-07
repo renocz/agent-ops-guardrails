@@ -18,15 +18,17 @@ flowchart LR
     A --> P["📝 Written plan:<br/>what, why, risk,<br/>dry-run, rollback"]
     P -->|"decision that matters"| C{{"🏛️ council<br/>4 models, 4 vendors"}}
     C -->|"FIX FIRST"| P
-    C -->|"APPROVE<br/>(+ isolated alerts)"| G{"👤 Human GO?"}
+    C -->|"APPROVE, or HUMAN REVIEW<br/>if one member blocks"| G{"👤 Human GO?"}
     P -->|"routine change"| G
     G -->|"no"| P
-    G -->|"yes: plan + scope approved<br/>(enforced by go-gate)"| S["📸 snapshot gate<br/>host takes a snapshot<br/>(agent can't roll back)"]
+    G -->|"yes: plan + scope approved<br/>(checked by go-gate: action category,<br/>every named object in scope)"| S["📸 snapshot gate<br/>host takes a snapshot<br/>(agent can't roll back)"]
     S --> E["⚙️ Execute + verify<br/>with evidence"]
     E --> D["📚 Document<br/>(change record)"]
     SG["🔐 secret-guard<br/>every command and file read"] -.->|"watches"| A
     SG -.->|"watches"| E
 ```
+
+**What these guardrails are, and are not.** They catch the mistakes of a *cooperative* agent: a careless command, a plan it didn't run past the human, a secret that slipped into a transcript. They are hooks that run with the agent's own rights and judge the text it writes, so an agent that *tries* to get around them can: an external audit of v0.8 did it 16 ways for secret-guard alone (all closed in v0.9, but the class remains). Against a hostile agent you need the approval state and the output filter in a separate process the agent cannot write to. That is not built yet.
 
 | Failure mode of the agent | Guardrail | Status |
 |---|---|---|

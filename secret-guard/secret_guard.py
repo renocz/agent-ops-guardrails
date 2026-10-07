@@ -39,7 +39,10 @@ MARKER = "secret-ok"
 
 # Programs that print a file's content (or can).
 READERS = (r"cat|tac|nl|less|more|head|tail|grep|egrep|rg|sed|awk|cut|sort|uniq|diff|jq|yq|xxd|od|strings|base64|bat"
-           r"|python3?|perl|ruby|node")
+           r"|python3?|perl|ruby|node"
+           # external audit of v0.8 (07/10): more programs that copy a file to stdout
+           r"|dd|tee|paste|pr|fold|fmt|rev|column|iconv|expand|unexpand|comm|join|zcat|zless|bzcat|xzcat|hexdump"
+           r"|basenc|base32|uuencode|openssl|look|php")
 
 # Paths that usually hold secrets. Used by the Bash rule below (reader + path) and, anchored, for Read/Grep.
 SECRET_PATHS = [
@@ -125,6 +128,11 @@ RISKY = [
      "SQL selecting secret columns"),
     (r"(?i)\bpg_(shadow|authid)\b|\brolpassword\b|\bmysql\.user\b|\bauthentication_string\b", "password hashes (SQL)"),
     (r"\bkubectl\b.*\bget\s+secrets?\b|\bvault\s+(kv\s+get|read)\b|\baws\s+(secretsmanager|ssm)\s+get", "secret store"),
+    # external audit of v0.8 (07/10). Input redirected from a secret file, whatever reads it (`read x < .env`, `tee < .env`)
+    (r"(^|[^<])<(?![<(])\s*['\"]?[^\s;&|]*(" + "|".join(SECRET_PATHS) + ")", "input redirected from a secret file"),
+    # a copy of a secret file to the terminal
+    (r"\b(cp|install|rsync)\b(?=.*(" + "|".join(SECRET_PATHS) + r")).*\s(/dev/stdout|/dev/fd/\d|/proc/self/fd/\d|-)(\s|$)",
+     "copy of a secret file to stdout"),
 ]
 
 # Site-specific additions (e.g. the API endpoints of your own apps that return keys), kept out of this file:
@@ -328,19 +336,204 @@ def risky_labels(text):
     return labels
 
 
-def check_bash(cmd):
+# --- external audit of v0.8 (07/10): the rules read the text the agent wrote, not the command Bash will run. ---------
+# These helpers close the cheap disguises it demonstrated. They do not make the hook a security boundary (see README).
+
+# Names a glob is checked against when it cannot be expanded (remote command, no cwd): `cat .e[n]v`, `base64 .e?v`.
+SAMPLE_SECRET_NAMES = [".env", ".env.local", "app.env", "config.xml", "config.yml", "config.yaml", "config.json",
+                       "config.toml", "settings.json", "compose.yaml", "docker-compose.yml", "credentials", ".netrc",
+                       "rclone.conf", "secrets.yaml", "secrets.json", "id_rsa", "id_ed25519", "server.key", "key.pem",
+                       ".pgpass", ".my.cnf", "acme.json", "wg0.conf", ".git-credentials", ".npmrc", ".pypirc", ".envrc",
+                       "token.cfg", "grafana.ini", "app.ini", "shadow", ".vault-token"]
+GLOB_WORD = re.compile(r"""(?<![\w$])([^\s'"|;&<>()]*[*?\[][^\s'"|;&<>()]*)""")
+SAFE_VARS = r"\$\{?(HOME|PWD|USER|TMPDIR|LOGNAME)\}?"
+
+
+def unquoted(text):
+    """The command with quote characters and backslashes removed: `c""at .en''v` and `c\\at` both read `cat .env`.
+    String concatenations are joined first: `".e"+"nv"`, `'.e' . 'nv'` (Perl/PHP) and `".e" "nv"` read `.env`."""
+    text = re.sub(r"""(["'])\s*[+.]?\s*(["'])""", "", text)
+    return re.sub(r"""["'\\]""", "", text)
+
+
+def without_heredoc_bodies(cmd):
+    """The command without the bodies of heredocs that are only written to a file (`cat > f <<EOF`, `tee f <<EOF`):
+    that text is data, not a command. A body fed to an interpreter (`python3 - <<EOF`, `bash -s <<EOF`, `ssh h <<EOF`)
+    is kept, because it runs."""
+    out, lines, i = [], cmd.split("\n"), 0
+    while i < len(lines):
+        line = lines[i]
+        out.append(line)
+        i += 1
+        writes_file = re.search(r"\b(cat|tee)\b[^|;&]*(>\s*\S|\btee\s+(-a\s+)?[^\s<|;&-])", line)
+        target = re.search(r"(?:>\s*|\btee\s+(?:-a\s+)?)([^\s<|;&]+)", line)
+        if writes_file and target:      # a script written then run in the same command: its body runs, keep it
+            name = re.escape(os.path.basename(target.group(1).strip("'\"")))
+            rest = "\n".join(lines[i:])
+            if re.search(r"\b(python3?|bash|sh|zsh|node|perl|ruby|php|source|\.)\s+(\S+/)?" + name + r"\b", rest):
+                writes_file = None
+        for _q, d in re.findall(r"<<-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1", line):
+            while i < len(lines) and lines[i].strip() != d:
+                if not writes_file:
+                    out.append(lines[i])
+                i += 1
+            if not writes_file and i < len(lines):
+                out.append(lines[i])
+            i += 1
+    return "\n".join(out)
+
+
+def glob_names(text, cwd=None):
+    """Names that the globs of a command could expand to: real files when the working directory is known, plus the
+    sample secret names each glob would match (a remote command cannot be expanded here)."""
+    out = []
+    for word in GLOB_WORD.findall(text):
+        base = word.rsplit("/", 1)[-1]
+        if not re.search(r"[A-Za-z0-9_.-]", re.sub(r"\[[^\]]*\]", "", base)):
+            continue                     # `*` alone or `(*)`: too common in SQL, regexes and arithmetic to judge
+        if cwd and not word.startswith(("/", "~")):
+            try:
+                import glob as _glob
+                out += _glob.glob(os.path.join(cwd, word))[:50]
+            except Exception:
+                pass
+        out += [n for n in SAMPLE_SECRET_NAMES if fnmatch_name(n, base)]
+    return out
+
+
+def fnmatch_name(name, pattern):
+    import fnmatch
+    if name.startswith(".") and not pattern.startswith("."):     # Bash globs skip dot files unless asked
+        return False
+    try:
+        return fnmatch.fnmatchcase(name, pattern)
+    except re.error:                                             # `[4-2]` and other invalid classes: not a glob Bash expands
+        return False
+
+
+def literal_vars(cmd):
+    """Variables the command itself sets to a literal (`S=/tmp/x`, `for f in a b c`): their value is known, so a path
+    built from them can be checked. A variable appended to (`f+=nv`) or set from a substitution stays unknown."""
+    known, unknown = {}, set()
+    for name, val in re.findall(r"(?:^|[\s;&|(])([A-Za-z_]\w*)=((?:'[^']*'|\"[^\"$`]*\"|[^\s;&|$`'\"()])*)(?=[\s;&|)]|$)", cmd):
+        known.setdefault(name, val.strip("'\""))
+    for name, items in re.findall(r"\bfor\s+([A-Za-z_]\w*)\s+in\s+([^;\n$`]*?)\s*(?:;|\n)\s*do\b", cmd):
+        known.setdefault(name, items)
+    unknown.update(re.findall(r"([A-Za-z_]\w*)\+=", cmd))
+    unknown.update(re.findall(r"([A-Za-z_]\w*)=\$\(|([A-Za-z_]\w*)=`", cmd) and
+                   [a or b for a, b in re.findall(r"([A-Za-z_]\w*)=\$\(|([A-Za-z_]\w*)=`", cmd)])
+    return {k: v for k, v in known.items() if k not in unknown}
+
+
+def resolve(text, known):
+    return re.sub(r"\$\{?([A-Za-z_]\w*)\}?", lambda m: known.get(m.group(1), m.group(0)), text)
+
+
+def dynamic_reader(stmt, known=None):
+    """A reader whose arguments are only known at run time ($var, $(…), `…`): the path cannot be checked."""
+    stmt = resolve(stmt, known or {})
+    for stage, _ in pipeline_stages(stmt):
+        words = re.sub(r"'[^']*'", "''", stage)                  # single quotes do not expand ($2 in awk '{print $2}')
+        words = re.sub(r"^(\s*(sudo|env|nice|time|command|exec|do|then|else|!)\s+|\s*\w+=\S*\s+)*", "", words)
+        m = re.match(r"\s*(\S+)", words)
+        if not m or not re.fullmatch(r"(" + READERS + r")", os.path.basename(unquoted(m.group(1)))):
+            continue
+        rest = re.sub(SAFE_VARS, "", words[m.end():])
+        rest = re.sub(r"\d*>>?\s*\S+|&>\s*\S+", "", rest)   # an output file named at run time is not a read
+        if re.search(r"\$[{(A-Za-z_]|`", rest):
+            return True
+    return False
+
+
+# Redefining the filter, or the PATH it is found in, turns `| mask` into `| cat`.
+MASK_REDEFINED = (r"(^|[\s;&|({])(function\s+)?" + re.escape(MASK_CMD) + r"\s*\(\s*\)|\balias\s+" + re.escape(MASK_CMD)
+                  + r"=|(^|[;&|({\n]\s*)(export\s+)?PATH=[^\s;&|]*\s*(;|&&|\n|$)|\bexport\s+PATH=|\benable\s+-f\b|\bhash\s+-p\b")
+# Extracting the bare value before the mask leaves nothing it can recognise (`cut -d= -f2 .env | mask`).
+VALUE_EXTRACTION = (r"\bcut\b[^|]*-f\s*['\"]?[2-9]|\bawk\b[^|]*\$([2-9]|NF)\b|\bsed\b[^|]*s(.)\^?(\[\^?[=:]\]\*|\.\*)[=:]"
+                    r"|\b(grep|rg)\b[^|]*\s-[a-zA-Z]*o|\bjq\b[^|]*\s-[a-zA-Z]*r|\byq\b[^|]*\s-r|\bcut\b[^|]*-c\s*\d")
+FILE_LABELS = ("file that may contain secrets", "input redirected from a secret file", "copy of a secret file to stdout",
+               "reader on a path known only at run time")
+MARKER_LOG = os.path.expanduser(os.environ.get("SECRET_GUARD_LOG", "~/.local/state/secret-guard/marker.log"))
+
+
+def extracts_values(stmt, cwd=None):
+    """A segment whose first word reads a secret file (`cut -d= -f2 .env`, `cat .env | awk '{print $2}'`), followed by
+    a value extraction. Wrappers are flattened (quotes removed), so `ssh h 'cut … .env' | mask` counts too, while
+    `ls -la x.env | awk '{print $5}'` (a listing, not a read) does not."""
+    segs = re.split(r"\||;|&&", unquoted(without_heredoc_bodies(stmt)))
+    for i, seg in enumerate(segs):
+        words = re.sub(r"^.*?\b(bash|sh)\s+-c\s+", "", seg).split()
+        words = [w for w in words if not re.fullmatch(r"\w+=\S*|sudo|ssh|-\S+|\S+@\S+|pct|exec|\d+|--", w)]
+        if not words or not re.fullmatch(r"(" + READERS + r")", os.path.basename(words[0])):
+            continue
+        if [h for h in file_hits(seg, cwd) if h == "file that may contain secrets"] and \
+                any(re.search(VALUE_EXTRACTION, x) for x in segs[i:]):
+            return True
+    return False
+
+
+def log_marker(cmd):
+    """Every use of the opt-out is written down, so a human can review the claims."""
+    try:
+        os.makedirs(os.path.dirname(MARKER_LOG), exist_ok=True)
+        import time
+        with open(MARKER_LOG, "a") as f:
+            f.write(time.strftime("%Y-%m-%dT%H:%M:%S ") + json.dumps(cmd[:300]) + "\n")
+    except OSError:
+        pass
+
+
+def file_hits(text, cwd=None):
+    """Labels of the file-reading rules, on the text, its unquoted form and the names its globs could expand to."""
+    lean = without_heredoc_bodies(text)
+    variants = [text, unquoted(lean)]
+    names = glob_names(unquoted(lean), cwd)
+    if names:
+        variants.append(unquoted(lean) + " " + " ".join(names))
+    hits = []
+    for v in variants:
+        hits += [x for x in risky_labels(v) if x in FILE_LABELS]
+    return hits
+
+
+def check_bash(cmd, cwd=None):
     """Return a refusal reason, or None if the command may run."""
     if re.search(LITERAL_SECRET, cmd) or re.search(CLEAR_CREDENTIAL, cmd):
         return ("secret-guard: this command contains a secret value in clear (API key, token, JWT, private key or password). "
                 "Do not type secrets into commands: read them from a mode-600 file or the keychain into a variable, "
                 "or pass a file (`-H @file`). If the value is already exposed, rotate it.")
+    if re.search(r"\|\s*" + re.escape(MASK_CMD) + r"\b", cmd) and re.search(MASK_REDEFINED, cmd):
+        return (f"secret-guard: this command redefines `{MASK_CMD}` or the PATH it is found in, so the output would not be "
+                "masked. Run the filter as it is installed.")
     stmts, comment, balanced = scan(cmd)
     if comment and re.fullmatch(r"#\s*" + MARKER + r"\s*", comment.strip()):
-        return None                                   # opt-out: a real shell comment, last thing in the command
+        # opt-out: a real shell comment, last thing in the command. It cannot cover reading a secret file, unless every
+        # reader only counts (grep -c / -l / -q).
+        body = cmd[:cmd.rfind(comment)]
+        reading = [h for h in file_hits(body, cwd) if not count_only(unquoted(body))]
+        if reading or any(dynamic_reader(s) for s in stmts):
+            return (f"secret-guard: `# {MARKER}` cannot cover a command that reads a file that may contain secrets "
+                    f"({', '.join(dict.fromkeys(reading)) or 'path known only at run time'}). "
+                    f"Send the output through the mask: `<command> 2>&1 | {MASK_CMD}`.")
+        log_marker(cmd)
+        return None
     unmasked = [s for s in stmts if not is_masked(s)] if balanced else [cmd]
     hits = []
     for s in unmasked:
         hits += risky_labels(s)
+    lean_stmts, _c, lean_ok = scan(without_heredoc_bodies(cmd))
+    known = literal_vars(without_heredoc_bodies(cmd))
+    for s in (lean_stmts if lean_ok else [cmd]):
+        if is_masked(s) and lean_ok:
+            continue
+        hits += file_hits(resolve(s, known), cwd)
+        if dynamic_reader(s, known):
+            hits.append("reader on a path known only at run time")
+    for s in stmts:                                   # masked, but the value is cut out of its key=value context first
+        if s not in unmasked and extracts_values(s, cwd):
+            return (f"secret-guard: this command extracts bare values from a file that may contain secrets before "
+                    f"`{MASK_CMD}`. A bare value has no key name or known format, so the mask cannot recognise it. "
+                    f"Print whole lines through the mask, or only key names (grep -o '^[A-Z_]*=').")
     # loops and multi-line scripts spread a reader and its file over several statements (`for f in a.env; do cat $f`).
     # Judge them together; only statements whose producer (first stage) also sends stderr into the masked pipe are left out.
     def fully_masked(s):
@@ -348,10 +541,11 @@ def check_bash(cmd):
             return False
         first, amp = pipeline_stages(s)[0]
         return amp or bool(re.search(r"2>&1\s*$", first)) or first.startswith(("{", "("))
-    loose = [s for s in stmts if not fully_masked(s)]
-    joined = " ".join(loose if balanced else [cmd]).replace("\n", " ")
+    loose = [s for s in (lean_stmts if lean_ok else stmts) if not fully_masked(s)]
+    joined = " ".join(loose if balanced else [without_heredoc_bodies(cmd)]).replace("\n", " ")
     # only the reader + file rule spans statements; other rules (e.g. `git … push`) would match across unrelated commands
-    hits += [label for label in risky_labels(joined) if label == "file that may contain secrets"]
+    if loose:
+        hits += [label for label in file_hits(joined, cwd) if label == "file that may contain secrets"]
     if not hits:
         return None
     return ("secret-guard: this command may print a secret (" + ", ".join(dict.fromkeys(hits)) + "). "
@@ -380,7 +574,7 @@ def decide(data):
     tool = data.get("tool_name")
     ti = data.get("tool_input") or {}
     if tool == "Bash":
-        return check_bash(ti.get("command", ""))
+        return check_bash(ti.get("command", ""), data.get("cwd"))
     if tool in ("Read", "Grep", "NotebookRead"):
         return check_read(tool, ti)
     return None
