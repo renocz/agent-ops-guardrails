@@ -142,6 +142,10 @@ BASH = [
     ("cat .{env,txt}", False),
     ("awk -F= '{print $ 2}' .env 2>&1 | mask", False),
     ("cat {README,CHANGELOG}.md", True),
+    ("grep -o '^[A-Z_]*=' .env 2>&1 | mask", True),        # key names only: what the refusal message recommends
+    ("grep -oE '=\\S+' .env 2>&1 | mask", False),
+    ("grep -oE '=[A-Za-z0-9]+' .env 2>&1 | mask", False),
+    ("sed -n 1,5p compose.yaml 2>&1 | mask; ls -la .env 2>&1 | awk '{print $1, $NF}' | mask", True),   # 2 pipelines
     # external audit of v0.2 (06/10): secret files and tools that print decrypted secrets
     ("cat ~/.pgpass", False),
     ("cat ~/.my.cnf", False),

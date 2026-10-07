@@ -8,6 +8,7 @@ One version scheme: **a repository tag per release**. Components have no version
 
 - **secret-guard:** brace expansion is applied before matching (`cat .{env,txt}`); `awk '{print $ 2}'` with a space counts as value extraction.
 - **go-gate:** literal variables are resolved before the protected-path check, and every word of a changing command is checked (`F=~/.claude/settings.json; echo x > $F`, `cp x $F`); `print(..., file=sys.stderr)` and `import os.path` are reads; an MCP tool is a change only when a write verb is its leading verb or follows and/then/or (`get_commit` and `list_settings` are reads, `get_and_delete_x` and `getAndDeleteX` changes); plan ids are kept to ASCII so `GO <id>` can name them.
+- **secret-guard, found in use the same evening:** its own refusal message recommended `grep -o '^[A-Z_]*='` (key names only), which the new extraction rule refused. `grep -o` now counts as extraction only when it keeps what follows the `=`, and extraction is judged within one pipeline.
 - **leak-check:** XML attributes named `key`, `id`, `keyid` or `name` are indexes, not secrets; other attributes need the normal 12-character length.
 - Replay of 5,143 real commands: secret-guard +2.7% refusals against v0.8 (unchanged from v0.9), go-gate +0.7% changes (was 0.8%).
 

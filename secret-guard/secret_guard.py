@@ -461,7 +461,7 @@ MASK_REDEFINED = (r"(^|[\s;&|({])(function\s+)?" + re.escape(MASK_CMD) + r"\s*\(
                   + r"=|(^|[;&|({\n]\s*)(export\s+)?PATH=[^\s;&|]*\s*(;|&&|\n|$)|\bexport\s+PATH=|\benable\s+-f\b|\bhash\s+-p\b")
 # Extracting the bare value before the mask leaves nothing it can recognise (`cut -d= -f2 .env | mask`).
 VALUE_EXTRACTION = (r"\bcut\b[^|]*-f\s*['\"]?[2-9]|\bawk\b[^|]*\$\s*([2-9]|NF)\b|\bsed\b[^|]*s(.)\^?(\[\^?[=:]\]\*|\.\*)[=:]"
-                    r"|\b(grep|rg)\b[^|]*\s-[a-zA-Z]*o|\bjq\b[^|]*\s-[a-zA-Z]*r|\byq\b[^|]*\s-r|\bcut\b[^|]*-c\s*\d")
+                    r"|\b(grep|rg)\b[^|]*\s-[a-zA-Z]*o[a-zA-Z]*\b[^|]*=(\.|\[\^|\\?S|\\?w|\[[^\]]*\]\+)|\bjq\b[^|]*\s-[a-zA-Z]*r|\byq\b[^|]*\s-r|\bcut\b[^|]*-c\s*\d")
 FILE_LABELS = ("file that may contain secrets", "input redirected from a secret file", "copy of a secret file to stdout",
                "reader on a path known only at run time")
 MARKER_LOG = os.path.expanduser(os.environ.get("SECRET_GUARD_LOG", "~/.local/state/secret-guard/marker.log"))
@@ -471,7 +471,7 @@ def extracts_values(stmt, cwd=None):
     """A segment whose first word reads a secret file (`cut -d= -f2 .env`, `cat .env | awk '{print $2}'`), followed by
     a value extraction. Wrappers are flattened (quotes removed), so `ssh h 'cut … .env' | mask` counts too, while
     `ls -la x.env | awk '{print $5}'` (a listing, not a read) does not."""
-    segs = re.split(r"\||;|&&", unquoted(without_heredoc_bodies(stmt)))
+    segs = re.split(r"\|", unquoted(without_heredoc_bodies(stmt)))
     for i, seg in enumerate(segs):
         words = re.sub(r"^.*?\b(bash|sh)\s+-c\s+", "", seg).split()
         words = [w for w in words if not re.fullmatch(r"\w+=\S*|sudo|ssh|-\S+|\S+@\S+|pct|exec|\d+|--", w)]
