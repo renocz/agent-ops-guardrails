@@ -2,7 +2,7 @@
 
 One version scheme: **a repository tag per release**. Components have no version of their own. Commit messages from 06/10/2026 that say "secret-guard v0.3/v0.4/v0.5" refer to the intermediate revisions listed under v0.6.
 
-## v0.9.1 (unreleased)
+## v0.9.1 (07/10/2026)
 
 **After a targeted audit of the v0.9 changes** (gemini, 07/10). Its cases were re-run before any fix: 6 confirmed, 4 refuted (`cat <(echo .env)` and `exec 0< .env` were already refused, `docker start -a web` was covered, a replayed GO fails the 15-minute freshness check anyway), 1 already documented (an agent that deletes its own transcripts before the daily copy).
 
