@@ -95,6 +95,13 @@ class LeakCheck(unittest.TestCase):
         vals = lc.collect_values(dict(self.cfg, env_files=[f"{self.d}/o/compose.yaml"], value_files=[]))
         self.assertEqual([n.split(":")[-1] for n, _k in vals.values()], ["PLEX_TOKEN"])
 
+    def test_templates_are_not_secrets(self):
+        w(f"{self.d}/def/indexer.yml", 'api_key: "{{ .Config.apikey }}"\n'
+                                       "token: '{% if x %}abcdefghijkl{% endif %}'\n"
+                                       f"apikey: {FAKE}d\n")
+        vals = lc.collect_values(dict(self.cfg, env_files=[], value_files=[], config_files=[f"{self.d}/def/*.yml"]))
+        self.assertEqual([n.split(":")[-1] for n, _k in vals.values()], ["apikey"])
+
     def test_tokens_inside_url_keys(self):
         uuid = "3f2b9c1e-" + "7a4d-4e8b-9c2f-1a2b3c4d5e6f"
         w(f"{self.d}/h/.env", f"DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/123/{FAKE}w\n"
