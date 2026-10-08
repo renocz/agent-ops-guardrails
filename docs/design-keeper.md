@@ -20,8 +20,8 @@ change or forge that approval**, even if it tries. Output filtering (secret-guar
 - Out of scope: an agent with root/admin rights on the machine where the keeper runs; a compromised human phone or
   Telegram account; side channels.
 - Precondition, stated in the README: **the agent must not be root/admin where the keeper runs.** On the Mac, Claude
-  Code runs as the user `renocz`, who can `sudo` only with a password the agent does not have. On a server where the
-  agent runs as root (my LXC 100 today), the keeper cannot protect anything until the agent runs as a normal user.
+  Code runs as an ordinary user who can `sudo` only with a password the agent does not have. On a server where the
+  agent runs as root (e.g. a container), the keeper cannot protect anything until the agent runs as a normal user.
 
 ## Components
 
@@ -67,7 +67,34 @@ change or forge that approval**, even if it tries. Output filtering (secret-guar
 | A forged or replayed `GO` (channel header, old message_id) | A GO is a button press on the keeper bot, delivered by Telegram to keeperd, bound to the plan hash, single use. Text in the agent's conversation never approves anything. |
 | A plan approved before it was delivered | keeperd sends the plan itself; the human approves what they saw. |
 | Removing or editing the hook | Managed settings (root-owned) register it; the agent's user cannot change them. |
-| Bypassing the classifier (Python, opaque commands) | The classifier is the same, but it runs in keeperd (root-owned code), not in a hook the agent could edit. Running a program from a scratch path or changing PATH is now opaque. Opaque commands need `actions=script` in an approved plan. This stays the weak point, now bounded by what the human approved. |
+| Bypassing the classifier (Python, opaque commands) | The classifier runs in keeperd (root-owned code), not in a hook the agent could edit. Running a program from a scratch path or changing PATH is opaque. A read command that an option or a config file makes execute or write is opaque too (ssh ProxyCommand/-F, awk -f, sed -e w, curl -K, git read verbs outside a declared safe repo, a PAGER/LESSOPEN/GIT_* prefix; see Known limits). Opaque commands need `actions=script` in an approved plan. The heuristic classifier is still the weak point, now much narrower and bounded by what the human approved. |
+
+## Known limits (be precise about what is proven)
+
+The keeper gives two different guarantees, and only the first is strong:
+
+1. **The approval cannot be forged by the agent.** The state is `_keeper`'s, the approval is a button press on a bot
+   only `_keeper` can read, bound to the plan hash and single use, and the hook is root-owned in managed settings.
+   An agent with the user's rights (not root) cannot create, change or replay it. This is the design's real contribution.
+2. **The gate decides what counts as a change** with a heuristic classifier. It is not a proof. The 08/10 review found a
+   whole class it mislabelled as reads (commands that execute or write through an option or a config file); those are
+   fixed (K1-K9) and tested, but the classifier stays heuristic, so treat any new "read" that can run a program as a
+   bug to report, not as a guarantee.
+
+Still open, and stated so a reader does not over-trust the gate:
+
+- **`actions=script` / opaque is unbounded by design.** A command approved as `script` can do anything the agent's user
+  can. The real limit there is what the human approves, and least privilege underneath.
+- **git in an agent-writable repo.** A git read verb is a read only in a repo listed in `safe_git_repos` (empty by
+  default; set with `install-keeper.sh --safe-git-repo`). Elsewhere it is opaque, because a repo-local config can run a
+  program. If a declared safe repo is itself writable by the agent, that protection is void.
+- **TOCTOU on files.** `python3 script.py` is judged on the file keeperd reads; the file can change before it runs.
+- **A process started under an approved plan keeps running after the plan ends.** The keeper gates tool calls, not
+  the processes they spawn.
+- **Output filtering (secret-guard) still runs in the agent's process** for v1.
+
+The design that would actually bound the `script` class is an isolated executor under another user; it is the v2
+direction, not done here.
 
 ## Failure modes
 

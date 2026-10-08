@@ -40,20 +40,48 @@ Create the keeper bot with BotFather first. With `--apply`, the installer asks f
 input); the token is never passed as an argument. If managed settings already exist, the installer merges into them: it puts
 the keeper hook first, adds the deny rules, shows the diff and keeps a `.bak-keeper` copy.
 
-## Limits (read these)
+## What the keeper does and does not guarantee (read these)
+
+Two different things, and only the first is strong:
+
+- **The approval cannot be forged by the agent.** It is a button press on a bot only `_keeper` can read, bound to the
+  plan's fingerprint, single use, and the hook is root-owned in managed settings. An agent with the user's rights (not
+  root) cannot create, replay or alter it. That is the point of the keeper.
+- **The gate decides what counts as a change with a heuristic classifier.** That is not a proof. A review on 08/10 found
+  a class of "read" commands that actually execute or write through an option or a config file; those are fixed and
+  tested (ssh `ProxyCommand`/`-F`, `awk -f`, `sed -e 'w'`, `curl -K`, a `PAGER`/`GIT_*` prefix, git read verbs outside a
+  declared safe repo, the `<>` redirection). The classifier stays heuristic, so a new "read" that can run a program is a
+  bug to report, not a guarantee.
+
+Still open:
 
 - The keeper gates **tool calls**. A command approved under `actions=script` can do anything the agent's user can do.
   A process started under an approved plan keeps running after the plan ends or is stopped.
-- The classifier is heuristic. Opaque commands always need `script`. So do:
-  - programs run by path outside system directories;
-  - commands that change `PATH`, `LD_*`/`DYLD_*` or aliases;
-  - writing into `~/bin`, `~/.local/bin`, `/usr/local/bin` or `/opt/homebrew/bin`.
+- Opaque commands always need `script`. So do: programs run by path outside system directories; commands that change
+  `PATH`, `LD_*`/`DYLD_*` or aliases; writing into `~/bin`, `~/.local/bin`, `/usr/local/bin` or `/opt/homebrew/bin`.
+- **git read verbs are trusted only in a declared safe repo.** A repo-local config (`core.fsmonitor`, `core.pager`, an
+  alias `!cmd`) runs a program even on `git status`. List your repos at install time with `--safe-git-repo DIR`
+  (repeatable); with none, every git read needs a plan. A safe repo the agent can itself write to voids this.
 - Sessions are not a security boundary: every session runs as the same user. They keep plans apart for clarity.
 - The installer refuses to install when a parent directory of the code is not root-owned or is writable by others.
 - `python3 script.py` is judged on the script's content when keeperd reads it. The file can still change between that
   check and the run.
 - Output filtering (secret-guard) still runs in the agent's process.
 - A stronger design runs every change in an isolated executor under another user. That is the direction for v2.
+
+## Emergency rollback
+
+To hand control back fast (do this as a human with sudo; the agent cannot):
+
+1. **Put a running keeperd into observe** (log, do not block): set `"mode": "observe"` in `/etc/keeper/config.json`,
+   then restart the daemon (`sudo launchctl kickstart -k system/io.github.renocz.keeper` on macOS,
+   `sudo systemctl restart keeper` on Linux). keeperd reads its mode at startup, so the restart is required.
+2. **Or stop the daemon and let the hook fail open**: set the root-owned mode file to observe and stop keeperd
+   (`sudo sh -c 'printf observe > /opt/agent-guardrails/lib/mode'` then `launchctl bootout …` / `systemctl stop keeper`).
+   The mode file is consulted **only when keeperd is unreachable**; with it on `block` and the daemon stopped, every
+   change is refused (reads still pass).
+3. **Or remove the gate entirely**: restore the managed settings the installer backed up
+   (`managed-settings.json.bak-keeper`).
 
 ## Tests
 
