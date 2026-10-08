@@ -204,6 +204,10 @@ def is_scratch(path):
 
 
 KNOWN_VARS = {}               # literal assignments of the command being classified (NAME=value), set by classify()
+# K6: repos where a git read verb is trusted (the agent cannot have planted a malicious repo-local config there).
+# Empty by default: out of the box every git read is opaque. The installer / config fills this in (--safe-git-repo).
+SAFE_GIT_REPOS = []
+CWD = None                    # the directory Claude Code ran the tool in (set by main() from the hook input)
 
 
 def literal_assignments(cmd):
@@ -224,6 +228,73 @@ def touches_protected(stage):
     for w in re.findall(r"[^\s'\"<>|;&()]+", stage.replace(">", " ")):
         w = resolve_vars(w)
         if ("/" in w or w.startswith("~")) and "$" not in w and is_protected(w):
+            return True
+    return False
+
+
+def _git_kind(args):
+    """The git classification without the K6 repo check: read verbs are reads, everything else a change."""
+    j = 0
+    while j < len(args) and args[j].startswith("-"):
+        j += 2 if args[j] in ("-C", "-c", "--git-dir", "--work-tree") else 1
+    sub = args[j] if j < len(args) else ""
+    rest = args[j + 1:]
+    if any(a in ("-c", "--config-env") or a.startswith(("--config-env=", "--exec-path")) for a in args[:j]):
+        return "change", "git -c (config can run commands)"
+    if any(a.startswith(("--output", "--ext-diff")) for a in rest):
+        return "change", f"git {sub} --output/--ext-diff"
+    if sub in GIT_READ:
+        return "read", ""
+    if sub == "branch" and all(x.startswith("-") and x in ("-a", "-r", "-v", "-vv", "--list", "--show-current", "-l") for x in rest):
+        return "read", ""
+    if sub == "remote" and (not rest or rest[0] in ("-v", "show", "get-url")):
+        return "read", ""
+    if sub == "config" and any(x in ("--get", "-l", "--list", "--get-all", "--show-origin") for x in rest):
+        return "read", ""
+    if sub == "tag" and (not rest or rest[0] in ("-l", "--list", "-n")):
+        return "read", ""
+    if sub == "stash" and rest[:1] in (["list"], ["show"]):
+        return "read", ""
+    return "change", f"git {sub}"
+
+
+def _git_repo_dir(args):
+    """The directory git acts on: -C, --git-dir/--work-tree, the GIT_DIR assignment, else the hook's cwd (CWD)."""
+    d = None
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if a in ("-C", "--work-tree") and i + 1 < len(args):
+            d = args[i + 1]; i += 2; continue
+        if a == "--git-dir" and i + 1 < len(args):
+            d = args[i + 1].rstrip("/").removesuffix("/.git") or "/"; i += 2; continue
+        if a.startswith("--git-dir="):
+            d = a.split("=", 1)[1].rstrip("/").removesuffix("/.git") or "/"; i += 1; continue
+        if a.startswith("-C") and len(a) > 2:
+            d = a[2:]; i += 1; continue
+        i += 1
+    d = d or KNOWN_VARS.get("GIT_DIR") or CWD
+    if d is None:
+        return None
+    d = os.path.expanduser(d.strip("'\""))
+    if not os.path.isabs(d) and CWD:
+        d = os.path.join(CWD, d)
+    try:
+        return os.path.realpath(d)
+    except (OSError, ValueError):
+        return os.path.normpath(d)
+
+
+def git_repo_is_safe(args):
+    """True when git's target repo is one of SAFE_GIT_REPOS, or under one (a safe repo covers its sub-directories)."""
+    if not SAFE_GIT_REPOS:
+        return False
+    d = _git_repo_dir(args)
+    if not d:
+        return False
+    for s in SAFE_GIT_REPOS:
+        s = os.path.realpath(os.path.expanduser(s)).rstrip("/")
+        if d == s or d.startswith(s + os.sep):
             return True
     return False
 
@@ -361,28 +432,13 @@ def _classify_stage(stage, depth, bodies=()):
             return "read", ""
         return "change", f"docker {' '.join(a[:2])}"
     if c == "git":
-        j = 0
-        while j < len(args) and args[j].startswith("-"):
-            j += 2 if args[j] in ("-C", "-c", "--git-dir", "--work-tree") else 1
-        sub = args[j] if j < len(args) else ""
-        rest = args[j + 1:]
-        if any(a in ("-c", "--config-env") or a.startswith(("--config-env=", "--exec-path")) for a in args[:j]):
-            return "change", "git -c (config can run commands)"
-        if any(a.startswith(("--output", "--ext-diff")) for a in rest):
-            return "change", f"git {sub} --output/--ext-diff"
-        if sub in GIT_READ:
-            return "read", ""
-        if sub == "branch" and all(x.startswith("-") and x in ("-a", "-r", "-v", "-vv", "--list", "--show-current", "-l") for x in rest):
-            return "read", ""
-        if sub == "remote" and (not rest or rest[0] in ("-v", "show", "get-url")):
-            return "read", ""
-        if sub == "config" and any(x in ("--get", "-l", "--list", "--get-all", "--show-origin") for x in rest):
-            return "read", ""
-        if sub == "tag" and (not rest or rest[0] in ("-l", "--list", "-n")):
-            return "read", ""
-        if sub == "stash" and rest[:1] in (["list"], ["show"]):
-            return "read", ""
-        return "change", f"git {sub}"
+        k = _git_kind(args)
+        # K6: a repo-local config (core.fsmonitor, core.pager, an alias !cmd, …) runs a program even on a read verb
+        # like `git status`. Such a config is only dangerous in a repo the agent could have written, so a git read is
+        # a read only in a repo declared safe (SAFE_GIT_REPOS, empty by default). Elsewhere it is opaque.
+        if k[0] == "read" and not git_repo_is_safe(args):
+            return "opaque", "git read in a repo not declared safe (SAFE_GIT_REPOS; K6)"
+        return k
     if c == "systemctl":
         sub = next((x for x in args if not x.startswith("-")), "")
         return ("read", "") if sub in SYSTEMCTL_READ else ("change", f"systemctl {sub}")
@@ -822,7 +878,8 @@ def classify(tool, tool_input):
 import fcntl, json, time
 
 GATE_DIR = os.path.expanduser(os.environ.get("GO_GATE_DIR", "~/.claude/go-gate"))
-DEFAULTS = {"mode": "observe", "owner_ids": [], "ttl_minutes": 120, "max_ttl_minutes": 240, "pending_minutes": 120}
+DEFAULTS = {"mode": "observe", "owner_ids": [], "ttl_minutes": 120, "max_ttl_minutes": 240, "pending_minutes": 120,
+            "safe_git_repos": []}
 CATEGORIES = ("edit", "git", "deploy", "api", "browser", "delete", "script", "doc")
 SCOPE_LINE = re.compile(r"^\W*(?:scope|p[ée]rim[èe]tre)\s*:\s*(.+)$", re.I | re.M)
 AFFIRM = re.compile(r"^\s*(go|ok|okay|oui|yes|vas[- ]y)\b[\s!.]*(.*)$", re.I | re.S | re.A)
@@ -1183,9 +1240,11 @@ def main():
     try:
         data = json.load(sys.stdin)
         cfg = load_config()
-        global scan, pipeline_stages
+        global scan, pipeline_stages, CWD
         if pipeline_stages is None:
             scan, pipeline_stages = _load_splitter()
+        SAFE_GIT_REPOS[:] = cfg.get("safe_git_repos") or []        # K6: trusted repos for git read verbs
+        CWD = data.get("cwd")                                      # the dir Claude Code ran the tool in
         os.makedirs(GATE_DIR, mode=0o700, exist_ok=True)
         lock = open(os.path.join(GATE_DIR, ".lock"), "w")
         fcntl.flock(lock, fcntl.LOCK_EX)                      # one read-modify-write at a time
