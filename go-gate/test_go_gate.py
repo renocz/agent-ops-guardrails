@@ -166,6 +166,11 @@ BASH = [
     ("wget --config=/tmp/w https://h", "opaque"),
     ("tar --to-command=/tmp/evil -xf a.tar", "opaque"),
     ("tar -tf a.tar", "read"),
+    ("psql -c 'select pg_read_file(/etc/passwd)'", "change"),
+    ("psql -c 'select pg_terminate_backend(1)'", "change"),
+    ("psql -c 'select 1' -c 'delete from t'", "change"),
+    ("psql -f /tmp/evil.sql", "change"),
+    ("psql -c 'select count(*) from users'", "read"),
     ("openssl x509 -engine /tmp/e.so -in c.pem", "opaque"),
     ("ls <> /opt/stacks/b", "change"),
     ("ls 0<> /opt/stacks/b", "change"),
@@ -264,6 +269,16 @@ class Scope(unittest.TestCase):
         self.assertTrue(g.covers(plan, "Bash", {"command": "docker compose up -d web"}, "deploy"))
         self.assertFalse(g.covers(plan, "Bash", {"command": "docker compose up -d db"}, "deploy"))
         self.assertFalse(g.covers(plan, "Bash", {"command": "git push"}, "git"))
+
+    def test_covers_target_is_a_token_not_a_substring(self):          # K7
+        plan = {"targets": ["web"], "actions": ["deploy"]}
+        for cmd in ("docker restart webserver", "docker restart web-db", "docker restart cobweb"):
+            self.assertFalse(g.covers(plan, "Bash", {"command": cmd}, "deploy", cmd), cmd)
+        self.assertTrue(g.covers(plan, "Bash", {"command": "docker restart web"}, "deploy", "docker restart web"))
+        p2 = {"targets": ["/opt/stacks/web"], "actions": ["deploy"]}   # a path target covers its sub-paths, not a sibling
+        self.assertTrue(g.covers(p2, "Bash", {"command": "ls /opt/stacks/web/compose.yml"}, "deploy",
+                                 "ls /opt/stacks/web/compose.yml"))
+        self.assertFalse(g.covers(p2, "Bash", {"command": "ls /opt/stacks/webx"}, "deploy", "ls /opt/stacks/webx"))
 
 
 class Hook(unittest.TestCase):

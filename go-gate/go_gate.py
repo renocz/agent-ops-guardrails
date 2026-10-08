@@ -473,9 +473,21 @@ def _classify_stage(stage, depth, bodies=()):
         files = [a for a in args if not a.startswith("-") and not re.fullmatch(r"[0-7]{3,4}|[ugoa]*[+-=][rwxXst]+", a)]
         return ("read", "") if c == "mktemp" or (files and all(is_scratch(f) for f in files)) else ("change", f"{c} {files[0][:40] if files else ''}")
     if c == "psql":
-        sql = args[args.index("-c") + 1] if "-c" in args and args.index("-c") + 1 < len(args) else (bodies[0] if bodies else "")
-        return ("read", "") if sql and re.match(r"\s*(select|with|\\d|show|explain|table)\b", sql, re.I) \
-            and not re.search(r"\b(insert|update|delete|drop|alter|create|truncate|grant)\b", sql, re.I) else ("change", "psql")
+        # K8: a SELECT can still write or run via a function (lo_export, pg_read_file, COPY …), and -f/-o/-L and the
+        # \! \o \g \copy meta-commands read or run a file. A read is only every -c being a plain read query with none
+        # of these, and no script/output file option.
+        if any(a in ("-f", "--file", "-o", "--output", "-L", "--log-file") or
+               a.startswith(("-f", "--file=", "-o", "--output=", "-L", "--log-file=")) for a in args):
+            return "change", "psql -f/-o/-L file"
+        sqls = [args[i + 1] for i, a in enumerate(args) if a == "-c" and i + 1 < len(args)] or ([bodies[0]] if bodies else [])
+        if not sqls:
+            return "change", "psql"                               # interactive or stdin: opaque intent, treat as change
+        reject = re.compile(r"\b(insert|update|delete|drop|alter|create|truncate|grant|revoke|copy|lo_export|lo_import|"
+                            r"pg_read_file|pg_read_binary_file|pg_ls_dir|pg_terminate_backend|pg_cancel_backend|"
+                            r"pg_reload_conf|pg_rotate_logfile|dblink|set_config|nextval|setval)\b|\\!|\\o\b|\\g\b|\\copy\b",
+                            re.I)
+        ok = all(re.match(r"\s*(select|with|\\d|show|explain|table|values)\b", s, re.I) and not reject.search(s) for s in sqls)
+        return ("read", "") if ok else ("change", "psql")
     if c == "pct" and args[:1] == ["push"] and len(args) >= 4 and is_scratch(args[3]):
         return "read", ""
     if c in PVE_READ_CMDS:
@@ -957,15 +969,39 @@ def covers(plan, tool, tool_input, cat, text=None):
     targets = plan.get("targets") or []
     if not targets:
         return True
-    blob = (text if text is not None else json.dumps(tool_input, ensure_ascii=False)).lower()
-    if not any(t.lower() in blob for t in targets):
+    blob = text if text is not None else json.dumps(tool_input, ensure_ascii=False)
+    tokens = re.findall(r"[^\s'\"|;&<>()]+", blob)
+    # K7: a target matches a whole token or a path segment, never a free substring, so targets=web no longer covers
+    # `webserver`, `web-db` or `cobweb`.
+    if not any(target_matches(t, tokens) for t in targets):
         return False
     # External audit of v0.8 (07/10): `docker restart db web` passed with targets=web. For verbs that take several
     # objects, every object must match a target.
     for objs in multi_objects(text or ""):
-        if any(not any(t.lower() in o.lower() or o.lower() in t.lower() for t in targets) for o in objs):
+        if any(not any(target_matches(t, [o]) for t in targets) for o in objs):
             return False
     return True
+
+
+def target_matches(t, tokens):
+    """A plan target against the words of the action. A path target (with a /) matches a word equal to it or under it
+    (a prefix covers its sub-paths, kept on purpose). A name target matches a whole word or one of its /@:,-free
+    segments, never a substring."""
+    t = t.strip("'\"").lower().rstrip("/")
+    if not t:
+        return False
+    if "/" in t or t.startswith(("~", "./", "../")):
+        tp = t if any(c in t for c in "*$") else real(t).lower()
+        for tok in tokens:
+            r = real(tok.strip("'\"")).lower()
+            if r == tp or r.startswith(tp + "/"):
+                return True
+        return False
+    for tok in tokens:
+        tok = tok.strip("'\"").lower()
+        if tok == t or t in re.split(r"[/@:,]+", tok):
+            return True
+    return False
 
 
 MULTI_VERBS = re.compile(r"\b(docker(?:\s+compose)?|podman|systemctl|pct|qm|kubectl\s+delete\s+\w+)\s+"
