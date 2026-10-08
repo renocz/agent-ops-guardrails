@@ -4,6 +4,25 @@ One version scheme: **a repository tag per release**. Components have no version
 
 ## Unreleased (towards v1.0)
 
+- **classifier: a read command can no longer execute or write (08/10, review FIX FIRST).** A second review found a
+  class the classifier mislabelled as reads, so they passed with no plan, in block mode too. Each is reproduced by a
+  test that fails before the fix and passes after.
+  - **go-gate:** read commands that run a program or write through an option or a config file are now opaque (needs
+    `script`) or a change: `ssh` with `ProxyCommand`/`ProxyJump`/`LocalCommand`/`-F`/`-J`/`-W` (K1); `awk -f`, a pipe to
+    a command, `system`/`getline`/`ENVIRON` (K2, K3); `sed -f`, `e`/`s///e`, `w`/`s///w` (K4); `curl -K`/`--config` and
+    `wget -e`/`--config` (K5); `tar --to-command`, `openssl -engine`; a `PAGER`/`MANPAGER`/`LESSOPEN`/`GIT_*` prefix.
+    The `<>` and `N<>` redirections count as writes (K9). psql reads cannot write or run through a function
+    (`lo_export`, `pg_read_file`, `COPY`, …) or `\!`/`\o`/`\g` (K8). A plan target matches a whole token or path
+    segment, not a free substring, so `targets=web` no longer covers `webserver` or `cobweb` (K7).
+  - **keeper (K6):** a git read verb runs repo-local config (`core.fsmonitor`, `core.pager`, an alias `!cmd`), so it is
+    a read only in a repo declared safe. `install-keeper.sh --safe-git-repo DIR` (repeatable) fills `safe_git_repos`
+    (empty by default: every git read needs a plan). The hook forwards the tool call's cwd so keeperd resolves the repo.
+  - **secret-guard:** bare relative secret paths (`cat config.php`, `cat shadow`, `cat app.ini`) are refused like
+    `./config.php` was (S1); `/etc/keeper/` and `bot.token` are secret paths (L1).
+  - **docs:** the design and the READMEs now separate "the approval cannot be forged" (true) from "the gate blocks every
+    change" (a heuristic classifier), with a Known limits section and an emergency rollback procedure.
+  - **Friction:** on a 447-command corpus (existing tests + hook-gym + common admin reads), 0 commands change kind,
+    except git reads, which become opaque until their repo is declared safe (by design).
 - **keeper (go-gate step 2):** `keeper/` adds:
   - `keeperd`, which holds approvals under a dedicated user;
   - a second Telegram bot with Approve, Reject and Stop buttons, where approvals are bound to the plan's fingerprint and work once;
