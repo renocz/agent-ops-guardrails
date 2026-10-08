@@ -140,6 +140,8 @@ for f in "$HERE/keeperd.py" "$HERE/keeper_client.py" "$REPO/go-gate/go_gate.py" 
 done
 printf '#!/bin/sh\nexec /usr/bin/env -i %s -I %s/keeper_client.py propose "$@"\n' "$PY" "$LIB" > "$TMP/keeper-propose"
 printf '#!/bin/sh\nexec /usr/bin/env -i %s -I %s/keeper_client.py status\n' "$PY" "$LIB" > "$TMP/keeper-status"
+printf '%s\n' "$GATE_MODE" > "$TMP/mode"      # observe: the hook lets changes through if keeperd is down
+put "$LIB/mode" 644 "root:$ROOTGRP" "$TMP/mode"
 put "$BIN/keeper-propose" 755 "root:$ROOTGRP" "$TMP/keeper-propose"
 put "$BIN/keeper-status" 755 "root:$ROOTGRP" "$TMP/keeper-status"
 

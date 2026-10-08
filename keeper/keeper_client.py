@@ -51,6 +51,17 @@ def local_kind(tool, tool_input):
         return "change"
 
 
+def observe_mode():
+    """Observe install (first days): a daemon that is down must not block the agent. Read from a root-owned file
+    written by the installer next to this one; anything else means block."""
+    try:
+        p = os.path.join(HERE, "mode")
+        st = os.stat(p)
+        return st.st_uid == 0 and not st.st_mode & 0o022 and open(p).read().strip() == "observe"
+    except OSError:
+        return False
+
+
 def deny(why):
     print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
                                              "permissionDecisionReason": why}}))
@@ -69,7 +80,7 @@ def hook():
     try:
         out = ask({"op": "check", "session": data.get("session_id"), "tool": tool, "input": ti})
     except (OSError, ValueError) as e:
-        if local_kind(tool, ti) in ("read", "talk"):
+        if local_kind(tool, ti) in ("read", "talk") or observe_mode():
             sys.exit(0)
         deny(f"keeper: the keeper daemon is not reachable ({type(e).__name__}), so changes are refused. "
              "Tell the user; reads still work.")
