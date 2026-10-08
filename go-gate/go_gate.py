@@ -70,8 +70,11 @@ TRUSTED_BIN_DIRS = {"/bin", "/usr/bin", "/sbin", "/usr/sbin", "/usr/libexec", "/
 EXEC_DIRS = re.compile(r"(?:^|[\s'\"=:>])(?:~|\$HOME|\$\{HOME\}|/Users/[^/\s]+|/home/[^/\s]+|/root)/(?:\.local/)?bin/"
                        r"|/usr/local/s?bin/|/opt/homebrew/bin/|/opt/agent-guardrails/")
 # Variables that change which program runs or what it loads: assigning them makes a command opaque.
+# Pagers and hook-style vars (PAGER, LESSOPEN, GIT_PAGER, GIT_EXTERNAL_DIFF, GIT_SSH_COMMAND…) run a program the agent
+# chose, so a "read" verb prefixed with one of them is not a read (same class as K1-K6).
 EXEC_VARS = re.compile(r"(?:PATH|BASH_ENV|ENV|CDPATH|IFS|PROMPT_COMMAND|PYTHONPATH|PYTHONSTARTUP|PYTHONHOME|NODE_OPTIONS|"
-                       r"PERL5LIB|PERL5OPT|RUBYOPT|LD_\w+|DYLD_\w+)(?:\+?=|$)")
+                       r"PERL5LIB|PERL5OPT|RUBYOPT|PAGER|MANPAGER|LESSOPEN|LESSCLOSE|GIT_\w+|"
+                       r"LD_\w+|DYLD_\w+)(?:\+?=|$)")
 # Shell keywords that only frame other statements.
 KEYWORDS = {"do", "done", "then", "else", "elif", "fi", "if", "while", "until", "for", "in", "case", "esac",
             "function", "!", "{", "}", "(", ")", "select", ";;"}
@@ -154,7 +157,8 @@ def write_targets(tokens):
     """Files a stage writes through redirections. 2>&1, >&2 and here-strings are not files."""
     targets = []
     for i, t in enumerate(tokens):
-        m = re.fullmatch(r"(\d*|&)(>>?|>\|)(.*)", t)
+        # `>`, `>>`, `>|` and also `<>` / `N<>`, which open a file read-write and create it (K9).
+        m = re.fullmatch(r"(\d*|&)(>>?|>\|)(.*)", t) or re.fullmatch(r"(\d*)(<>)(.*)", t)
         if not m or t.endswith(("&1", "&2")) or re.fullmatch(r"\d*>&\d", t):
             continue
         target = (m.group(3) or (tokens[i + 1] if i + 1 < len(tokens) else "")).rstrip(";)&|")
@@ -312,10 +316,22 @@ def _classify_stage(stage, depth, bodies=()):
                 pass
         return "opaque", f"{c} {args[0][:20] if args else ''}"
     if c == "ssh":
+        # K1: ssh can run a program on THIS machine before/independently of the remote command, through a config file
+        # (-F) or a directive (ProxyCommand, LocalCommand, …). A jump/forward (-J/-W) also runs ssh locally. When any
+        # of these is present the call is opaque; only then is it safe to judge the remote command as the kind.
+        ssh_exec_opt = re.compile(r"(?i)^(proxycommand|proxyjump|localcommand|permitlocalcommand|knownhostscommand|"
+                                  r"match)\b")
         i = 0
         while i < len(args) and args[i].startswith("-"):
-            i += 2 if args[i] in ("-i", "-p", "-o", "-l", "-J", "-F", "-L", "-R", "-D", "-W", "-b", "-c", "-E",
-                                  "-m", "-O", "-Q", "-S", "-w", "-B", "-e") else 1
+            a = args[i]
+            if a in ("-F", "-J", "-W"):
+                return "opaque", "ssh local-exec option " + a
+            if a == "-o" and i + 1 < len(args) and ssh_exec_opt.match(args[i + 1]):
+                return "opaque", "ssh -o " + args[i + 1][:24]
+            if a.startswith("-o") and ssh_exec_opt.match(a[2:]):          # glued -oProxyCommand=...
+                return "opaque", "ssh " + a[:26]
+            i += 2 if a in ("-i", "-p", "-o", "-l", "-J", "-F", "-L", "-R", "-D", "-W", "-b", "-c", "-E",
+                            "-m", "-O", "-Q", "-S", "-w", "-B", "-e") else 1
         rest = args[i + 1:]
         if not rest:
             return "change", "interactive ssh"
@@ -371,6 +387,13 @@ def _classify_stage(stage, depth, bodies=()):
         sub = next((x for x in args if not x.startswith("-")), "")
         return ("read", "") if sub in SYSTEMCTL_READ else ("change", f"systemctl {sub}")
     if c == "curl" or c == "wget":
+        # K5: a config file can carry any directive (output, upload, request method), and wget -e runs a .wgetrc
+        # directive. Neither is visible in the command, so the call is opaque.
+        if c == "curl" and any(a in ("-K", "--config") or a.startswith("--config=") for a in args):
+            return "opaque", "curl --config (file can carry any directive)"
+        if c == "wget" and any(a in ("-e", "--execute", "--config") or a.startswith(("--execute=", "--config="))
+                               for a in args):
+            return "opaque", "wget -e/--config (runs wgetrc directives)"
         if any(is_action_url(a) for a in args if "://" in a) or \
                 any(re.search(r"(?i)x-http-method(-override)?\s*:\s*(post|put|patch|delete)", a) for a in args):
             return "change", f"{c} to an action URL"
@@ -396,6 +419,8 @@ def _classify_stage(stage, depth, bodies=()):
                 j = 1
                 while j < len(a):
                     o = a[j]
+                    if o == "K":                              # -K / grouped -sK: a config file (K5)
+                        return "opaque", "curl -K (config file)"
                     if o in CURL_VALUE_OPTS:
                         val = a[j + 1:] or (args[k + 1] if k + 1 < len(args) else "")
                         if o == "X" and val.upper() not in ("GET", "HEAD"):
@@ -521,13 +546,95 @@ def is_action_url(arg):
     return bool(re.search(r"[?&](action|cmd|command|op|do|method)=", m.group(2) or "", re.I))
 
 
-CURL_VALUE_OPTS = set("XdFTocuHeAbxmwrKEyYzCPQD")  # curl short options that take a value
+CURL_VALUE_OPTS = set("XdFTocuHeAbxmwrEyYzCPQD")  # curl short options that take a value (K handled separately: config file)
 CURL_FILE_OPTS = {"--trace", "--trace-ascii", "--stderr", "-D", "--dump-header", "--libcurl", "--etag-save",
                   "--hsts", "--alt-svc"}                       # curl options whose value is a file it writes
 
 
+# ---------------------------------------------------------------------------------------------------------------
+# awk / sed are read only when their program is a plain text transform. A program read from a FILE (-f), a pipe to a
+# command, system()/getline/ENVIRON, or a write/exec command are not reads (K2/K3/K4). The blocklist that preceded this
+# could never be complete, because the program is arbitrary code.
+# ---------------------------------------------------------------------------------------------------------------
+def _awk_program(args):
+    """The inline awk program: the -e/--source fragments joined, or the first positional when there is no -e."""
+    out, i, seen_e = [], 0, False
+    while i < len(args):
+        a = args[i]
+        if a in ("-e", "--source") and i + 1 < len(args):
+            out.append(args[i + 1]); seen_e = True; i += 2; continue
+        if a.startswith("--source="):
+            out.append(a.split("=", 1)[1]); seen_e = True; i += 1; continue
+        if a.startswith("-e") and len(a) > 2:
+            out.append(a[2:]); seen_e = True; i += 1; continue
+        if a in ("-F", "-v") and i + 1 < len(args):
+            i += 2; continue
+        if a.startswith("-") and a != "--":
+            i += 1; continue
+        if a == "--":
+            i += 1; continue
+        if not seen_e:
+            out.append(a)                      # first positional is the program (when no -e was given)
+        break
+    return " ".join(out)
+
+
+# A single pipe (not ||), system()/getline/ENVIRON/close/fflush: awk runs a command -> opaque (script).
+AWK_RUNS = re.compile(r"\bsystem\s*\(|\bgetline\b|\bENVIRON\b|\bclose\s*\(|\bfflush\s*\(|(?<!\|)\|(?!\|)")
+# print/printf redirected to a file, or an append redirection: a write. `$3 > 100` (a comparison) is not matched,
+# because a redirection target is a string, a variable or a path, never a bare number.
+AWK_WRITES = re.compile(r">>|\bprintf?\b[^;{}\n]*>(?!=)\s*[\"'$/A-Za-z_]")
+
+
+def _sed_script(args):
+    """The sed script text: the -e/--expression fragments joined, or the first positional when there is no -e."""
+    out, i, seen_e = [], 0, False
+    while i < len(args):
+        a = args[i]
+        if a in ("-e", "--expression") and i + 1 < len(args):
+            out.append(args[i + 1]); seen_e = True; i += 2; continue
+        if a.startswith("--expression="):
+            out.append(a.split("=", 1)[1]); seen_e = True; i += 1; continue
+        if a.startswith("-e") and len(a) > 2:
+            out.append(a[2:]); seen_e = True; i += 1; continue
+        if a == "--":
+            i += 1; continue
+        if a.startswith("-"):
+            i += 1; continue
+        if not seen_e:
+            out.append(a)
+        break
+    return "\n".join(out)
+
+
+# sed `e` / `s///e` run a shell command (opaque); `w`/`W`/`s///w` write a file (change). `w`/`e` are matched only in
+# command position (start, after ; { } or an address), so a `w` or `e` inside a regex or replacement does not count.
+SED_EXEC = re.compile(r"(?:^|[;{}\s/0-9$,])e(?:[;\s]|$)|\bs(.)(?:\\.|(?!\1).)*\1(?:\\.|(?!\1).)*\1[0-9gpiImMe]*e\b", re.M)
+SED_WRITE = re.compile(r"(?:^|[;{}\s])[wW]\s+\S|\bs(.)(?:\\.|(?!\1).)*\1(?:\\.|(?!\1).)*\1[0-9gpiImMe]*[wW]\s*\S", re.M)
+
+
 def classify_read_cmd(c, args, depth):
     """Read-only commands that can still write or run something with the wrong option."""
+    if c in ("awk", "gawk", "mawk"):
+        if any(a in ("-f", "--file") or a.startswith("--file=") or re.fullmatch(r"-[a-zA-Z]*f", a) for a in args):
+            return "opaque", "awk -f program file"
+        prog = _awk_program(args)
+        if AWK_RUNS.search(prog):
+            return "opaque", "awk runs a command"
+        if AWK_WRITES.search(prog):
+            return "change", "awk writes a file"
+        return "read", ""
+    if c in ("sed", "gsed"):
+        if any(re.fullmatch(r"-[a-zA-Z]*i.*|--in-place.*", a) for a in args):
+            return "change", "sed -i"
+        if any(a in ("-f", "--file") or a.startswith("--file=") or re.fullmatch(r"-[a-zA-Z]*f", a) for a in args):
+            return "opaque", "sed -f program file"
+        script = _sed_script(args)
+        if SED_EXEC.search(script):
+            return "opaque", "sed runs a command (e / s///e)"
+        if SED_WRITE.search(script):
+            return "change", "sed writes a file (w / s///w)"
+        return "read", ""
     if c == "nvidia-smi" and any(re.match(r"-(pl|pm|ac|rac|r|e|c|lgc|rgc|lmc|rmc|-power-limit|-persistence-mode|-gpu-reset|"
                                           r"-ecc-config|-compute-mode|-applications-clocks|-lock|-reset)", a) for a in args):
         return "change", "nvidia-smi setting"
@@ -552,10 +659,6 @@ def classify_read_cmd(c, args, depth):
         return "change", "journalctl maintenance"
     if c == "jq" and any(a in ("--rawfile", "--slurpfile") for a in args):
         return "read", ""
-    if c == "sed" and any(re.fullmatch(r"-[a-zA-Z]*i.*|--in-place.*", a) for a in args):
-        return "change", "sed -i"
-    if c == "sed" and any(re.search(r"(^|;|\s)w\s+\S|/w\s+\S|\be\b", a) for a in args if not a.startswith("-")):
-        return "change", "sed w/e command"
     if c == "sort" and any(re.fullmatch(r"-o.*|--output.*", a) for a in args):
         return "change", "sort -o"
     if c == "uniq" and len([a for a in args if not a.startswith("-")]) >= 2:
@@ -563,11 +666,12 @@ def classify_read_cmd(c, args, depth):
     if c == "find" and any(a in ("-exec", "-execdir", "-ok", "-okdir", "-delete", "-fprint", "-fprint0", "-fprintf",
                                  "-fls") for a in args):
         return "change", "find action"
-    if c == "awk" and any(re.search(r"system\s*\(|print[^;]*>\s*\"|\|\s*\"|getline", a) for a in args):
-        return "change", "awk writes or runs"
     if c == "tee":
         files = [a for a in args if not a.startswith("-")]
         return ("read", "") if all(is_scratch(f) for f in files) else ("change", "tee to file")
+    if c == "tar" and any(a.startswith(("--to-command", "--use-compress-program", "-I", "--checkpoint-action",
+                                        "--rsh-command")) for a in args):
+        return "opaque", "tar runs a program"       # these options hand tar an arbitrary command to run
     if c == "tar" and not any(re.fullmatch(r"-?[a-zA-Z]*t[a-zA-Z]*", a) or a == "--list" for a in args[:1]):
         return "change", "tar extract/create"
     if c == "unzip" and not any(a in ("-l", "-v", "-t", "-p", "-Z") for a in args):
@@ -576,6 +680,8 @@ def classify_read_cmd(c, args, depth):
         return "change", "ss --kill"
     if c == "gzip" and not any(a in ("-l", "-t", "-c", "-cd", "-dc") for a in args):
         return "change", "gzip"
+    if c == "openssl" and any(a == "-engine" or a.startswith("-engine") for a in args):
+        return "opaque", "openssl -engine loads a shared object"
     if c == "openssl" and any(a in ("-out", "genrsa", "genpkey", "req") for a in args):
         return "change", "openssl writes"
     if c == "defaults" and args[:1] not in (["read"], ["read-type"], ["domains"], ["find"]):
