@@ -38,7 +38,7 @@ AGENT_HOME=$(/usr/bin/python3 -c 'import pwd, sys; print(pwd.getpwnam(sys.argv[1
 OS=$(uname -s)
 if [ "$OS" = Darwin ]; then
   KUSER=_keeper; GROUP=keeperclients; ROOTGRP=wheel
-  RUN_DIR=/usr/local/var/keeper
+  RUN_DIR=/opt/agent-guardrails/run
   MANAGED="/Library/Application Support/ClaudeCode/managed-settings.json"
   SERVICE=/Library/LaunchDaemons/io.github.renocz.keeper.plist
 else
@@ -47,7 +47,8 @@ else
   MANAGED=/etc/claude-code/managed-settings.json
   SERVICE=/etc/systemd/system/keeper.service
 fi
-LIB=/usr/local/lib/agent-guardrails
+BASE=/opt/agent-guardrails            # not /usr/local: Homebrew on Intel Macs gives it to the user (council 08/10)
+LIB=$BASE/lib BIN=$BASE/bin
 PY=/usr/bin/python3
 HOOK_CMD="/usr/bin/env -i $PY -I $LIB/keeper_client.py"
 
@@ -85,13 +86,14 @@ echo "== keeper install ($MODE) on $OS for agent user $AGENT (uid $AGENT_UID)"
 echo "-- 1. user $KUSER and group $GROUP (members: $AGENT, $KUSER)"
 if [ "$OS" = Darwin ]; then
   dscl . -read "/Groups/$GROUP" >/dev/null 2>&1 || run dseditgroup -o create "$GROUP"
-  KGID=$(dscl . -read "/Groups/$GROUP" PrimaryGroupID 2>/dev/null | awk '{print $2}' || true)
-  KGID=${KGID:-"<gid of $GROUP>"}          # dry run: the group does not exist yet
+  dscl . -read "/Groups/$KUSER" >/dev/null 2>&1 || run dseditgroup -o create "$KUSER"     # private group, no members
+  KGID=$(dscl . -read "/Groups/$KUSER" PrimaryGroupID 2>/dev/null | awk '{print $2}' || true)
+  KGID=${KGID:-"<gid of $KUSER>"}          # dry run: the group does not exist yet
   if ! dscl . -read "/Users/$KUSER" >/dev/null 2>&1; then
     KUID=$(for i in $(seq 450 499); do dscl . -list /Users UniqueID | awk '{print $2}' | grep -qx "$i" || { echo "$i"; break; }; done)
     run dscl . -create "/Users/$KUSER"
     run dscl . -create "/Users/$KUSER" UniqueID "$KUID"
-    run dscl . -create "/Users/$KUSER" PrimaryGroupID "$KGID"     # not staff: the agent's user is in staff
+    run dscl . -create "/Users/$KUSER" PrimaryGroupID "$KGID"     # its own group; not staff, where the agent is
     run dscl . -create "/Users/$KUSER" UserShell /usr/bin/false
     run dscl . -create "/Users/$KUSER" NFSHomeDirectory /var/empty
     run dscl . -create "/Users/$KUSER" IsHidden 1
@@ -100,19 +102,46 @@ if [ "$OS" = Darwin ]; then
   run dseditgroup -o edit -a "$KUSER" -t user "$GROUP"
 else
   getent group "$GROUP" >/dev/null || run groupadd --system "$GROUP"
-  id "$KUSER" >/dev/null 2>&1 || run useradd --system --no-create-home --home-dir /nonexistent \
-      --shell /usr/sbin/nologin --gid "$GROUP" "$KUSER"
+  id "$KUSER" >/dev/null 2>&1 || run useradd --system --user-group --no-create-home --home-dir /nonexistent \
+      --shell /usr/sbin/nologin "$KUSER"
+  run usermod -a -G "$GROUP" "$KUSER"
   run usermod -a -G "$GROUP" "$AGENT"
 fi
 
 echo "-- 2. root-owned code in $LIB (the agent cannot edit it)"
+# Council review (08/10): root-owned files are only safe if no parent directory lets the agent rename or replace them.
+CHAIN_BAD=$("$PY" - "$BASE" /etc/keeper /var/lib/keeper "$(dirname "$MANAGED")" "$(dirname "$SERVICE")" <<'PYEOF'
+import os, stat, sys
+bad = []
+for target in sys.argv[1:]:
+    p = os.path.realpath(target)
+    while True:
+        if os.path.lexists(p):
+            st = os.lstat(p)
+            if stat.S_ISLNK(st.st_mode) or st.st_uid != 0 or (st.st_mode & 0o022 and not st.st_mode & stat.S_ISVTX):
+                bad.append(p)
+        if p == "/":
+            break
+        p = os.path.dirname(p)
+print(" ".join(sorted(set(bad))))
+PYEOF
+)
+if [ -n "$CHAIN_BAD" ]; then
+  echo "   UNSAFE: not root-owned, or writable by others: $CHAIN_BAD" >&2
+  [ "$MODE" != apply ] || { echo "refusing to install: fix these directories first" >&2; exit 3; }
+else
+  echo "   parent directories: root-owned, not writable by others"
+fi
+mkd "$BASE" 755 "root:$ROOTGRP"
+mkd "$LIB" 755 "root:$ROOTGRP"
+mkd "$BIN" 755 "root:$ROOTGRP"
 for f in "$HERE/keeperd.py" "$HERE/keeper_client.py" "$REPO/go-gate/go_gate.py" "$REPO/secret-guard/secret_guard.py"; do
   put "$LIB/$(basename "$f")" 644 "root:$ROOTGRP" "$f"
 done
 printf '#!/bin/sh\nexec /usr/bin/env -i %s -I %s/keeper_client.py propose "$@"\n' "$PY" "$LIB" > "$TMP/keeper-propose"
 printf '#!/bin/sh\nexec /usr/bin/env -i %s -I %s/keeper_client.py status\n' "$PY" "$LIB" > "$TMP/keeper-status"
-put /usr/local/bin/keeper-propose 755 "root:$ROOTGRP" "$TMP/keeper-propose"
-put /usr/local/bin/keeper-status 755 "root:$ROOTGRP" "$TMP/keeper-status"
+put "$BIN/keeper-propose" 755 "root:$ROOTGRP" "$TMP/keeper-propose"
+put "$BIN/keeper-status" 755 "root:$ROOTGRP" "$TMP/keeper-status"
 
 echo "-- 3. config, state and socket directory"
 "$PY" - "$OWNER" "$CHAT" "$AGENT_UID" "$AGENT_HOME" "$GROUP" "$RUN_DIR" "$GATE_MODE" > "$TMP/config.json" <<'PYEOF'
@@ -145,7 +174,8 @@ if [ "$OS" = Darwin ]; then
 <plist version="1.0"><dict>
   <key>Label</key><string>io.github.renocz.keeper</string>
   <key>UserName</key><string>$KUSER</string>
-  <key>GroupName</key><string>$GROUP</string>
+  <key>GroupName</key><string>$KUSER</string>
+  <key>InitGroups</key><true/>
   <key>ProgramArguments</key><array><string>$PY</string><string>-I</string><string>$LIB/keeperd.py</string><string>/etc/keeper/config.json</string></array>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
@@ -153,6 +183,7 @@ if [ "$OS" = Darwin ]; then
 </dict></plist>
 EOF
   put "$SERVICE" 644 "root:wheel" "$TMP/svc"
+  [ "$MODE" != apply ] || launchctl bootout system/io.github.renocz.keeper 2>/dev/null || true   # re-install
   run launchctl bootstrap system "$SERVICE"
 else
   cat > "$TMP/svc" <<EOF
@@ -186,26 +217,38 @@ EOF
 fi
 
 echo "-- 5. Claude Code managed settings: $MANAGED"
-"$PY" - "$HOOK_CMD" "$LIB" > "$TMP/managed.json" <<'PYEOF'
-import json, sys
-cmd, lib = sys.argv[1:]
-deny = [f"{t}({p})" for t in ("Edit", "Write") for p in (lib + "/**", "/etc/keeper/**", "/var/lib/keeper/**")]
-print(json.dumps({"hooks": {"PreToolUse": [{"matcher": "*", "hooks": [{"type": "command", "command": cmd}]}]},
-                  "permissions": {"deny": deny}}, indent=1))
+# Council review (08/10): existing managed settings are merged (backup kept), never skipped: a keeper without its
+# hook registered would gate nothing.
+EXISTING="$MANAGED"; [ "$MODE" = prefix ] && EXISTING="$PREFIX$MANAGED"
+"$PY" - "$HOOK_CMD" "$BASE" "$EXISTING" > "$TMP/managed.json" <<'PYEOF'
+import json, os, sys
+cmd, base, existing = sys.argv[1:]
+cur = {}
+if os.path.exists(existing):
+    cur = json.load(open(existing))          # unreadable JSON: stop here, the install fails before writing
+deny = [f"{t}({p})" for t in ("Edit", "Write") for p in (base + "/**", "/etc/keeper/**", "/var/lib/keeper/**")]
+pre = cur.setdefault("hooks", {}).setdefault("PreToolUse", [])
+if not any(h.get("command") == cmd for e in pre for h in e.get("hooks", [])):
+    pre.insert(0, {"matcher": "*", "hooks": [{"type": "command", "command": cmd}]})
+d = cur.setdefault("permissions", {}).setdefault("deny", [])
+d += [x for x in deny if x not in d]
+print(json.dumps(cur, indent=1))
 PYEOF
-if [ -e "${PREFIX}$MANAGED" ] || { [ "$MODE" != prefix ] && [ -e "$MANAGED" ]; }; then
-  echo "   $MANAGED already exists: not touched. Merge this into it by hand:"
-  sed 's/^/     /' "$TMP/managed.json"
-else
-  put "$MANAGED" 644 "root:$ROOTGRP" "$TMP/managed.json"
+if [ -e "$EXISTING" ]; then
+  echo "   $MANAGED exists: merged (keeper hook first, deny rules added); backup kept as .bak-keeper"
+  diff <("$PY" -m json.tool --indent 1 "$EXISTING") "$TMP/managed.json" | sed 's/^/     /' || true
+  [ "$MODE" != apply ] || cp -p "$MANAGED" "$MANAGED.bak-keeper"
+  [ "$MODE" != prefix ] || cp -p "$EXISTING" "$EXISTING.bak-keeper"
 fi
+put "$MANAGED" 644 "root:$ROOTGRP" "$TMP/managed.json"
 
 echo "-- 6. after install"
 cat <<EOF
    - Remove go-gate's own PreToolUse/Stop/UserPromptSubmit hook from ~/.claude/settings.json (keeper replaces it).
-   - Check as $AGENT, each must FAIL: write /var/lib/keeper/state.json; edit $LIB/keeperd.py; kill keeperd;
+   - Check as $AGENT, each must FAIL: write /var/lib/keeper/state.json; edit $LIB/keeperd.py; rename $BASE; kill keeperd;
      send {"op":"approve"} to the socket; set "disableAllHooks": true in ~/.claude/settings.json and see whether the
      managed hook still runs (it must).
+   - The agent proposes with: $BIN/keeper-propose --scope "id=… ; targets=… ; actions=… ; ttl=60" --text "why"
    - Start in --observe for a day if you want only logs, then block mode for a week before v1.0.
 EOF
 [ "$MODE" = apply ] || echo "== nothing was installed ($MODE). Re-run with --apply (as root) to install."

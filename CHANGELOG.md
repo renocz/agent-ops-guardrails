@@ -8,17 +8,26 @@ One version scheme: **a repository tag per release**. Components have no version
   - `keeperd`, which holds approvals under a dedicated user;
   - a second Telegram bot with Approve, Reject and Stop buttons, where approvals are bound to the plan's fingerprint and work once;
   - a thin hook client that fails closed;
-  - `keeper-propose`;
+  - `keeper-propose`, which keeperd answers itself inside the hook's check, so the plan is bound to the real session;
   - an installer that only does a dry run unless `--apply`;
-  - 32 tests, including forged, replayed, stale and stranger approvals.
+  - 38 tests, including forged, replayed, stale and stranger approvals.
+
+  The council reviewed the code before release (08/10, CORRIGER D'ABORD 4/4), and these changes followed:
+  - the daemon user gets a private group;
+  - code goes under `/opt/agent-guardrails`, with a check of every parent directory;
+  - existing managed settings are merged instead of skipped;
+  - Stop ends every plan;
+  - Telegram is called outside the lock, and the socket has a timeout;
+  - the approval message warns on `script`, `delete` and plans without targets;
+  - an edit plan cannot write programs into `~/bin`-style directories.
 
   Design: `docs/design-keeper.md`. Not installed anywhere yet.
 - **go-gate classifier:** these are now opaque, because a name or `PATH` says nothing when the agent controls the file:
-  - a program run from a scratch or relative path (`/tmp/x/cat`, `./cat`);
+  - a program run by path from outside the system directories (`/tmp/x/cat`, `./cat`, `~/bin/cat`);
   - commands that set `PATH`, `LD_*`, `DYLD_*`, `PYTHONPATH` or `BASH_ENV`;
   - aliases and function definitions.
 
-  On 5,283 real commands, this changed one classification.
+  On about 5,300 real commands, this changed three classifications.
 
 ## v0.9.1 (07/10/2026)
 

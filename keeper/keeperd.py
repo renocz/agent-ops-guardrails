@@ -6,13 +6,17 @@ Telegram bot whose token only this user can read. The agent can propose a plan a
 it cannot approve, change or read the approval state.
 
 Requests (one JSON object per line on the socket):
-  {"op": "propose", "session": s, "text": "...", "scope": "id=… ; targets=… ; actions=… ; ttl=…"}
-  {"op": "check",   "session": s, "tool": "Bash", "input": {...}}           -> {"decision": "allow"|"deny", "reason": …}
-  {"op": "status",  "session": s}                                            -> active plan summary (no secrets)
+  {"op": "check", "session": s, "tool": "Bash", "input": {...}}   -> {"decision": "allow"|"deny", "reason": …}
+
+The agent proposes a plan by running `keeper-propose --scope "id=… ; targets=… ; actions=… ; ttl=…" --text "why"`.
+keeperd sees that command in the hook's check, with the session id Claude Code gave the hook, sends the plan to the
+human and refuses the command itself (there is nothing to run). `keeper-status` works the same way. Council review
+(08/10): a separate socket op could not know which session proposed.
+Sessions are not a security boundary: every session runs as the same agent user. They keep plans apart for clarity.
 
 Standard library only. Python 3.9+.
 """
-import hashlib, importlib.util, json, os, re, secrets, socket, socketserver, struct, sys, threading, time, urllib.request
+import hashlib, importlib.util, json, os, re, secrets, shlex, socket, socketserver, struct, sys, threading, time, urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DEFAULTS = {"socket": "/var/run/keeper/keeper.sock", "state_dir": "/var/lib/keeper", "agent_uids": [],
@@ -78,9 +82,6 @@ class Keeper:
 
     # ----- agent side ------------------------------------------------------------------------------------------
     def propose(self, sid, text, scope_line):
-        pr = self.state.get("proposer") or {}
-        if not sid and pr and self.now() - pr["at"] < 60:
-            sid = pr["session"]
         plan = self.gate.parse_scope("Scope: " + (scope_line or "")) or self.gate.parse_scope(text or "")
         if not plan:
             return {"ok": False, "reason": "no valid scope (actions=edit,git,deploy,api,browser,delete,script,doc)"}
@@ -99,13 +100,42 @@ class Keeper:
         self.state["proposals"] = recent + [now]
         self.save()
         self.log({"event": "proposed", "session": sid, "plan": plan.get("id"), "hash": phash[:12]})
-        self.notify.send_plan(sid, pending)
-        return {"ok": True, "hash": phash[:12], "message": "sent to the human for approval"}
+        return {"ok": True, "hash": phash[:12], "message": "sent to the human for approval",
+                "_notify": (sid, pending)}                     # sent by the caller, outside the lock
+
+    def keeper_command(self, cmd):
+        """`keeper-propose …` or `keeper-status` alone in a Bash call: (name, {option: value}), else None."""
+        try:
+            stmts, _c, balanced = self.gate.scan(cmd)
+            if not balanced or len(stmts) != 1 or len(self.gate.pipeline_stages(stmts[0])) != 1:
+                return None
+            toks = shlex.split(cmd)
+        except (ValueError, TypeError):
+            return None
+        if not toks or os.path.basename(toks[0]) not in ("keeper-propose", "keeper-status") \
+                or os.path.dirname(toks[0]) not in ("", "/opt/agent-guardrails/bin"):
+            return None
+        opts, i = {}, 1
+        while i < len(toks):
+            if toks[i] in ("--scope", "--text") and i + 1 < len(toks):
+                opts[toks[i][2:]] = toks[i + 1]
+                i += 2
+            else:
+                return None
+        return os.path.basename(toks[0]), opts
 
     def check(self, sid, tool, tool_input):
-        cmd = tool_input.get("command", "") if tool == "Bash" else ""
-        if re.match(r"\s*(/usr/local/bin/)?keeper-propose\b", cmd or ""):
-            self.state["proposer"] = {"session": str(sid), "at": self.now()}   # the CLI cannot see its session id
+        kc = self.keeper_command(tool_input.get("command", "")) if tool == "Bash" else None
+        if kc and kc[0] == "keeper-status":
+            return {"decision": "deny", "reason": "keeper status (nothing was run): " + json.dumps(self.status(sid))}
+        if kc:
+            out = self.propose(sid, kc[1].get("text", ""), kc[1].get("scope", ""))
+            why = (f"keeper: plan sent to the human for approval (fingerprint {out['hash']}). Nothing was run. Wait for "
+                   "their decision, then retry the actions." if out["ok"] else f"keeper: proposal refused: {out['reason']}")
+            res = {"decision": "deny", "reason": why}
+            if out.get("_notify"):
+                res["_notify"] = out["_notify"]
+            return res
         try:
             kind, detail = self.gate.classify(tool, tool_input)
         except Exception as e:                                   # a classifier crash must never let a change through
@@ -149,13 +179,14 @@ class Keeper:
             self.log({"event": "decision-from-stranger-ignored"})
             return "ignored: not the owner"
         parts = data.split(":")
-        if parts[0] == "stop":
-            s = self.session(parts[1] if len(parts) > 1 else None)
-            had = s.pop("active", None)
-            s.pop("pending", None)
+        if parts[0] == "stop":                                  # every plan of every session (council review 08/10)
+            had = False
+            for s in self.state["sessions"].values():
+                had = bool(s.pop("active", None)) or had
+                s.pop("pending", None)
             self.save()
-            self.log({"event": "revoked"})
-            return "stopped" if had else "nothing to stop"
+            self.log({"event": "revoked-all"})
+            return "stopped: no plan is active" if had else "nothing was active; pending plans dropped"
         if len(parts) != 3 or parts[0] not in ("approve", "reject") or not re.fullmatch(r"[0-9a-f]{12}", parts[1]) \
                 or not re.fullmatch(r"[0-9a-f]{16}", parts[2]):
             return "ignored: malformed"
@@ -201,13 +232,20 @@ class TelegramBot:
 
     def send_plan(self, sid, p):
         plan = p["plan"]
-        head = (f"🔐 Approval requested\nPlan: {plan.get('id') or '-'}\nTargets: {', '.join(plan['targets']) or 'any'}\n"
-                f"Actions: {', '.join(plan['actions'])}\nDuration: {plan['ttl']} min\nFingerprint: {p['hash'][:12]}\n"
+        warn = ""
+        if "script" in plan["actions"]:
+            warn += "⚠️ script: the agent may run ANY program during this plan.\n"
+        if "delete" in plan["actions"]:
+            warn += "⚠️ delete: the agent may delete files.\n"
+        if not plan["targets"]:
+            warn += "⚠️ no targets: the actions apply to everything.\n"
+        head = (f"🔐 Approval requested\nPlan: {plan.get('id') or '-'}\nTargets: {', '.join(plan['targets']) or 'ANY'}\n"
+                f"Actions: {', '.join(plan['actions'])}\nDuration: {plan['ttl']} min\nFingerprint: {p['hash'][:12]}\n{warn}"
                 "Stop ends the plan; it does not stop a process already started.\n———\nThe agent's explanation:\n")
         h = p["hash"][:12]
         kb = {"inline_keyboard": [[{"text": "✅ Approve", "callback_data": f"approve:{h}:{p['nonce']}"},
                                    {"text": "❌ Reject", "callback_data": f"reject:{h}:{p['nonce']}"}],
-                                  [{"text": "⏹ Stop everything", "callback_data": f"stop:{sid}"}]]}
+                                  [{"text": "⏹ Stop everything", "callback_data": "stop:all"}]]}
         self.api("sendMessage", {"chat_id": self.cfg["chat_id"], "text": (head + p["text"])[:4000], "reply_markup": kb})
 
     def send(self, text):
@@ -231,7 +269,10 @@ class TelegramBot:
                         try:                                            # one decision per message: drop the buttons
                             self.api("editMessageReplyMarkup", {"chat_id": msg["chat"]["id"],
                                                                  "message_id": msg["message_id"], "reply_markup": {}})
-                            self.send(f"{out}")
+                        except Exception:
+                            pass
+                        try:
+                            self.send(out)
                         except Exception:
                             pass
             except Exception as e:                                  # network hiccup: retry, never crash the daemon
@@ -253,29 +294,32 @@ def peer_uid(conn):
 def serve(keeper, cfg, ready=None):
     class Handler(socketserver.StreamRequestHandler):
         def handle(self):
+            self.connection.settimeout(10)                             # a silent client cannot hold a thread
             try:
                 uid = peer_uid(self.connection)
             except OSError:
                 uid = None
-            line = self.rfile.readline(1_000_000)
             try:
+                line = self.rfile.readline(1_000_000)
                 req = json.loads(line)
-            except ValueError:
+                if not isinstance(req, dict):
+                    raise ValueError
+            except (ValueError, OSError):
                 return self.reply({"error": "bad request"})
             if uid not in cfg["agent_uids"]:                            # empty list = nobody (fail closed)
                 keeper.log({"event": "socket-peer-refused", "uid": uid})
                 return self.reply({"decision": "deny", "reason": "keeper: unknown client"})
+            if req.get("op") != "check" or not isinstance(req.get("input") or {}, dict):
+                return self.reply({"error": "unknown op"})
             with keeper.lock:
-                op = req.get("op")
-                if op == "check":
-                    out = keeper.check(req.get("session"), req.get("tool", ""), req.get("input") or {})
-                elif op == "propose":
-                    out = keeper.propose(req.get("session"), req.get("text", ""), req.get("scope", ""))
-                elif op == "status":
-                    out = keeper.status(req.get("session"))
-                else:
-                    out = {"error": "unknown op"}
+                out = keeper.check(req.get("session"), str(req.get("tool", "")), req.get("input") or {})
+            note = out.pop("_notify", None)
             self.reply(out)
+            if note:
+                try:
+                    keeper.notify.send_plan(*note)
+                except Exception as e:
+                    keeper.log({"event": "telegram-error", "error": type(e).__name__})
 
         def reply(self, obj):
             self.wfile.write((json.dumps(obj) + "\n").encode())

@@ -63,6 +63,12 @@ READ_CMDS = {
     "shift": None, "source": None, ".": None, "umask": None, "firecrawl": None,
     "keeper-propose": None, "keeper-status": None,     # talk to keeperd over its socket; they cannot approve anything
 }
+# Directories whose programs are judged by their name when run by path (root-owned on a normal install).
+TRUSTED_BIN_DIRS = {"/bin", "/usr/bin", "/sbin", "/usr/sbin", "/usr/libexec", "/usr/local/bin", "/opt/homebrew/bin",
+                    "/usr/local/sbin", "/opt/agent-guardrails/bin"}
+# Writing there plants a program that later runs under a familiar name: only a plan with `script` covers it.
+EXEC_DIRS = re.compile(r"(?:^|[\s'\"=:>])(?:~|\$HOME|\$\{HOME\}|/Users/[^/\s]+|/home/[^/\s]+|/root)/(?:\.local/)?bin/"
+                       r"|/usr/local/s?bin/|/opt/homebrew/bin/|/opt/agent-guardrails/")
 # Variables that change which program runs or what it loads: assigning them makes a command opaque.
 EXEC_VARS = re.compile(r"(?:PATH|BASH_ENV|ENV|CDPATH|IFS|PROMPT_COMMAND|PYTHONPATH|PYTHONSTARTUP|PYTHONHOME|NODE_OPTIONS|"
                        r"PERL5LIB|PERL5OPT|RUBYOPT|LD_\w+|DYLD_\w+)(?:\+?=|$)")
@@ -263,9 +269,9 @@ def _classify_stage(stage, depth, bodies=()):
     if not toks:
         return "read", ""
     c, args = os.path.basename(toks[0]), toks[1:]
-    # Keeper review (08/10): a program run by path from a scratch area or a relative path is whatever the agent put
-    # there (scratch writes are not gated), so its name says nothing. `/tmp/x/cat` is not cat.
-    if "/" in toks[0] and (not toks[0].startswith(("/", "~")) or is_scratch(toks[0]) or "/scratchpad/" in toks[0]):
+    # Keeper review (08/10): a program run by path is judged by its name only when it sits in a system directory;
+    # anywhere else (scratch, home, relative) it is whatever was put there. `/tmp/x/cat` and `~/bin/cat` are not cat.
+    if "/" in toks[0] and os.path.dirname(real(toks[0])) not in TRUSTED_BIN_DIRS:
         return "opaque", f"program run by path {toks[0][-30:]}"
     if c in ("export", "declare", "typeset", "readonly", "local") and any(EXEC_VARS.match(a) for a in args):
         return "opaque", f"{c} of a variable that changes what runs"
@@ -837,6 +843,11 @@ def covers(plan, tool, tool_input, cat, text=None):
     """The plan lists this category and, if it names targets, one of them appears in the action's own text."""
     if cat not in plan.get("actions", []):
         return False
+    blob0 = text if text is not None else json.dumps(tool_input, ensure_ascii=False)
+    home_bin = re.escape(os.path.expanduser("~")) + r"/(?:\.local/)?bin/"
+    if cat != "script" and "script" not in plan.get("actions", []) and (EXEC_DIRS.search(blob0 or "")
+                                                                         or re.search(home_bin, blob0 or "")):
+        return False                           # council review 08/10: an edit plan must not plant ~/bin/cat
     targets = plan.get("targets") or []
     if not targets:
         return True

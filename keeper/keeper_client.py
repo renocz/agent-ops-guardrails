@@ -7,13 +7,12 @@ the call, so this file running as the agent's user gains nothing by lying.
 If keeperd cannot be reached, it fails closed: reads still pass (judged by the same classifier, root-owned copy next to
 this file), changes are refused.
 
-Also the CLI the agent uses to propose a plan or see its status:
-  keeper-propose --scope "id=… ; targets=… ; actions=… ; ttl=…" < explanation.txt
-  keeper-status
+The agent proposes a plan with `keeper-propose --scope "id=… ; targets=… ; actions=… ; ttl=…" --text "why"`: keeperd
+answers that command in the check itself (with the session id Claude Code gave this hook), so it never runs.
 """
 import importlib.util, json, os, socket, sys
 
-SOCKETS = ("/usr/local/var/keeper/keeper.sock", "/run/keeper/keeper.sock")       # macOS, Linux (install-keeper.sh)
+SOCKETS = ("/opt/agent-guardrails/run/keeper.sock", "/run/keeper/keeper.sock")       # macOS, Linux (install-keeper.sh)
 SOCKET = os.environ.get("KEEPER_SOCKET_FOR_TESTS") if os.environ.get("KEEPER_TEST_MODE") == "1" else None
 SOCKET = SOCKET or next((p for p in SOCKETS if os.path.exists(p)), SOCKETS[0])
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -79,25 +78,11 @@ def hook():
     deny(out.get("reason") or "keeper: refused")
 
 
-def cli(argv):
-    sid = os.environ.get("CLAUDE_SESSION_ID") or os.environ.get("KEEPER_SESSION")
-    if os.path.basename(argv[0]).startswith("keeper-status") or argv[1:2] == ["status"]:
-        print(json.dumps(ask({"op": "status", "session": sid}), indent=1))
-        return 0
-    scope = None
-    if "--scope" in argv and argv.index("--scope") + 1 < len(argv):
-        scope = argv[argv.index("--scope") + 1]
-    if not scope:
-        print('usage: keeper-propose --scope "id=… ; targets=… ; actions=edit,git,… ; ttl=60" < explanation', file=sys.stderr)
-        return 2
-    text = sys.stdin.read() if not sys.stdin.isatty() else ""
-    out = ask({"op": "propose", "session": sid, "text": text, "scope": scope}, timeout=30)
-    print(json.dumps(out))
-    return 0 if out.get("ok") else 1
-
+NOT_INSTALLED = ("keeper-propose / keeper-status are handled by the keeper hook, which answers them before they run. "
+                 "If you see this, the keeper hook is not active.")
 
 if __name__ == "__main__":
-    if os.path.basename(sys.argv[0]).startswith("keeper-") and not sys.argv[0].endswith("keeper_client.py") \
-            or sys.argv[1:2] in (["propose"], ["status"]):
-        sys.exit(cli([a for a in sys.argv if a != "propose"]))
+    if sys.argv[1:2] in (["propose"], ["status"]):
+        print(NOT_INSTALLED, file=sys.stderr)
+        sys.exit(1)
     hook()

@@ -3,7 +3,7 @@
 
 Run: python3 keeper/test_keeper.py   (no network, no install: a fake Telegram and a socket in a temp dir)
 """
-import json, os, shutil, socket, stat, subprocess, sys, tempfile, threading, time, unittest
+import json, os, shlex, shutil, socket, stat, subprocess, sys, tempfile, threading, time, unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -53,9 +53,15 @@ class Base(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.dir, ignore_errors=True)
 
+    def propose_cmd(self, scope, text="why"):
+        return f"keeper-propose --scope {shlex.quote(scope)} --text {shlex.quote(text)}"
+
     def plan(self, scope, sid="s1", text="why"):
-        r = self.k.propose(sid, text, scope)
-        self.assertTrue(r["ok"], r)
+        """As the agent does it: a keeper-propose command, seen by keeperd in the hook's check."""
+        r = self.k.check(sid, *bash(self.propose_cmd(scope, text)))
+        self.assertEqual(r["decision"], "deny")                     # nothing to run
+        self.assertIn("sent to the human", r["reason"])
+        self.bot.send_plan(*r.pop("_notify"))
         return self.bot.buttons()
 
     def approve(self, scope, sid="s1"):
@@ -104,8 +110,10 @@ class StateMachine(Base):
 
     def test_stop_revokes(self):
         self.approve("id=p1 ; targets=web ; actions=deploy")
-        self.assertEqual(self.k.decide(OWNER, CHAT, "stop:s1"), "stopped")
+        self.approve("id=p2 ; targets=web ; actions=deploy", sid="other")
+        self.assertTrue(self.k.decide(OWNER, CHAT, "stop:all").startswith("stopped"))
         self.assertFalse(self.allowed(*bash("docker restart web")))
+        self.assertFalse(self.allowed(*bash("docker restart web"), sid="other"))     # Stop ends every session's plan
 
     def test_sessions_are_separate(self):
         self.approve("id=p1 ; targets=web ; actions=deploy", sid="A")
@@ -127,10 +135,32 @@ class StateMachine(Base):
         self.assertEqual(p["plan"]["targets"], ["web"])
         self.assertEqual(p["plan"]["actions"], ["deploy"])
 
-    def test_proposal_without_session_goes_to_the_proposing_session(self):
-        self.k.check("S9", *bash('keeper-propose --scope "id=x ; actions=edit"'))
-        self.assertTrue(self.k.propose(None, "why", "id=x ; actions=edit")["ok"])
+    def test_proposal_belongs_to_the_session_that_ran_it(self):
+        self.plan("id=x ; targets=web ; actions=deploy", sid="S9")
         self.assertEqual(self.bot.plans[-1][0], "S9")
+        self.assertTrue(self.k.decide(OWNER, CHAT, self.bot.buttons()[0]).startswith("approved"))
+        self.assertTrue(self.allowed(*bash("docker restart web"), sid="S9"))
+        self.assertFalse(self.allowed(*bash("docker restart web"), sid="s1"))
+
+    def test_only_a_lone_keeper_propose_is_a_proposal(self):
+        scope = "id=x ; actions=delete"
+        for cmd in (f"x=1; {self.propose_cmd(scope)}", f"{self.propose_cmd(scope)} && rm -rf /srv",
+                    f"{self.propose_cmd(scope)} | sh", f"echo {self.propose_cmd(scope)}",
+                    f"{self.propose_cmd(scope)} --other y", f"/tmp/x/{self.propose_cmd(scope)}"):
+            r = self.k.check("s1", *bash(cmd))
+            self.assertNotIn("_notify", r, cmd)
+        self.assertEqual(self.bot.plans, [])
+
+    def test_status_command(self):
+        self.approve("id=p1 ; targets=web ; actions=deploy")
+        r = self.k.check("s1", *bash("keeper-status"))
+        self.assertEqual(r["decision"], "deny")
+        self.assertIn('"id": "p1"', r["reason"])
+
+    def test_telegram_header_warns_on_wide_plans(self):
+        self.plan("id=w ; actions=script,delete")
+        _sid, p = self.bot.plans[-1]
+        self.assertEqual(p["plan"]["targets"], [])                   # the real bot adds ⚠️ lines for these
 
     def test_state_is_private(self):
         self.approve("id=p1 ; actions=deploy")
@@ -202,6 +232,17 @@ class ClassifierTricks(Base):
                     "alias ls='rm -rf ~'; ls", "LD_PRELOAD=/tmp/x.so ls", "f() { rm -rf /; }; f"):
             self.assertFalse(self.allowed(*bash(cmd)), cmd)
 
+    def test_program_in_home_bin_is_not_a_read(self):
+        for cmd in (f"{self.home}/bin/cat /etc/hosts", "~/.local/bin/ls", "/opt/homebrew/../../tmp/cat x"):
+            self.assertFalse(self.allowed(*bash(cmd)), cmd)
+
+    def test_edit_plan_cannot_plant_programs(self):
+        """An approved edit plan must not let the agent put a program on PATH (it would later pass as a read)."""
+        for path in ("/home/agent/bin/web-cat", "/Users/agent/.local/bin/web-ls", "/usr/local/bin/web-x"):  # not scratch
+            self.assertFalse(self.allowed("Write", {"file_path": path, "content": "#!/bin/sh\nrm -rf ~"}), path)
+        self.assertFalse(self.allowed(*bash("cp /tmp/web-x /Users/agent/.local/bin/cat")))
+        self.assertTrue(self.allowed("Write", {"file_path": "/srv/web/app.conf", "content": "x"}))
+
     def test_classifier_crash_denies(self):
         orig = self.k.gate.classify
         self.k.gate.classify = lambda *a: 1 / 0
@@ -257,12 +298,12 @@ class Socket(Base):
 
     def test_empty_uid_list_refuses_everyone(self):
         self.cfg["agent_uids"] = []
-        self.assertEqual(self.raw({"op": "status", "session": "s1"}).get("decision"), "deny")
+        self.assertEqual(self.raw({"op": "check", "session": "s1", "tool": "Bash", "input": {"command": "ls"}}).get("decision"), "deny")
 
     def test_no_approve_op_on_the_socket(self):
         self.plan("id=p1 ; actions=deploy")
         ok = self.bot.buttons()[0]
-        for op in ("approve", "decide", "activate"):
+        for op in ("approve", "decide", "activate", "propose", "status"):
             self.assertIn("error", self.raw({"op": op, "session": "s1", "data": ok, "from_id": OWNER}))
         self.assertFalse(self.allowed(*bash("docker restart web")))
 
@@ -272,7 +313,7 @@ class Socket(Base):
         s.sendall(b"\x00\xff not json\n")
         self.assertIn(b"bad request", s.recv(1000))
         s.close()
-        self.assertEqual(self.raw({"op": "status", "session": "s1"})["active"], None)     # still alive
+        self.assertEqual(self.raw({"op": "check", "session": "s1", "tool": "Bash", "input": {"command": "ls"}})["decision"], "allow")
 
     def test_daemon_down_fails_closed(self):
         env = dict(self.env, KEEPER_SOCKET_FOR_TESTS=os.path.join(self.dir, "missing.sock"))
@@ -285,12 +326,24 @@ class Socket(Base):
                            capture_output=True, text=True, env=self.env, timeout=30)
         self.assertEqual(r.returncode, 2)
 
-    def test_cli_propose(self):
-        r = subprocess.run([sys.executable, os.path.join(HERE, "keeper_client.py"), "propose", "--scope",
-                            "id=c1 ; targets=web ; actions=deploy ; ttl=20"], input="restart web after the update",
-                           capture_output=True, text=True, env=dict(self.env, KEEPER_SESSION="s1"), timeout=30)
-        self.assertEqual(r.returncode, 0, r.stderr)
+    def test_propose_through_the_hook(self):
+        """The hook passes Claude Code's session id; keeperd sends the plan after answering, outside its lock."""
+        cmd = self.propose_cmd("id=c1 ; targets=web ; actions=deploy ; ttl=20", "restart web after the update")
+        self.assertEqual(self.hook(*bash(cmd)), "deny")
+        for _ in range(50):
+            if self.bot.plans:
+                break
+            time.sleep(0.05)
+        self.assertEqual(self.bot.plans[-1][0], "s1")
         self.assertEqual(self.bot.plans[-1][1]["plan"]["id"], "c1")
+
+    def test_silent_client_does_not_block_others(self):
+        idle = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        idle.connect(self.cfg["socket"])                             # connects, sends nothing
+        try:
+            self.assertEqual(self.hook(*bash("ls")), "allow")
+        finally:
+            idle.close()
 
 
 if __name__ == "__main__":
