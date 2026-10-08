@@ -146,7 +146,14 @@ It will at first, which is why it starts in observe mode. On my history, about h
 Because an approval with a reservation is not an approval of the plan as written. "GO but only prepare" would otherwise unlock the deployment too. The gate ignores it and logs it, and the agent asks again.
 
 ### Can the agent switch it off?
-If it runs as your user, yes: it can edit its own settings. go-gate guards against mistakes, not against an agent trying to get around it. For integrity, install the hooks through Claude Code managed settings (root-owned files). Where the agent is root, rely on least privilege instead.
+With go-gate alone, yes: the hook runs as your user, and the agent can edit its own settings. go-gate guards against mistakes, not against an agent trying to get around it.
+
+The [keeper](../keeper/) closes that gap:
+- the approval state belongs to a separate user;
+- approvals are button presses on a second bot;
+- the hook is root-owned and registered in managed settings.
+
+Its precondition is that the agent is not root. Where the agent is root, rely on least privilege instead.
 
 ### Does a pasted alert count as a GO?
 Not any more. It used to on my setup, and the council objected: the alert is external text, and with that rule it triggered a change whose plan I hadn't read. Now an alert makes the agent propose a plan, and I answer GO.
