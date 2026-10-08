@@ -22,7 +22,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 DEFAULTS = {"socket": "/var/run/keeper/keeper.sock", "state_dir": "/var/lib/keeper", "agent_uids": [],
             "owner_id": None, "chat_id": None, "bot_token_file": "/etc/keeper/bot.token",
             "ttl_default_min": 60, "ttl_max_min": 240, "pending_max_age_min": 120, "max_proposals_per_hour": 3,
-            "mode": "block", "agent_home": None, "client_group": None}
+            "mode": "block", "agent_home": None, "client_group": None, "safe_git_repos": []}
 
 
 def load_gate(agent_home=None):
@@ -49,6 +49,7 @@ class Keeper:
     def __init__(self, cfg, notifier, clock=time.time):
         self.cfg, self.notify, self.now = cfg, notifier, clock
         self.gate = load_gate(cfg.get("agent_home"))
+        self.gate.SAFE_GIT_REPOS[:] = cfg.get("safe_git_repos") or []      # K6: trusted repos for git read verbs
         self.lock = threading.Lock()
         os.makedirs(cfg["state_dir"], mode=0o700, exist_ok=True)
         self.state_path = os.path.join(cfg["state_dir"], "state.json")
@@ -124,7 +125,8 @@ class Keeper:
                 return None
         return os.path.basename(toks[0]), opts
 
-    def check(self, sid, tool, tool_input):
+    def check(self, sid, tool, tool_input, cwd=None):
+        self.gate.CWD = cwd                                            # the dir the agent ran the tool in (K6)
         kc = self.keeper_command(tool_input.get("command", "")) if tool == "Bash" else None
         if kc and kc[0] == "keeper-status":
             return {"decision": "deny", "reason": "keeper status (nothing was run): " + json.dumps(self.status(sid))}
@@ -312,7 +314,8 @@ def serve(keeper, cfg, ready=None):
             if req.get("op") != "check" or not isinstance(req.get("input") or {}, dict):
                 return self.reply({"error": "unknown op"})
             with keeper.lock:
-                out = keeper.check(req.get("session"), str(req.get("tool", "")), req.get("input") or {})
+                out = keeper.check(req.get("session"), str(req.get("tool", "")), req.get("input") or {},
+                                   req.get("cwd"))
             note = out.pop("_notify", None)
             self.reply(out)
             if note:

@@ -35,8 +35,9 @@ def ask(req, timeout=10):
         s.close()
 
 
-def local_kind(tool, tool_input):
-    """Only used when keeperd is down: is this call a read? Anything unsure is a change."""
+def local_kind(tool, tool_input, cwd=None):
+    """Only used when keeperd is down: is this call a read? Anything unsure is a change. SAFE_GIT_REPOS stays empty
+    here (no daemon config to read), so git read verbs are opaque -> refused, which is the fail-closed behaviour."""
     try:
         path = os.path.join(HERE, "go_gate.py")
         if not os.path.exists(path):
@@ -46,6 +47,7 @@ def local_kind(tool, tool_input):
         spec.loader.exec_module(gate)
         if gate.pipeline_stages is None:
             gate.scan, gate.pipeline_stages = gate._load_splitter()
+        gate.CWD = cwd
         return gate.classify(tool, tool_input)[0]
     except Exception:
         return "change"
@@ -77,10 +79,11 @@ def hook():
     if data.get("hook_event_name") != "PreToolUse":
         sys.exit(0)
     tool, ti = data.get("tool_name", ""), data.get("tool_input") or {}
+    cwd = data.get("cwd")
     try:
-        out = ask({"op": "check", "session": data.get("session_id"), "tool": tool, "input": ti})
+        out = ask({"op": "check", "session": data.get("session_id"), "tool": tool, "input": ti, "cwd": cwd})
     except (OSError, ValueError) as e:
-        if local_kind(tool, ti) in ("read", "talk") or observe_mode():
+        if local_kind(tool, ti, cwd) in ("read", "talk") or observe_mode():
             sys.exit(0)
         deny(f"keeper: the keeper daemon is not reachable ({type(e).__name__}), so changes are refused. "
              "Tell the user; reads still work.")

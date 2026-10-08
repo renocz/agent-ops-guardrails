@@ -216,10 +216,31 @@ def telegram(text, uid="42", mid=None, ts=None):
 
 
 class Classifier(unittest.TestCase):
+    def setUp(self):
+        # Most BASH cases assume an ordinary working repo; declare it safe so git READ verbs stay reads (K6 policy
+        # itself is exercised in test_git_safe_repos). Restored in tearDown.
+        self._safe, self._cwd = list(g.SAFE_GIT_REPOS), g.CWD
+        g.SAFE_GIT_REPOS[:] = ["/"]
+        g.CWD = "/"
+
+    def tearDown(self):
+        g.SAFE_GIT_REPOS[:] = self._safe
+        g.CWD = self._cwd
+
     def test_bash(self):
         for cmd, kind in BASH:
             with self.subTest(cmd=cmd):
                 self.assertEqual(g.classify("Bash", {"command": cmd})[0], kind)
+
+    def test_git_safe_repos(self):                                   # K6
+        g.SAFE_GIT_REPOS[:] = ["/opt/stacks/web"]
+        g.CWD = "/tmp/elsewhere"
+        self.assertEqual(g.classify("Bash", {"command": "git status"})[0], "opaque")        # cwd not declared safe
+        self.assertEqual(g.classify("Bash", {"command": "git -C /tmp/evil log"})[0], "opaque")
+        self.assertEqual(g.classify("Bash", {"command": "git -C /opt/stacks/web status"})[0], "read")
+        g.CWD = "/opt/stacks/web/sub"
+        self.assertEqual(g.classify("Bash", {"command": "git log --oneline"})[0], "read")    # under a safe repo
+        self.assertEqual(g.classify("Bash", {"command": "git push"})[0], "change")           # a change stays a change
 
     def test_every_change_is_recorded(self):
         g.classify("Bash", {"command": "git add web; docker compose down"})
