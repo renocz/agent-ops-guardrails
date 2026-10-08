@@ -2,6 +2,24 @@
 
 One version scheme: **a repository tag per release**. Components have no version of their own. Commit messages from 06/10/2026 that say "secret-guard v0.3/v0.4/v0.5" refer to the intermediate revisions listed under v0.6.
 
+## Unreleased (towards v1.0)
+
+- **keeper (go-gate step 2):** `keeper/` adds:
+  - `keeperd`, which holds approvals under a dedicated user;
+  - a second Telegram bot with Approve, Reject and Stop buttons, where approvals are bound to the plan's fingerprint and work once;
+  - a thin hook client that fails closed;
+  - `keeper-propose`;
+  - an installer that only does a dry run unless `--apply`;
+  - 32 tests, including forged, replayed, stale and stranger approvals.
+
+  Design: `docs/design-keeper.md`. Not installed anywhere yet.
+- **go-gate classifier:** these are now opaque, because a name or `PATH` says nothing when the agent controls the file:
+  - a program run from a scratch or relative path (`/tmp/x/cat`, `./cat`);
+  - commands that set `PATH`, `LD_*`, `DYLD_*`, `PYTHONPATH` or `BASH_ENV`;
+  - aliases and function definitions.
+
+  On 5,283 real commands, this changed one classification.
+
 ## v0.9.1 (07/10/2026)
 
 **After a targeted audit of the v0.9 changes** (gemini, 07/10). Its cases were re-run before any fix: 6 confirmed, 4 refuted (`cat <(echo .env)` and `exec 0< .env` were already refused, `docker start -a web` was covered, a replayed GO fails the 15-minute freshness check anyway), 1 already documented (an agent that deletes its own transcripts before the daily copy).

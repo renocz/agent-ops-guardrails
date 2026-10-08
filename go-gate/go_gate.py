@@ -61,7 +61,11 @@ READ_CMDS = {
     "find": None, "tee": None, "xargs": None, "cd": None, "export": None, "set": None, "unset": None,
     "local": None, "read": None, "wait": None, "exit": None, "return": None, "break": None, "continue": None,
     "shift": None, "source": None, ".": None, "umask": None, "firecrawl": None,
+    "keeper-propose": None, "keeper-status": None,     # talk to keeperd over its socket; they cannot approve anything
 }
+# Variables that change which program runs or what it loads: assigning them makes a command opaque.
+EXEC_VARS = re.compile(r"(?:PATH|BASH_ENV|ENV|CDPATH|IFS|PROMPT_COMMAND|PYTHONPATH|PYTHONSTARTUP|PYTHONHOME|NODE_OPTIONS|"
+                       r"PERL5LIB|PERL5OPT|RUBYOPT|LD_\w+|DYLD_\w+)(?:\+?=|$)")
 # Shell keywords that only frame other statements.
 KEYWORDS = {"do", "done", "then", "else", "elif", "fi", "if", "while", "until", "for", "in", "case", "esac",
             "function", "!", "{", "}", "(", ")", "select", ";;"}
@@ -249,6 +253,8 @@ def _classify_stage(stage, depth, bodies=()):
     if toks and toks[0] in ("for", "select", "case"):
         return "read", ""
     while toks and (toks[0] in KEYWORDS or re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", toks[0])):
+        if EXEC_VARS.match(toks[0]):
+            return "opaque", "sets " + toks[0].split("=")[0]
         toks = toks[1:]
     while toks and toks[0] in PREFIXES:
         toks = toks[1:]
@@ -257,6 +263,14 @@ def _classify_stage(stage, depth, bodies=()):
     if not toks:
         return "read", ""
     c, args = os.path.basename(toks[0]), toks[1:]
+    # Keeper review (08/10): a program run by path from a scratch area or a relative path is whatever the agent put
+    # there (scratch writes are not gated), so its name says nothing. `/tmp/x/cat` is not cat.
+    if "/" in toks[0] and (not toks[0].startswith(("/", "~")) or is_scratch(toks[0]) or "/scratchpad/" in toks[0]):
+        return "opaque", f"program run by path {toks[0][-30:]}"
+    if c in ("export", "declare", "typeset", "readonly", "local") and any(EXEC_VARS.match(a) for a in args):
+        return "opaque", f"{c} of a variable that changes what runs"
+    if c in ("alias", "hash", "enable") or re.fullmatch(r"[\w.-]+\s*\(\)", stage.split("{")[0].strip() or "-"):
+        return "opaque", f"{c} redefines a command"
     if c.startswith("$") or c == "eval" or c == "exec":
         return "opaque", c
     if c == "command" or c == "builtin":

@@ -24,6 +24,14 @@ jobs:
         run: cd secret-guard && python -m unittest -v test_secret_guard.py
       - name: go-gate tests (classifier + hook flow)
         run: cd go-gate && python -m unittest -v test_go_gate.py
+      - name: keeper tests (approvals, forged approvals, socket, daemon down)
+        run: cd keeper && python -m unittest -v test_keeper.py
+      - name: keeper installer (syntax, dry run, install into a temp prefix)
+        run: |
+          bash -n keeper/install-keeper.sh
+          keeper/install-keeper.sh --agent-user "$(id -un)" --owner-id 1
+          keeper/install-keeper.sh --agent-user "$(id -un)" --owner-id 1 --prefix /tmp/kp
+          python -m json.tool /tmp/kp/etc/claude-code/managed-settings.json >/dev/null
       - name: leak-check tests (fake secrets only)
         run: cd leak-check && python -m unittest -v test_leak_check.py
       - name: leak-check orchestration scripts (syntax + offline run)
