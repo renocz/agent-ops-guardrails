@@ -1,11 +1,13 @@
 #!/bin/bash
 # install-keeper.sh: install keeperd, its hook and the managed settings (design: docs/design-keeper.md).
 #
-#   ./install-keeper.sh --agent-user renocz --owner-id 12345            dry run: prints what it would do (default)
-#   ./install-keeper.sh --agent-user renocz --owner-id 12345 --prefix /tmp/k   writes the files under /tmp/k, no users,
+#   ./install-keeper.sh --agent-user you --owner-id 12345               dry run: prints what it would do (default)
+#   ./install-keeper.sh --agent-user you --owner-id 12345 --prefix /tmp/k   writes the files under /tmp/k, no users,
 #                                                                       no service, no chown (to inspect the result)
-#   sudo ./install-keeper.sh --agent-user renocz --owner-id 12345 --apply      really installs (needs root)
+#   sudo ./install-keeper.sh --agent-user you --owner-id 12345 --apply      really installs (needs root)
 #
+# Options: --chat-id N (default: the owner id); --observe (log only, do not block); --safe-git-repo DIR (repeatable:
+# a repo where a git read verb is trusted; without any, every git read needs a plan — see K6 in docs/design-keeper.md).
 # The keeper bot's token is never passed on the command line: with --apply, the script asks for it on the terminal
 # (hidden input) if /etc/keeper/bot.token does not exist yet.
 # Precondition: the agent user is not root and cannot sudo without a password it does not have.
@@ -14,6 +16,7 @@ set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 REPO="$(cd "$HERE/.." && pwd)"
 MODE=dry PREFIX="" AGENT="" OWNER="" CHAT="" GATE_MODE=block
+SAFE_REPOS=()                 # K6: repos where a git read verb is trusted (empty = every git read needs a plan)
 while [ $# -gt 0 ]; do
   case "$1" in
     --apply) MODE=apply ;;
@@ -21,8 +24,9 @@ while [ $# -gt 0 ]; do
     --agent-user) AGENT="$2"; shift ;;
     --owner-id) OWNER="$2"; shift ;;
     --chat-id) CHAT="$2"; shift ;;
+    --safe-git-repo) SAFE_REPOS+=("$2"); shift ;;       # repeatable; absolute path to a repo the agent cannot tamper with
     --observe) GATE_MODE=observe ;;
-    -h|--help) sed -n '2,12p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,13p' "$0"; exit 0 ;;
     *) echo "unknown option: $1" >&2; exit 2 ;;
   esac
   shift
@@ -146,12 +150,13 @@ put "$BIN/keeper-propose" 755 "root:$ROOTGRP" "$TMP/keeper-propose"
 put "$BIN/keeper-status" 755 "root:$ROOTGRP" "$TMP/keeper-status"
 
 echo "-- 3. config, state and socket directory"
-"$PY" - "$OWNER" "$CHAT" "$AGENT_UID" "$AGENT_HOME" "$GROUP" "$RUN_DIR" "$GATE_MODE" > "$TMP/config.json" <<'PYEOF'
+"$PY" - "$OWNER" "$CHAT" "$AGENT_UID" "$AGENT_HOME" "$GROUP" "$RUN_DIR" "$GATE_MODE" \
+  ${SAFE_REPOS[@]+"${SAFE_REPOS[@]}"} > "$TMP/config.json" <<'PYEOF'
 import json, sys
-o, c, uid, home, grp, run, mode = sys.argv[1:]
+o, c, uid, home, grp, run, mode, *safe_repos = sys.argv[1:]
 print(json.dumps({"owner_id": int(o), "chat_id": int(c), "agent_uids": [int(uid)], "agent_home": home,
                   "client_group": grp, "socket": run + "/keeper.sock", "state_dir": "/var/lib/keeper",
-                  "bot_token_file": "/etc/keeper/bot.token", "mode": mode}, indent=1))
+                  "bot_token_file": "/etc/keeper/bot.token", "mode": mode, "safe_git_repos": safe_repos}, indent=1))
 PYEOF
 mkd /etc/keeper 750 "root:$KUSER"
 put /etc/keeper/config.json 640 "root:$KUSER" "$TMP/config.json"
