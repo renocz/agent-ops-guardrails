@@ -4,6 +4,19 @@ One version scheme: **a repository tag per release**. Components have no version
 
 ## Unreleased (towards v1.0)
 
+- **classifier: follow-ups from the PR review (09/10, R1-R4).** A second pass on the same PR found more "read" commands
+  that execute or write; each has a test that fails before the fix.
+  - **R1 (cd):** a `cd`/`pushd`/`popd` before a git command is followed, so `cd /tmp/x && git status` is judged against
+    `/tmp/x`, not the session cwd. A non-literal target (`cd "$v"`, `cd $(...)`, `cd -`, `cd ~`, `popd`), a subshell or
+    a group all make a following git read opaque.
+  - **R2 (launchers):** `xargs`/`parallel` are classified by the command they launch; a shell/interpreter/by-path/
+    unknown target is opaque, whatever the input mode (pipe, `<`, `-a`, `--arg-file`). An input redirection no longer
+    leaks its file as an argument. `timeout`/`watch`/`setsid` are treated as prefixes (classified by the inner command).
+  - **R3:** `env VAR=val cmd` (and `env -S`, `-i`, `-u`) applies the dangerous-variable rule like a bare prefix;
+    `sort --compress-program` and `openssl -config`/`-provider` are opaque.
+  - **R4:** writing a safe repo's git-exec surface (`.git/config`, a hook, `.gitattributes`/`.gitmodules`, or
+    `git config` of an exec key) needs `actions=script`, not `edit`; a nested repo does not inherit the parent's trust.
+  - Friction on the 138-command admin set: 0 new reclassifications versus the previous PR state.
 - **classifier: a read command can no longer execute or write (08/10, review FIX FIRST).** A second review found a
   class the classifier mislabelled as reads, so they passed with no plan, in block mode too. Each is reproduced by a
   test that fails before the fix and passes after.

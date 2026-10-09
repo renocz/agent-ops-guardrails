@@ -87,7 +87,14 @@ Still open, and stated so a reader does not over-trust the gate:
   can. The real limit there is what the human approves, and least privilege underneath.
 - **git in an agent-writable repo.** A git read verb is a read only in a repo listed in `safe_git_repos` (empty by
   default; set with `install-keeper.sh --safe-git-repo`). Elsewhere it is opaque, because a repo-local config can run a
-  program. If a declared safe repo is itself writable by the agent, that protection is void.
+  program. Two refinements (R4, 09/10): a `cd`/`pushd` into another directory before the git command is followed, so
+  `cd /tmp/x && git status` is judged against `/tmp/x`, not the session cwd; and a nested repo (`<safe>/sub/.git`) does
+  not inherit the parent's trust. Still void if a declared safe repo is itself writable by the agent: then the agent can
+  arm `core.fsmonitor` in its `.git/config`. To reduce that, writing a repo's git-exec surface (`.git/config`, a hook,
+  `.gitattributes`, `.gitmodules`, or `git config` of an exec key such as `core.fsmonitor`/`core.pager`/`alias.*`) now
+  needs `actions=script`, not `edit`. The nested-repo check reads the filesystem, which keeperd (running as `_keeper`)
+  may not be able to traverse in the agent's tree; there it is best-effort and falls back to the prefix rule. The strong
+  parade, for later: the installer makes each safe repo's `.git/config` root-owned.
 - **TOCTOU on files.** `python3 script.py` is judged on the file keeperd reads; the file can change before it runs.
 - **A process started under an approved plan keeps running after the plan ends.** The keeper gates tool calls, not
   the processes they spawn.
@@ -95,6 +102,38 @@ Still open, and stated so a reader does not over-trust the gate:
 
 The design that would actually bound the `script` class is an isolated executor under another user; it is the v2
 direction, not done here.
+
+## Future option: neutralise git config by rewriting the command (studied, not implemented)
+
+Claude Code's PreToolUse hook can rewrite a tool call before it runs, via `updatedInput` under `hookSpecificOutput`
+(https://code.claude.com/docs/en/hooks, *PreToolUse decision control*). Instead of refusing a git read outside a safe
+repo, keeperd could prepend hardening so a repo-local config cannot run a program, and then allow it. This was studied
+and deliberately left out of this PR.
+
+**The config keys git executes** (current git; corroborated across the git docs and several hardening projects):
+`alias.*` when the value starts with `!`; `core.pager`, `pager.<cmd>`, `core.editor`, `sequence.editor`,
+`core.askPass`, `core.fsmonitor`, `core.sshCommand`, `core.gitProxy`, `core.hooksPath`; `credential.helper` and other
+`credential.*` helpers; `diff.external`, `diff.<driver>.command`, `diff.<driver>.textconv`, `difftool.<t>.cmd`;
+`filter.<driver>.clean` / `smudge` / `process`; `merge.<driver>.driver`; `gpg.program`, `gpg.<fmt>.program`;
+`init.templateDir` (installs hooks); `uploadpack.*` / `receive.*` (server side). `include.path` / `includeIf.*` pull in
+another config file that can set any of the above. The same values also arrive through `-c key=val`, `--config-env`,
+and the `GIT_CONFIG_COUNT`/`GIT_CONFIG_KEY_*`/`GIT_CONFIG_VALUE_*` and `GIT_*` environment variables.
+
+**Why `-c key=` is not enough.** `git -c core.fsmonitor= …` clears one fixed key. But `alias.*`, `filter.*`,
+`diff.*.command` and `credential.*` are *pattern* namespaces: you cannot enumerate every `alias.<name>` the repo config
+defines, and `-c` cannot wildcard. A repo could define `alias.st = !evil` and the agent run `git st`. So a complete
+rewrite would need to clear every known key *and* forbid any alias/unknown subcommand, which is brittle.
+
+**The environment alternative.** `GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1` drops the user's and system config,
+and `GIT_CONFIG_SYSTEM=/dev/null` likewise, but none of these drop the *repo-local* `.git/config`, which is exactly the
+file the agent controls. `safe.directory` only governs whether git trusts the directory's ownership; it does not stop a
+trusted repo's local config from running a program. So the environment route does not close the hole either.
+
+**Recommendation.** Do not rely on rewriting for v1: the key set is open-ended and a miss silently re-opens code
+execution. Keep the current rule (a git read is a read only in a declared safe repo, no nested repo, config surface
+needs `script`), and make the real fix ownership: the installer chowns each safe repo's `.git/config` (and
+`.git/hooks`) to root, so the agent cannot arm an exec key in the one place the environment and `-c` cannot cover.
+Revisit rewriting only as defence in depth once that is in place.
 
 ## Failure modes
 
