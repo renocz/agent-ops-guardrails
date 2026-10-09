@@ -58,7 +58,7 @@ READ_CMDS = {
     "sw_vers": None, "system_profiler": None, "sysctl": None, "vm_stat": None, "diskutil": None,
     "pmset": None, "defaults": None, "plutil": None, "mdfind": None, "openssl": None, "unzip": None,
     "tar": None, "zcat": None, "gzip": None, "awk": None, "sed": None, "sort": None, "uniq": None,
-    "find": None, "tee": None, "xargs": None, "cd": None, "export": None, "set": None, "unset": None,
+    "find": None, "tee": None, "xargs": None, "parallel": None, "cd": None, "export": None, "set": None, "unset": None,
     "local": None, "read": None, "wait": None, "exit": None, "return": None, "break": None, "continue": None,
     "shift": None, "source": None, ".": None, "umask": None, "firecrawl": None,
     "keeper-propose": None, "keeper-status": None,     # talk to keeperd over its socket; they cannot approve anything
@@ -72,13 +72,21 @@ EXEC_DIRS = re.compile(r"(?:^|[\s'\"=:>])(?:~|\$HOME|\$\{HOME\}|/Users/[^/\s]+|/
 # Variables that change which program runs or what it loads: assigning them makes a command opaque.
 # Pagers and hook-style vars (PAGER, LESSOPEN, GIT_PAGER, GIT_EXTERNAL_DIFF, GIT_SSH_COMMAND…) run a program the agent
 # chose, so a "read" verb prefixed with one of them is not a read (same class as K1-K6).
+# GIT_DIR / GIT_WORK_TREE only locate the repo (no exec), so they are NOT here: they route through the safe-repo check
+# like -C/--git-dir, so `GIT_DIR=/safe/.git git status` stays a read. Every other GIT_* (GIT_PAGER, GIT_SSH_COMMAND,
+# GIT_EXTERNAL_DIFF, GIT_CONFIG_*, …) runs a program or injects config, so it is opaque.
 EXEC_VARS = re.compile(r"(?:PATH|BASH_ENV|ENV|CDPATH|IFS|PROMPT_COMMAND|PYTHONPATH|PYTHONSTARTUP|PYTHONHOME|NODE_OPTIONS|"
-                       r"PERL5LIB|PERL5OPT|RUBYOPT|PAGER|MANPAGER|LESSOPEN|LESSCLOSE|GIT_\w+|"
+                       r"PERL5LIB|PERL5OPT|RUBYOPT|PAGER|MANPAGER|LESSOPEN|LESSCLOSE|GIT_(?!DIR\b|WORK_TREE\b)\w+|"
                        r"LD_\w+|DYLD_\w+)(?:\+?=|$)")
 # Shell keywords that only frame other statements.
 KEYWORDS = {"do", "done", "then", "else", "elif", "fi", "if", "while", "until", "for", "in", "case", "esac",
             "function", "!", "{", "}", "(", ")", "select", ";;"}
-PREFIXES = {"sudo", "time", "nohup", "nice", "ionice", "stdbuf", "caffeinate", "env"}
+PREFIXES = {"sudo", "time", "nohup", "nice", "ionice", "stdbuf", "caffeinate", "timeout", "watch", "setsid"}
+# Shells and interpreters. When a launcher (xargs, parallel) feeds its input to one of these, or to a program by path,
+# or to an unknown command, the launched command line is not visible, so the call is opaque (R2).
+SHELL_INTERP = {"sh", "bash", "zsh", "dash", "ksh", "fish", "ash", "busybox",
+                "python", "python2", "python3", "perl", "ruby", "node", "nodejs", "php", "osascript", "lua", "tclsh",
+                "awk", "gawk", "mawk", "sed", "env", "eval", "exec", "xargs", "parallel", "sudo", "ssh", "find"}
 
 GIT_READ = {"status", "log", "diff", "show", "rev-parse", "ls-files", "ls-remote", "ls-tree", "blame", "grep",
             "describe", "shortlog", "reflog", "cat-file", "for-each-ref", "fetch", "check-ignore", "count-objects",
@@ -137,18 +145,21 @@ def strip_heredocs(cmd):
 
 
 def subst_bodies(s):
-    """Inner commands of $( … ) and backticks, so they are judged too."""
-    res, i = [], 0
-    while True:
-        j = s.find("$(", i)
-        if j < 0:
-            break
-        depth, k = 1, j + 2
-        while k < len(s) and depth:
-            depth += {"(": 1, ")": -1}.get(s[k], 0)
-            k += 1
-        res.append(s[j + 2:k - 1])
-        i = k
+    """Inner commands of $( … ), <( … ), >( … ) and backticks, so they are judged too. Process substitutions
+    `<(cmd)` / `>(cmd)` run their command just like `$(cmd)`, so an adversarial review (09/10) added them here."""
+    res = []
+    for opener in ("$(", "<(", ">("):
+        i = 0
+        while True:
+            j = s.find(opener, i)
+            if j < 0:
+                break
+            depth, k = 1, j + 2
+            while k < len(s) and depth:
+                depth += {"(": 1, ")": -1}.get(s[k], 0)
+                k += 1
+            res.append(s[j + 2:k - 1])
+            i = k
     res += re.findall(r"`([^`]*)`", s)
     return res
 
@@ -208,6 +219,7 @@ KNOWN_VARS = {}               # literal assignments of the command being classif
 # Empty by default: out of the box every git read is opaque. The installer / config fills this in (--safe-git-repo).
 SAFE_GIT_REPOS = []
 CWD = None                    # the directory Claude Code ran the tool in (set by main() from the hook input)
+_CWD_UNKNOWN = object()       # effective cwd after a `cd` whose target cannot be resolved statically (R1)
 
 
 def literal_assignments(cmd):
@@ -273,12 +285,19 @@ def _git_repo_dir(args):
         if a.startswith("-C") and len(a) > 2:
             d = a[2:]; i += 1; continue
         i += 1
-    d = d or KNOWN_VARS.get("GIT_DIR") or CWD
+    d = d or KNOWN_VARS.get("GIT_DIR") or KNOWN_VARS.get("GIT_WORK_TREE")
+    if d is not None and d is not _CWD_UNKNOWN:
+        d = d.rstrip("/").removesuffix("/.git") or d        # GIT_DIR points at the .git; the repo is its parent
     if d is None:
-        return None
+        d = CWD
+    if d is None or d is _CWD_UNKNOWN:
+        return None                                       # cwd unknown (e.g. after `cd "$x"`): cannot vouch for the repo
     d = os.path.expanduser(d.strip("'\""))
-    if not os.path.isabs(d) and CWD:
-        d = os.path.join(CWD, d)
+    if not os.path.isabs(d):
+        if CWD and CWD is not _CWD_UNKNOWN:
+            d = os.path.join(CWD, d)
+        else:
+            return None
     try:
         return os.path.realpath(d)
     except (OSError, ValueError):
@@ -286,7 +305,9 @@ def _git_repo_dir(args):
 
 
 def git_repo_is_safe(args):
-    """True when git's target repo is one of SAFE_GIT_REPOS, or under one (a safe repo covers its sub-directories)."""
+    """True when git's target repo is one of SAFE_GIT_REPOS, or under one (a safe repo covers its sub-directories),
+    with no nested repo between the two (R4): a `.git` below the declared root means a different repo, whose own
+    config the agent may control, so the declared root does not vouch for it."""
     if not SAFE_GIT_REPOS:
         return False
     d = _git_repo_dir(args)
@@ -294,9 +315,57 @@ def git_repo_is_safe(args):
         return False
     for s in SAFE_GIT_REPOS:
         s = os.path.realpath(os.path.expanduser(s)).rstrip("/")
-        if d == s or d.startswith(s + os.sep):
+        if (d == s or d.startswith(s + os.sep)) and not _nested_git_between(s, d):
             return True
     return False
+
+
+def _nested_git_between(s, d):
+    """Is there a nested repo in (s, d]? Best effort: on a stat error the directory is skipped, so this never blocks
+    the common case where keeperd cannot traverse the agent's tree (documented in design-keeper.md, Known limits)."""
+    p = d
+    while p != s and len(p) > len(s):
+        try:
+            if os.path.exists(os.path.join(p, ".git")):
+                return True
+        except OSError:
+            pass
+        parent = os.path.dirname(p)
+        if parent == p:
+            break
+        p = parent
+    return False
+
+
+def _cd_target(stmt):
+    """If a statement is a cd/pushd/popd, what it changes the cwd to: ('literal', path), or ('unknown',) when the
+    target cannot be resolved statically (a variable, a substitution, `-`, `~`, no arg, or popd). Else None (R1)."""
+    try:
+        toks = shlex.split(stmt, comments=False, posix=True)
+    except ValueError:
+        return ("unknown",)
+    while toks and toks[0] in ("builtin", "command"):
+        toks = toks[1:]
+    if not toks or toks[0] not in ("cd", "pushd", "popd"):
+        return None
+    if toks[0] == "popd":
+        return ("unknown",)                               # we do not track the directory stack
+    paths = [a for a in toks[1:] if a == "-" or not a.startswith("-")]
+    if not paths:
+        return ("unknown",)                               # `cd` with no path = home, which is not a declared repo
+    t = paths[0]
+    if t == "-" or t.startswith("~") or any(ch in t for ch in "$`*?"):
+        return ("unknown",)
+    return ("literal", t)
+
+
+def _resolve_cd(base, target):
+    """The cwd after `cd target` from `base` (which may be _CWD_UNKNOWN or None)."""
+    if os.path.isabs(target):
+        return os.path.realpath(target)
+    if base is _CWD_UNKNOWN or base is None:
+        return _CWD_UNKNOWN                               # a relative cd from an unknown base stays unknown
+    return os.path.realpath(os.path.join(base, target))
 
 
 def classify_stage(stage, depth, bodies=()):
@@ -330,7 +399,19 @@ def _classify_stage(stage, depth, bodies=()):
             return "change", "protected go-gate state, hooks or settings"
         if not is_scratch(tgt):
             return "change", f"writes {tgt[:40]}"
-    toks = [t for t in toks if not re.fullmatch(r"\d*[<>]+&?\d*|&>>?|\d*>>?\S+|<<<?-?\S*", t)]
+    # Drop an input redirection and its target file, so `cmd < file` does not leave `file` as a bogus argument of the
+    # command (this leak let `xargs sh -c id < list` read; R2). `<>` is a write, already handled by write_targets above.
+    pruned, skip = [], False
+    for t in toks:
+        if skip:
+            skip = False
+            continue
+        if re.fullmatch(r"\d*<", t):                      # `<` / `0<` as its own token: the next token is its file
+            skip = True
+            continue
+        pruned.append(t)
+    toks = pruned
+    toks = [t for t in toks if not re.fullmatch(r"\d*[<>]+&?\d*|&>>?|\d*>>?\S+|<<<?-?\S*|\d*<(?!>)\S+", t)]
     if toks and toks[0] in ("for", "select", "case"):
         return "read", ""
     while toks and (toks[0] in KEYWORDS or re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", toks[0])):
@@ -358,6 +439,28 @@ def _classify_stage(stage, depth, bodies=()):
         if not args or args[0] in ("-v", "-V"):
             return "read", ""
         rest = args[1:] if args[0] == "-p" else args
+        return classify_stage(" ".join(shlex.quote(a) for a in rest), depth + 1, bodies)
+    if c == "env":
+        # `env VAR=val cmd` is `VAR=val cmd`: apply the same dangerous-variable rule as a bare prefix (R3), and handle
+        # -S (split-string: its argument is a whole command line), -u (unset, takes a value), -i and other flags.
+        i = 0
+        while i < len(args) and args[i].startswith("-"):
+            a = args[i]
+            if a in ("-S", "--split-string") and i + 1 < len(args):
+                return classify_bash(args[i + 1], depth + 1)
+            if a.startswith("-S") and len(a) > 2:
+                return classify_bash(a[2:], depth + 1)
+            if a.startswith("--split-string="):
+                return classify_bash(a.split("=", 1)[1], depth + 1)
+            i += 2 if a in ("-u", "--unset") else 1
+        rest = args[i:]
+        assigns = []
+        while rest and re.fullmatch(r"[A-Za-z_]\w*=.*", rest[0]):
+            assigns.append(rest[0]); rest = rest[1:]
+        if any(EXEC_VARS.match(a) for a in assigns):
+            return "opaque", "env sets a variable that changes what runs"
+        if not rest:
+            return "read", ""                              # `env` with no command prints the environment
         return classify_stage(" ".join(shlex.quote(a) for a in rest), depth + 1, bodies)
     if c == "trap":
         handlers = [a for a in args if not a.startswith("-")][:1]
@@ -727,6 +830,8 @@ def classify_read_cmd(c, args, depth):
         return "change", "journalctl maintenance"
     if c == "jq" and any(a in ("--rawfile", "--slurpfile") for a in args):
         return "read", ""
+    if c == "sort" and any(a.startswith("--compress-program") for a in args):
+        return "opaque", "sort --compress-program runs a program"   # GNU sort execs it for temp files (R3)
     if c == "sort" and any(re.fullmatch(r"-o.*|--output.*", a) for a in args):
         return "change", "sort -o"
     if c == "uniq" and len([a for a in args if not a.startswith("-")]) >= 2:
@@ -748,20 +853,33 @@ def classify_read_cmd(c, args, depth):
         return "change", "ss --kill"
     if c == "gzip" and not any(a in ("-l", "-t", "-c", "-cd", "-dc") for a in args):
         return "change", "gzip"
-    if c == "openssl" and any(a == "-engine" or a.startswith("-engine") for a in args):
-        return "opaque", "openssl -engine loads a shared object"
+    if c == "openssl" and any(a.startswith(("-engine", "-provider", "-config", "-conf")) for a in args):
+        return "opaque", "openssl -engine/-provider/-config loads code or config"  # conf can load engines (R3)
     if c == "openssl" and any(a in ("-out", "genrsa", "genpkey", "req") for a in args):
         return "change", "openssl writes"
     if c == "defaults" and args[:1] not in (["read"], ["read-type"], ["domains"], ["find"]):
         return "change", "defaults write"
     if c in ("source", "."):
         return "opaque", "source"
-    if c == "xargs":
+    if c in ("less", "more", "most", "pg") and any(a.startswith("+") and "!" in a for a in args):
+        return "opaque", "pager +!command runs a shell"     # `less +'!cmd' file` (adversarial review 09/10)
+    if c in ("xargs", "parallel"):
         j = 0
         while j < len(args) and args[j].startswith("-"):
-            j += 2 if args[j] in ("-n", "-I", "-L", "-P", "-d", "-s", "-E") else 1
+            # options that take a separate value; long forms use = so need no value token
+            j += 2 if args[j] in ("-n", "-I", "-L", "-P", "-d", "-s", "-E", "-a", "--arg-file", "-i", "-j",
+                                  "--jobs", "--max-args", "--max-procs", "--delimiter", "--max-chars", "-N") else 1
         inner = args[j:]
-        return classify_stage(" ".join(shlex.quote(a) for a in inner), depth + 1) if inner else ("read", "")
+        if not inner:
+            return "read", ""                              # xargs with no command just echoes
+        launched = os.path.basename(inner[0])
+        # R2: xargs/parallel append their input as arguments (or a replacement string) to the launched command. If that
+        # command is a shell/interpreter, a program by path, or unknown, the real command line is not visible -> opaque.
+        if "/" in inner[0] and os.path.dirname(real(inner[0])) not in TRUSTED_BIN_DIRS:
+            return "opaque", f"{c} runs a program by path"
+        if launched in SHELL_INTERP:
+            return "opaque", f"{c} feeds input to {launched}"
+        return classify_stage(" ".join(shlex.quote(a) for a in inner), depth + 1)
     if c == "diskutil" and not (args[:1] in (["list"], ["info"]) or args[:2] == ["apfs", "list"]):
         return "change", "diskutil"
     if c == "pmset" and args[:1] not in (["-g"],):
@@ -791,19 +909,29 @@ def classify_bash(cmd, depth=0):
     stmts, _comment, balanced = scan(body_free)
     if not balanced:
         return "opaque", "unbalanced"
-    for s in stmts:
-        for stage, _amp in pipeline_stages(s):
-            n = len(re.findall(r"<<-?\s*['\"]?[A-Za-z_]", stage))         # heredocs opened by this stage, in order
-            mine, pending_bodies[:n] = pending_bodies[:n], []
-            k = classify_stage(stage, depth, mine)
-            if k[0] in ("change", "opaque"):
-                CHANGES.append((k[0], k[1], stage))
+    global CWD
+    saved_cwd, eff = CWD, CWD
+    try:
+        for s in stmts:
+            CWD = eff                                     # R1: a git read is judged against the cwd a prior `cd` set
+            for stage, _amp in pipeline_stages(s):
+                n = len(re.findall(r"<<-?\s*['\"]?[A-Za-z_]", stage))     # heredocs opened by this stage, in order
+                mine, pending_bodies[:n] = pending_bodies[:n], []
+                k = classify_stage(stage, depth, mine)
+                if k[0] in ("change", "opaque"):
+                    CHANGES.append((k[0], k[1], stage))
+                if order[k[0]] > order[worst[0]]:
+                    worst = k
+            cd = _cd_target(s)                            # follow cd/pushd/popd across statements of the same command
+            if cd:
+                eff = _CWD_UNKNOWN if cd[0] == "unknown" else _resolve_cd(eff, cd[1])
+        for i in inner:
+            CWD = eff
+            k = classify_bash(i, depth + 1)
             if order[k[0]] > order[worst[0]]:
                 worst = k
-    for i in inner:
-        k = classify_bash(i, depth + 1)
-        if order[k[0]] > order[worst[0]]:
-            worst = k
+    finally:
+        CWD = saved_cwd                                   # a cd inside a command does not leak to the caller
     return worst
 
 
@@ -1014,6 +1142,25 @@ def category(tool, tool_input, kind, detail):
     return "edit"
 
 
+GIT_EXEC_CONFIG_PATH = re.compile(r"(?:^|/)\.git/(?:config\b|hooks/|info/|modules/)|(?:^|/)\.gitmodules\b"
+                                  r"|(?:^|/)\.gitattributes\b|(?:^|/)\.git/info/attributes\b")
+GIT_EXEC_KEY = re.compile(r"(?i)\b(core\.(fsmonitor|pager|editor|sshcommand|hookspath|askpass)|sequence\.editor"
+                          r"|alias\.[\w-]+|diff\.external|diff\.[\w.-]+\.(textconv|command)"
+                          r"|filter\.[\w.-]+\.(process|clean|smudge)|credential\.helper|gpg\.([\w.-]+\.)?program"
+                          r"|merge\.[\w.-]+\.driver|uploadpack\.|receive\.|include\.path|includeif\.)")
+
+
+def touches_git_exec_surface(blob):
+    """True when the action writes a repo's git-exec surface: a .git/config, a hook, .gitattributes/.gitmodules, or a
+    `git config` that SETS an exec key (not --get/--list). Such a write arms code execution on a later read (R4)."""
+    if GIT_EXEC_CONFIG_PATH.search(blob):
+        return True
+    if re.search(r"\bgit\b", blob) and re.search(r"\bconfig\b", blob) and GIT_EXEC_KEY.search(blob) \
+            and not re.search(r"--get\b|--list\b|--show-origin\b|--get-all\b", blob):
+        return True
+    return False
+
+
 def covers(plan, tool, tool_input, cat, text=None):
     """The plan lists this category and, if it names targets, one of them appears in the action's own text."""
     if cat not in plan.get("actions", []):
@@ -1023,6 +1170,11 @@ def covers(plan, tool, tool_input, cat, text=None):
     if cat != "script" and "script" not in plan.get("actions", []) and (EXEC_DIRS.search(blob0 or "")
                                                                          or re.search(home_bin, blob0 or "")):
         return False                           # council review 08/10: an edit plan must not plant ~/bin/cat
+    # R4: writing a repo's git-exec surface (.git/config, hooks, attributes, .gitmodules, or `git config` setting an
+    # exec key) turns a later `git status` into code execution. It needs the same approval as running a program, so a
+    # plan covers it only with actions=script.
+    if cat != "script" and "script" not in plan.get("actions", []) and touches_git_exec_surface(blob0 or ""):
+        return False
     targets = plan.get("targets") or []
     if not targets:
         return True

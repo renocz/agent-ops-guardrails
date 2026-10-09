@@ -265,6 +265,18 @@ class ClassifierTricks(Base):
                     "PAGER=/tmp/evil git log"):
             self.assertFalse(self.allowed(*bash(cmd)), cmd)
 
+    def test_cd_before_git_is_not_a_read(self):                      # R1
+        self.k.gate.SAFE_GIT_REPOS[:] = ["/opt/stacks"]
+        self.assertNotEqual(self.k.check("s1", *bash("cd /tmp/evil && git status"), "/opt/stacks")["decision"], "allow")
+        self.assertNotEqual(self.k.check("s1", *bash("( cd /tmp/evil && git log )"), "/opt/stacks")["decision"], "allow")
+        self.assertEqual(self.k.check("s1", *bash("git status"), "/opt/stacks")["decision"], "allow")
+        self.assertEqual(self.k.check("s1", *bash("cd /opt/stacks/web && git status"), "/opt/stacks")["decision"], "allow")
+
+    def test_launcher_feeding_a_shell_needs_a_plan(self):            # R2
+        for cmd in ("xargs -I{} sh -c '{}' < /tmp/list", "xargs sh -c id < /dev/null", "xargs -a /tmp/list bash",
+                    "parallel sh -c {} ::: a b", "env PAGER=/tmp/x cat f", "sort --compress-program=/tmp/x /etc/hosts"):
+            self.assertFalse(self.allowed(*bash(cmd)), cmd)
+
     def test_git_read_is_opaque_outside_a_safe_repo(self):
         """K6: a git read verb runs repo-local config; it is a read only in a declared safe repo."""
         self.assertNotEqual(self.k.check("s1", *bash("git status"), "/tmp/evil")["decision"], "allow")
