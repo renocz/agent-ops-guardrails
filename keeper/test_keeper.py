@@ -257,6 +257,35 @@ class ClassifierTricks(Base):
         self.assertFalse(self.allowed("Write", {"file_path": p, "content": "{}"}))
         self.assertFalse(self.allowed(*bash(f"echo x > {p}")))
 
+    def test_read_commands_that_execute_need_a_plan(self):
+        """K1-K5: a 'read' command made to run a program or write is opaque (script), not covered by deploy,edit."""
+        for cmd in ("ssh -o ProxyCommand=/tmp/x host ls", "ssh -F /tmp/cfg host uptime",
+                    "awk -f /tmp/evil.awk /etc/hosts", "sed -e'w /tmp/out' /etc/hosts",
+                    "curl -K /tmp/cfg http://h/x", "tar --to-command=/tmp/x -xf a.tar",
+                    "PAGER=/tmp/evil git log"):
+            self.assertFalse(self.allowed(*bash(cmd)), cmd)
+
+    def test_cd_before_git_is_not_a_read(self):                      # R1
+        self.k.gate.SAFE_GIT_REPOS[:] = ["/opt/stacks"]
+        self.assertNotEqual(self.k.check("s1", *bash("cd /tmp/evil && git status"), "/opt/stacks")["decision"], "allow")
+        self.assertNotEqual(self.k.check("s1", *bash("( cd /tmp/evil && git log )"), "/opt/stacks")["decision"], "allow")
+        self.assertEqual(self.k.check("s1", *bash("git status"), "/opt/stacks")["decision"], "allow")
+        self.assertEqual(self.k.check("s1", *bash("cd /opt/stacks/web && git status"), "/opt/stacks")["decision"], "allow")
+
+    def test_launcher_feeding_a_shell_needs_a_plan(self):            # R2
+        for cmd in ("xargs -I{} sh -c '{}' < /tmp/list", "xargs sh -c id < /dev/null", "xargs -a /tmp/list bash",
+                    "parallel sh -c {} ::: a b", "env PAGER=/tmp/x cat f", "sort --compress-program=/tmp/x /etc/hosts"):
+            self.assertFalse(self.allowed(*bash(cmd)), cmd)
+
+    def test_git_read_is_opaque_outside_a_safe_repo(self):
+        """K6: a git read verb runs repo-local config; it is a read only in a declared safe repo."""
+        self.assertNotEqual(self.k.check("s1", *bash("git status"), "/tmp/evil")["decision"], "allow")
+        self.assertNotEqual(self.k.check("s1", *bash("git -C /tmp/evil log"), None)["decision"], "allow")
+        self.k.gate.SAFE_GIT_REPOS[:] = ["/opt/stacks/web"]
+        self.assertEqual(self.k.check("s1", *bash("git -C /opt/stacks/web status"), None)["decision"], "allow")
+        self.assertEqual(self.k.check("s1", *bash("git log --oneline"), "/opt/stacks/web/sub")["decision"], "allow")
+        self.assertNotEqual(self.k.check("s1", *bash("git status"), "/tmp/other")["decision"], "allow")
+
 
 class Socket(Base):
     """The real socket and the real hook client, as separate processes."""

@@ -225,6 +225,19 @@ BASH = [
     ("nmcli -s connection show home", False),
     ("nmcli connection show", True),
     ("cat /etc/NetworkManager/system-connections/home.nmconnection", False),
+    # S1: a bare relative path to a secret-shaped file, as read from the app's own directory, must be refused too.
+    ("cat config.php", False),
+    ("cat wp-config.php", False),
+    ("head shadow", False),
+    ("cat app.ini", False),
+    ("cat gshadow", False),
+    # S1 false positives to keep allowed: a neighbour name is not a secret file.
+    ("cat myconfig.php.md", True),
+    ("cat shadowsocks.txt", True),
+    ("cat appini.go", True),
+    # L1: the keeper bot token and its dir.
+    ("base64 /etc/keeper/bot.token", False),
+    ("cat bot.token", False),
 ]
 
 READS = [

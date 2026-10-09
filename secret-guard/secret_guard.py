@@ -55,8 +55,10 @@ SECRET_PATHS = [
     r"\.git/config\b",
     r"/etc/[a-z-]*\.env\b",
     r"\.pem\b", r"\.key\b", r"id_(rsa|ed25519|ecdsa)\b(?!\.pub)",  # private keys (not the .pub)
-    r"(^|/)(wp-)?config\.php\b", r"(^|/)(g)?shadow-?\b",       # PHP app configs, password hashes
-    r"grafana\.ini\b", r"(^|/)app\.ini\b", r"\.n8n/config\b",   # Grafana, Gitea, n8n (encryption key)
+    # (?:^|[/\s]) so a bare relative path matches in a Bash command too (`cat config.php`), not only `/path/config.php`
+    # (S1). \b after the name keeps `myconfig.php`, `shadowsocks` and `appini.go` out.
+    r"(?:^|[/\s])(wp-)?config\.php\b", r"(?:^|[/\s])(g)?shadow-?\b",       # PHP app configs, password hashes
+    r"grafana\.ini\b", r"(?:^|[/\s])app\.ini\b", r"\.n8n/config\b",       # Grafana, Gitea, n8n (encryption key)
     r"cloudflared/[^\s/]*\.json\b", r"\.cloudflared/",          # tunnel credentials
     r"\.nmconnection\b", r"system-connections/",                 # NetworkManager: Wi-Fi PSK, VPN secrets
     r"\.kube/config\b", r"\.aws/", r"\.docker/config",
@@ -66,6 +68,7 @@ SECRET_PATHS = [
     r"/pve/priv/", r"\bpriv/token\.cfg\b",                    # Proxmox: API token secrets, cluster keys
     r"\bgh/hosts\.ya?ml\b", r"\.pypirc\b", r"\.npmrc\b",       # gh, PyPI and npm tokens
     r"\.vault-token\b", r"tailscaled\.state\b", r"/age/keys\.txt\b", r"\.git-credentials\b",
+    r"/etc/keeper/", r"(?:^|[/\s])bot\.token\b",             # keeper: the approval bot's token (L1)
 ]
 
 # Environment variable names that look secret.
