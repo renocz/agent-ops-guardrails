@@ -177,6 +177,41 @@ BASH = [
     ("PAGER=/tmp/evil git log", "opaque"),
     ("GIT_PAGER='sh -c id' git diff", "opaque"),
     ("LESSOPEN='|/tmp/x %s' less f", "opaque"),
+    # R2: launchers feed external input to a command; a shell/interpreter/by-path/unknown target is opaque. A `<` input
+    # redirection no longer leaks its file as an argument. Benign launches stay their real kind.
+    ("xargs -I{} sh -c '{}' < /tmp/list", "opaque"),
+    ("xargs sh -c id < /dev/null", "opaque"),
+    ("xargs -a /tmp/list sh", "opaque"),
+    ("xargs --arg-file=/tmp/list bash", "opaque"),
+    ("xargs rm < list", "change"),
+    ("xargs ls < list", "read"),
+    ("find . -print0 | xargs -0 grep foo", "read"),
+    ("echo *.log | xargs wc -l", "read"),
+    ("parallel sh -c {} ::: a b", "opaque"),
+    ("parallel rm ::: a b", "change"),
+    ("timeout 5 tail -f /var/log/syslog", "read"),
+    ("timeout 5 bash /tmp/x.sh", "opaque"),
+    ("setsid tail -f log", "read"),
+    # R3: env VAR= is a prefix assignment; a dangerous variable through env is opaque. -S carries a whole command line.
+    ("env PAGER=/tmp/x cat f", "opaque"),
+    ("env -i LD_PRELOAD=/tmp/x.so cat f", "opaque"),
+    ("env -u HOME GIT_SSH=/tmp/x cat f", "opaque"),
+    ("env -S 'PAGER=/tmp/x cat f'", "opaque"),
+    ("env FOO=bar cat /etc/hosts", "read"),
+    ("env cat /etc/hosts", "read"),
+    ("env", "read"),
+    ("sort --compress-program=/tmp/x /etc/hosts", "opaque"),
+    ("sort -k2 -n file", "read"),
+    ("openssl x509 -config /tmp/c -in cert.pem", "opaque"),
+    # Found by the adversarial self-review (09/10): process substitution runs its command; a pager +!cmd runs a shell.
+    ("cat <(rm -rf /srv)", "change"),
+    ("diff <(cat a) <(/tmp/evil)", "opaque"),
+    ("grep foo < <(/tmp/evil)", "opaque"),
+    ("ls > >(rm -rf /srv)", "change"),
+    ("cat <(cat /etc/hosts)", "read"),
+    ("paste <(sort a) <(sort b)", "read"),
+    ("less +!/tmp/evil file", "opaque"),
+    ("less +G file", "read"),
 ]
 
 
@@ -241,6 +276,53 @@ class Classifier(unittest.TestCase):
         g.CWD = "/opt/stacks/web/sub"
         self.assertEqual(g.classify("Bash", {"command": "git log --oneline"})[0], "read")    # under a safe repo
         self.assertEqual(g.classify("Bash", {"command": "git push"})[0], "change")           # a change stays a change
+        g.CWD = None                                                                         # GIT_DIR locates the repo
+        self.assertEqual(g.classify("Bash", {"command": "GIT_DIR=/opt/stacks/web/.git git status"})[0], "read")
+        self.assertEqual(g.classify("Bash", {"command": "GIT_DIR=/tmp/evil/.git git log"})[0], "opaque")
+        self.assertEqual(g.classify("Bash", {"command": "GIT_PAGER=/tmp/x git log"})[0], "opaque")  # still exec
+
+    def test_cd_is_followed_across_stages(self):                     # R1
+        g.SAFE_GIT_REPOS[:] = ["/opt/stacks"]
+        g.CWD = "/opt/stacks"
+        for cmd in ("cd /tmp/evil && git status", "cd /tmp/evil; git log", "cd - && git status",
+                    "cd ~ && git status", "cd \"$VAR\" && git status", "cd $(mktemp -d) && git status",
+                    "builtin cd /tmp/evil && git status", "( cd /tmp/evil && git status )",
+                    "{ cd /tmp/evil; git status; }", "pushd /tmp/evil && git status", "popd && git status"):
+            self.assertEqual(g.classify("Bash", {"command": cmd})[0], "opaque", cmd)
+        for cmd in ("cd /opt/stacks/web && git status", "cd /opt/stacks && git log --oneline", "git status",
+                    "cd /tmp && ls", "cd /tmp/x && cat f"):
+            self.assertNotEqual(g.classify("Bash", {"command": cmd})[0], "opaque", cmd)
+
+    def test_git_exec_config_surface_needs_script(self):             # R4 part 1
+        edit = {"targets": ["/opt/stacks/web"], "actions": ["edit", "git"]}
+        script = {"targets": ["/opt/stacks/web"], "actions": ["edit", "git", "script"]}
+        for ti in ({"file_path": "/opt/stacks/web/.git/config", "content": "x"},
+                   {"file_path": "/opt/stacks/web/.git/hooks/pre-commit", "content": "x"},
+                   {"file_path": "/opt/stacks/web/.gitattributes", "content": "x"}):
+            cat = g.category("Write", ti, *g.classify("Write", ti))
+            self.assertFalse(g.covers(edit, "Write", ti, cat, None), ti["file_path"])
+            self.assertTrue(g.covers(script, "Write", ti, cat, None), ti["file_path"])
+        ok = {"file_path": "/opt/stacks/web/app.conf", "content": "x"}
+        self.assertTrue(g.covers(edit, "Write", ok, g.category("Write", ok, *g.classify("Write", ok)), None))
+        for cmd in ("git -C /opt/stacks/web config core.fsmonitor /tmp/x", "echo x > /opt/stacks/web/.git/config"):
+            self.assertFalse(g.covers(edit, "Bash", {"command": cmd}, "git", cmd), cmd)
+        self.assertTrue(g.covers(edit, "Bash", {"command": "git -C /opt/stacks/web config user.name bob"},
+                                 "git", "git -C /opt/stacks/web config user.name bob"))
+
+    def test_nested_repo_does_not_inherit_trust(self):               # R4 part 2
+        import shutil, tempfile
+        d = tempfile.mkdtemp()
+        try:
+            os.makedirs(os.path.join(d, ".git"))
+            os.makedirs(os.path.join(d, "sub"))
+            os.makedirs(os.path.join(d, "nested", ".git"))
+            os.makedirs(os.path.join(d, "nested", "deep"))
+            g.SAFE_GIT_REPOS[:] = [d]
+            for sub, kind in (("", "read"), ("sub", "read"), ("nested", "opaque"), ("nested/deep", "opaque")):
+                g.CWD = os.path.join(d, sub) if sub else d
+                self.assertEqual(g.classify("Bash", {"command": "git status"})[0], kind, sub)
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
 
     def test_every_change_is_recorded(self):
         g.classify("Bash", {"command": "git add web; docker compose down"})
