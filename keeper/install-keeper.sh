@@ -117,7 +117,9 @@ fi
 
 echo "-- 2. root-owned code in $LIB (the agent cannot edit it)"
 # Council review (08/10): root-owned files are only safe if no parent directory lets the agent rename or replace them.
-CHAIN_BAD=$("$PY" - "$BASE" /etc/keeper /var/lib/keeper "$(dirname "$MANAGED")" "$(dirname "$SERVICE")" <<'PYEOF'
+# /var/lib/keeper itself belongs to _keeper by design (700), so only its parents are checked: checking the directory
+# made every reinstall refuse ("not root-owned") once a first install had created it.
+CHAIN_BAD=$("$PY" - "$BASE" /etc/keeper /var/lib "$(dirname "$MANAGED")" "$(dirname "$SERVICE")" <<'PYEOF'
 import os, stat, sys
 bad = []
 for target in sys.argv[1:]:
