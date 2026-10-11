@@ -200,7 +200,14 @@ if [ "$OS" = Darwin ]; then
 </dict></plist>
 EOF
   put "$SERVICE" 644 "root:wheel" "$TMP/svc"
-  [ "$MODE" != apply ] || launchctl bootout system/io.github.renocz.keeper 2>/dev/null || true   # re-install
+  if [ "$MODE" = apply ]; then                                       # re-install: unload the old service first
+    launchctl bootout system/io.github.renocz.keeper 2>/dev/null || true
+    # bootout returns before launchd has finished; bootstrapping too early fails with "5: Input/output error"
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
+      launchctl print system/io.github.renocz.keeper >/dev/null 2>&1 || break
+      sleep 1
+    done
+  fi
   run launchctl bootstrap system "$SERVICE"
 else
   cat > "$TMP/svc" <<EOF

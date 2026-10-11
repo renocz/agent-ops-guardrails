@@ -317,7 +317,8 @@ def tally(path, since):
     and skips lines it cannot parse. A missing log gives empty counts; other OSErrors propagate."""
     st = {"events": 0, "would": 0, "denied": 0, "allowed": 0, "no_shape": 0, "proposed": 0, "approved": 0,
           "rejected": 0, "expired": 0, "tg_errors": 0, "socket": 0, "strangers": 0, "floods": 0,
-          "tools": collections.Counter(), "cats": collections.Counter(), "shapes": collections.Counter()}
+          "tools": collections.Counter(), "cats": collections.Counter(), "shapes": collections.Counter(),
+          "tg_types": collections.Counter()}
     single = {"proposed": "proposed", "approved": "approved", "rejected": "rejected",
               "approval-of-expired-plan-ignored": "expired", "telegram-error": "tg_errors",
               "telegram-error-at-start": "tg_errors", "socket-peer-refused": "socket", "proposal-refused-flood": "floods",
@@ -356,6 +357,9 @@ def tally(path, since):
                 st["allowed"] += 1
             elif ev in single:
                 st[single[ev]] += 1
+                if ev.startswith("telegram-error"):            # the exception class name: a network outage, a bad token…
+                    err = rec.get("error") if ev == "telegram-error" else "at-start"
+                    st["tg_types"][err if isinstance(err, str) and IDENT_FORMAT.fullmatch(err) else "<other>"] += 1
     return st
 
 
@@ -385,6 +389,8 @@ def render_summary(lang, st, days, mode):
     lines.append(t(lang, "sum_plans", proposed=st["proposed"], approved=st["approved"], rejected=st["rejected"],
                    expired=st["expired"]))
     lines.append(t(lang, "sum_errors", n=st["tg_errors"]))
+    if st["tg_types"]:                                         # which kind: URLError (offline, asleep) is not HTTPError (token)
+        lines.append("  " + ", ".join(f"{k} {n}" for k, n in st["tg_types"].most_common(5)))
     lines.append(t(lang, "sum_ignored", socket=st["socket"], strangers=st["strangers"], floods=st["floods"]))
     return "\n".join(lines)
 
