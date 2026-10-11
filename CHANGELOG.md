@@ -4,6 +4,10 @@ One version scheme: **a repository tag per release**. Components have no version
 
 ## Unreleased (towards v1.0)
 
+- **keeper: two fixes after the first reinstall (11/10).** The summary breaks Telegram errors down by exception type
+  (a laptop asleep gives URLError, a bad token HTTPError), validated like the other printed names. The installer waits
+  for launchd to unload the old service before bootstrapping the new one ("Bootstrap failed: 5" on macOS). It also
+  checks only the parents of /var/lib/keeper, which belongs to _keeper by design (#3).
 - **keeper: review the log before block mode (11/10).** Three things, none of them changes how approvals work.
   - **`/summary` on the keeper bot** (alias `/resume`, `/summary 1` for one day, 7 by default, up to 30): counts of
     would-deny / denied / allowed-under-a-plan by tool and category, the 10 most frequent command shapes, plans
