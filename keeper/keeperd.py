@@ -626,6 +626,11 @@ class Keeper:
 # Telegram: the keeper bot. Only keeperd holds its token, so only keeperd reads its updates.
 # ---------------------------------------------------------------------------------------------------------------
 class TelegramBot:
+    # Overridable in-process only (council of 11/10's block-mode dry run): never a config key, env var or argument,
+    # so nothing the agent or a config file controls can redirect this. Production keeps the real values.
+    API_BASE = "https://api.telegram.org"
+    DEFAULT_TIMEOUT = 40
+
     def __init__(self, cfg):
         self.cfg = cfg
         self.lang = norm_lang(cfg.get("lang"))
@@ -633,8 +638,9 @@ class TelegramBot:
             self.token = f.read().strip()
         self.offset = 0
 
-    def api(self, method, payload, timeout=40):
-        req = urllib.request.Request(f"https://api.telegram.org/bot{self.token}/{method}",
+    def api(self, method, payload, timeout=None):
+        timeout = self.DEFAULT_TIMEOUT if timeout is None else timeout
+        req = urllib.request.Request(f"{self.API_BASE}/bot{self.token}/{method}",
                                      json.dumps(payload).encode(), {"Content-Type": "application/json"})
         return json.load(urllib.request.urlopen(req, timeout=timeout))
 
@@ -728,12 +734,17 @@ def serve(keeper, cfg, ready=None):
                 out = keeper.check(req.get("session"), str(req.get("tool", "")), req.get("input") or {},
                                    req.get("cwd"))
             note = out.pop("_notify", None)
-            self.reply(out)
+            # Dry run (11/10): send_plan() used to run AFTER the reply, so the agent was told "sent to the human"
+            # even when Telegram was down and nothing reached them. Attempted first; the reason is rewritten only
+            # on failure, so a working send still says exactly what it said before.
             if note:
                 try:
                     keeper.notify.send_plan(*note)
                 except Exception as e:
                     keeper.log({"event": "telegram-error", "error": type(e).__name__})
+                    out["reason"] = ("keeper: could not reach Telegram to send the plan for approval; the proposal "
+                                      "was recorded, retry once it answers again.")
+            self.reply(out)
 
         def reply(self, obj):
             self.wfile.write((json.dumps(obj) + "\n").encode())
