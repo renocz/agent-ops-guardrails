@@ -510,7 +510,7 @@ class SummaryCli(Base):
         self.assertEqual((rc, err), (0, ""))
         self.assertIn("Keeper summary: last 7 day(s), mode observe", out)
         self.assertIn("Would-deny: 2", out)
-        self.assertIn("docker … [deploy]", out)
+        self.assertIn("docker restart … [deploy]", out)
         self.assertNotIn(fake_secrets()["github"][:12], out)
         self.assertEqual(self.run_cli("1")[1].splitlines()[0].split(": ")[1].split(",")[0], "last 1 day(s)")
 
@@ -652,7 +652,7 @@ class LogSummary(Base):
         self.assertIn("Would-deny: 5 | Denied: 0 | Allowed under an approved plan: 0", text)
         self.assertIn("By tool: Bash 4, Write 1", text)
         self.assertIn("By category: deploy 3, delete 1, edit 1", text)
-        self.assertIn("1. 3× docker … [deploy]", text)
+        self.assertIn("1. 3× docker restart … [deploy]", text)
         self.assertIn("rm … [delete]", text)
         self.assertIn("Write … [edit]", text)
 
@@ -728,7 +728,7 @@ class LogSummary(Base):
                 self.assertNotIn(value, hay, (name, where))
                 self.assertNotIn(value[:12], hay, (name, where))              # no fragment either
                 self.assertNotIn(value[-12:], hay, (name, where))
-        self.assertIn("docker … [deploy]", text)
+        self.assertIn("docker restart … [deploy]", text)
 
     def test_a_secret_as_the_first_word_is_not_shown(self):
         sec = fake_secrets()
@@ -865,7 +865,7 @@ class LogSummary(Base):
                      "pass" + "word=Zq7Zq7 z", "Authori" + "zation: Bearer abcdef" + "123456", "ssh://u:pw@h/",
                      "a" * 5 + "1" * 30 + "b" * 5, "f" * 40):
             self.assertIn("<m>", keeperd.mask_text(text), text)
-        for text in ("docker … [deploy]", "mcp__claude-in-chrome__computer", "Would-deny: 12 | Denied: 0", "1. 3× rm … [delete]",
+        for text in ("docker … [deploy]", "docker compose up … [deploy]", "gh pr merge … [git]", "mcp__claude-in-chrome__computer", "Would-deny: 12 | Denied: 0", "1. 3× rm … [delete]",
                      "mcp__plugin_telegram_telegram__reply 4", "<other>", "<…> … [script]"):
             self.assertEqual(keeperd.mask_text(text), text)
         once = keeperd.mask_text("x " + sec["github"])
@@ -889,7 +889,7 @@ class LogSummary(Base):
 
     def test_command_shape(self):
         shape = keeperd.command_shape
-        self.assertEqual(shape("Bash", "docker restart web", "deploy"), "docker … [deploy]")
+        self.assertEqual(shape("Bash", "docker restart web", "deploy"), "docker restart … [deploy]")
         self.assertEqual(shape("Bash", "FOO=bar BAZ=1 /usr/bin/curl -X POST http://h", "api"), "curl … [api]")
         self.assertEqual(shape("Bash", "( cd /tmp", "edit"), "cd … [edit]")
         self.assertEqual(shape("Bash", "{ rm -rf x", "delete"), "rm … [delete]")
@@ -902,6 +902,31 @@ class LogSummary(Base):
         self.assertLessEqual(len(shape("Bash", "a" * 40, "edit")), 80)
         self.assertTrue(keeperd.SHAPE_FORMAT.fullmatch(shape("Bash", "git push", "git")))
 
+
+    def test_command_shape_keeps_the_subcommand_of_known_clis_only(self):
+        shape = keeperd.command_shape
+        self.assertEqual(shape("Bash", "git -C /srv/repo push origin main", "git"), "git push … [git]")
+        self.assertEqual(shape("Bash", "git -c user.name=x commit -m msg", "git"), "git commit … [git]")
+        self.assertEqual(shape("Bash", "docker compose -f a.yml up -d web", "deploy"), "docker compose up … [deploy]")
+        self.assertEqual(shape("Bash", "docker --context=prod restart web", "deploy"), "docker restart … [deploy]")
+        self.assertEqual(shape("Bash", "kubectl -n prod delete pod x", "delete"), "kubectl delete … [delete]")
+        self.assertEqual(shape("Bash", "gh pr merge 2", "git"), "gh pr merge … [git]")
+        self.assertEqual(shape("Bash", "systemctl restart nginx", "service"), "systemctl restart … [service]")
+        # an unknown CLI keeps the first word only, as before
+        self.assertEqual(shape("Bash", "rsync -a src dst", "edit"), "rsync … [edit]")
+        # a value, a path, an upper-case word or a secret-shaped word is never kept as a subcommand
+        self.assertEqual(shape("Bash", "docker /tmp/x", "deploy"), "docker … [deploy]")
+        self.assertEqual(shape("Bash", "git Push", "git"), "git … [git]")
+        tok = "ghp" + "_" + "a1" * 12
+        self.assertEqual(shape("Bash", "git " + tok, "git"), "git … [git]")
+        self.assertEqual(shape("Bash", "docker", "deploy"), "docker … [deploy]")
+        opaque = "a1b2c3d4e5f6" + "g7h8i9j0k1l2"                  # plain lowercase, but secret-shaped
+        self.assertEqual(shape("Bash", "docker " + opaque, "deploy"), "docker … [deploy]")
+        for cmd in ("git -C /srv/repo push", "docker compose up", "docker compose", "gh pr merge 2"):
+            self.assertTrue(keeperd.SHAPE_FORMAT.fullmatch(shape("Bash", cmd, "git")), cmd)
+        # shapes logged by the earlier format still validate
+        self.assertTrue(keeperd.SHAPE_FORMAT.fullmatch("docker … [deploy]"))
+        self.assertTrue(keeperd.SHAPE_FORMAT.fullmatch("<…> … [edit]"))
 
 class TelegramCommands(Base):
     """The bot side: `message` updates are asked for, routed to keeper.command, and nothing else is acted on."""

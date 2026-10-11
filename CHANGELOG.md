@@ -8,7 +8,8 @@ One version scheme: **a repository tag per release**. Components have no version
   - **`/summary` on the keeper bot** (alias `/resume`, `/summary 1` for one day, 7 by default, up to 30): counts of
     would-deny / denied / allowed-under-a-plan by tool and category, the 10 most frequent command shapes, plans
     proposed / approved / rejected / expired, Telegram errors, ignored attempts. Owner and configured chat only; not
-    reachable through the socket. The log now keeps a *shape* (first word and category, never arguments) for each refusal;
+    reachable through the socket. The log now keeps a *shape* (first word, the subcommand for known CLIs such as git or docker, and the category; never
+    arguments) for each refusal;
     the summary re-validates what it prints and masks it. `sudo keeper-summary [days]` prints the same for root (mode 700,
     not setuid). Design: "The log summary" in `docs/design-keeper.md`.
   - **The startup message matches the mode.** In observe it no longer says "changes now need your approval": it says

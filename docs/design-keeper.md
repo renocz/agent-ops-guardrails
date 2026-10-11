@@ -146,8 +146,10 @@ Bash call such as `keeper-summary` gets a decision and a reason like any other c
 
 The summary is built so that it is safe even if it is read by someone it was not meant for:
 
-1. **The log does not hold the arguments of a refused call.** It is logged as a *shape*: its first word and its category,
-   arguments replaced by `…` (`docker … [deploy]`). A secret typed in a command therefore never reaches the log, let alone
+1. **The log does not hold the arguments of a refused call.** It is logged as a *shape*: its first word, the subcommand for a
+   short list of known CLIs (git, docker, kubectl, systemctl…), and its category, arguments replaced by `…`
+   (`docker restart … [deploy]`). The subcommand is kept only when it is a plain lowercase word that the mask leaves
+   untouched; anything else (a path, a value) ends the shape. A secret typed in a command therefore never reaches the log, let alone
    Telegram. (Other fields exist, such as plan and session ids; the summary prints none of them.)
 2. **Only validated values are printed.** The tool name arrives on the socket, so it is agent-controlled text. Tool names,
    categories and shapes are printed only if they match a strict format; anything else is counted as `<other>` or "no

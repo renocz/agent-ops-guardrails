@@ -53,7 +53,8 @@ own chat.
 - You get: would-deny / denied / allowed-under-an-approved-plan counts, grouped by tool and by category; the 10 most
   frequent **shapes**; plans proposed / approved / rejected / expired; Telegram errors; and what was ignored (unknown
   socket clients, strangers writing to the bot, proposal floods).
-- A **shape** is the first word of the command and its category, arguments replaced by `…`: `docker … [deploy]`. The log
+- A **shape** is the first word of the command, the subcommand for known CLIs (git, docker, kubectl, systemctl…),
+  and its category, arguments replaced by `…`: `docker restart … [deploy]`, `git push … [git]`. The log
   does not store the arguments of a refused command, so there is nothing secret to show. Lines logged by an older version have no shape; the summary
   counts them ("no recorded shape") instead of guessing.
 - Only you can ask: the sender must be `owner_id` and the chat must be the configured one. A command attempt (text starting

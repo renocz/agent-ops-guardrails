@@ -193,7 +193,8 @@ def load_gate(agent_home=None):
 # ---------------------------------------------------------------------------------------------------------------
 # The log summary (`/summary` on Telegram). It goes to the human only: the log is private to this user, and the agent
 # must never read it, so no socket op returns any of this. Three layers keep secrets out of what leaves the machine:
-#   1. the log never holds arguments: a denied call is logged as a "shape" (first word + category), see command_shape;
+#   1. the log never holds arguments: a denied call is logged as a "shape" (first word, the subcommand of a known
+#      CLI, and the category), see command_shape;
 #   2. the summary only prints values it has re-validated (tool names, categories, shapes match a strict format);
 #   3. the whole text goes through mask_text before it is sent.
 # ---------------------------------------------------------------------------------------------------------------
@@ -201,7 +202,20 @@ SUMMARY_DAYS_DEFAULT, SUMMARY_DAYS_MAX = 7, 30
 TOP_SHAPES, TOP_GROUPS = 10, 10
 TELEGRAM_CHUNK = 3900                 # Telegram refuses 4096+; keep a margin
 LOG_TAIL_MAX = 32 * 1024 * 1024       # read at most this much of the end of the log (it is append-only and unrotated)
-SHAPE_FORMAT = re.compile(r"(?:[A-Za-z0-9_.+:-]{1,40}|<…>) … \[[a-z_]{1,16}\]")
+SHAPE_FORMAT = re.compile(r"(?:[A-Za-z0-9_.+:-]{1,40}(?: [a-z][a-z0-9-]{0,24}){0,2}|<…>) … \[[a-z_]{1,16}\]")
+# For these CLIs the first word says little ("docker … [deploy]" may be a routine restart or a rebuild): the subcommand
+# is kept too, when it is a plain lowercase word. Options are skipped; those listed take a value, which is skipped as well.
+SUBCOMMAND_CLIS = {"docker": {"-H", "--host", "--context", "-c", "--config", "--log-level",
+                              "-f", "--file", "-p", "--project-name", "--env-file", "--profile"},  # compose options too
+                   "git": {"-C", "-c", "--git-dir", "--work-tree", "--namespace"},
+                   "kubectl": {"-n", "--namespace", "--context", "--kubeconfig", "-s", "--server"},
+                   "systemctl": {"-H", "--host", "-M", "--machine"}, "launchctl": set(), "brew": set(),
+                   "apt": {"-o", "-t"}, "apt-get": {"-o", "-t"}, "npm": set(), "pip": set(), "pip3": set(),
+                   "gh": {"-R", "--repo"}, "pct": set(), "qm": set(), "zfs": set(), "zpool": set(),
+                   "terraform": {"-chdir"}, "helm": {"-n", "--namespace"}}
+GROUP_SUBCOMMANDS = {"docker": {"compose", "container", "image", "network", "volume", "system", "buildx", "builder"},
+                     "gh": {"pr", "repo", "release", "issue", "workflow", "run", "secret"}, "kubectl": {"rollout", "config"}}
+PLAIN_SUBCOMMAND = re.compile(r"[a-z][a-z0-9-]{0,24}")
 IDENT_FORMAT = re.compile(r"[A-Za-z0-9_.:-]{1,64}")
 
 # Patterns taken from secret-guard (LITERAL_SECRET, the `mask` filter) and go-gate's redact(), kept here so the daemon
@@ -245,8 +259,29 @@ def command_shape(tool, stage, cat):
         first = os.path.basename(words[0]) if words else "Bash"
     if not re.fullmatch(r"[A-Za-z0-9_.+:-]{1,40}", first or "") or mask_text(first) != first:
         first = "<…>"                                          # not a plain word (or secret-shaped): say nothing of it
+    elif tool == "Bash" and first in SUBCOMMAND_CLIS:
+        first = " ".join([first] + subcommands(first, words[1:]))
     cat = str(cat) if re.fullmatch(r"[a-z_]{1,16}", str(cat)) else "other"
     return f"{first} … [{cat}]"[:80]
+
+
+def subcommands(cli, args):
+    """The subcommand of a known CLI (two levels for groups like `docker compose up`), plain lowercase words only and
+    masked like the rest; anything else ends the shape, so a value or a path is never kept."""
+    out, takes_value, skip = [], SUBCOMMAND_CLIS[cli], False
+    for w in args:
+        if skip:
+            skip = False
+            continue
+        if w.startswith("-"):
+            skip = "=" not in w and w in takes_value
+            continue
+        if not PLAIN_SUBCOMMAND.fullmatch(w) or mask_text(w) != w:
+            break
+        out.append(w)
+        if len(out) == 2 or out[0] not in GROUP_SUBCOMMANDS.get(cli, ()):
+            break
+    return out
 
 
 def split_message(text, limit=TELEGRAM_CHUNK):
