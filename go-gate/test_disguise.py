@@ -9,6 +9,7 @@ example but not the class; FIXED_BYPASSES also covers the two follow-up entries 
 Everything else below is a technique the classifier already resists, kept here as a regression test.
 """
 import os, sys, unittest
+import urllib.parse
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import go_gate as g
@@ -49,6 +50,15 @@ FIXED_BYPASSES = [
      "move where the path actually ends; a `.php` on the action word never matched the plain word either.",
      "the whole URL is percent-decoded to a fixed point (bounded at 3 rounds) BEFORE the path/query split runs "
      "again on the now-real separators, and the last path segment is also compared with its extension stripped."),
+    ("Servlet-style path parameter after the action word (`;jsessionid=…`), and percent-decoding still changing "
+     "past the round bound",
+     "curl 'https://h/x/restart;a=1'",
+     "the path was split on '/' only, so `;a=1` glued onto 'restart' became the compared segment instead of "
+     "'restart' itself; decoding that never stabilised within the bound was matched on its half-decoded text "
+     "rather than refused outright.",
+     "each '/'-segment is also split on the first ';' before comparing (containers route on the part before it "
+     "and ignore the rest, same as a real servlet); decoding that is still changing after the bound now returns "
+     "True (an action URL) instead of matching whatever it got to."),
 ]
 
 
@@ -150,6 +160,16 @@ URL_ENCODING = [
     ("percent-encoded path separator (%2F)", "curl https://h/api%2Frestart"),
     ("percent-encoded query separator (%3F)", "curl 'https://h/x/restart%3Fa'"),
     ("action word with a file extension", "curl https://h/x/restart.php"),
+    ("servlet-style path parameter after the action word", "curl 'https://h/x/restart;a=1'"),
+    ("servlet-style path parameter, jsessionid", "curl 'https://h/x/restart;jsessionid=ABC123'"),
+]
+
+# %-encoded 4 layers deep: unquote() needs 4 real rounds to reach "restart", one more than the bound (3), so it
+# must never stabilise within the bound and is_action_url() must refuse to match the half-decoded text.
+_ONE_LAYER = "".join(f"%{ord(c):02X}" for c in "restart")
+_DEEP_ENCODED_RESTART = _ONE_LAYER.replace("%", "%25").replace("%", "%25").replace("%", "%25")
+NON_CONVERGING_DECODE = [
+    ("percent-decoding does not stabilise within the round bound", f"curl https://h/x/{_DEEP_ENCODED_RESTART}"),
 ]
 
 MCP_FUSED_VERB = [
@@ -175,6 +195,7 @@ SAFE_READS = [
     "curl https://example.com/api/v1/status",
     "tar -tf /srv/backup.tar.gz",
     "curl https://h/docs/index.php",                 # extension stripped ("index"), still not an action word
+    "curl 'https://h/api/sync/status;x=1'",          # matrix parameter stripped, last segment is still "status"
 ]
 
 # MCP methods that start with a read verb and are a single run-on word, but hide no write verb: the fix for
@@ -247,6 +268,10 @@ class Disguise(unittest.TestCase):
     def test_percent_encoded_action_urls(self):
         """Fixed bypass: is_action_url() now percent-decodes before matching."""
         self._assert_not_read(URL_ENCODING)
+
+    def test_non_converging_decode_fails_closed(self):
+        """Fixed bypass: decoding still changing past the round bound is refused outright, not matched half-decoded."""
+        self._assert_not_read(NON_CONVERGING_DECODE)
 
     def test_mcp_fused_write_verb(self):
         """Fixed bypass: mcp_writes() now searches a single, unsplit word for a write verb anywhere in it."""
