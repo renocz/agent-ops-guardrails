@@ -21,10 +21,12 @@ One version scheme: **a repository tag per release**. Components have no version
     change when in doubt, and an allowlist of "safe" page names would need to be complete to be worth adding,
     which a blocklist/allowlist of this shape never is (same reasoning as the awk/sed program checks elsewhere in
     this file).
-  - **Symlinks under keeperd.** The agent's home being mode 750 means `_keeper` cannot traverse it, so
-    `git_repo_is_safe` cannot resolve a symlink inside a declared safe repo pointing at another repo, and
-    `_nested_git_between` skips what it cannot stat; such a symlink is then judged as the safe repo. Owner
-    decision pending — see docs/design-keeper.md, Known limits, once decided.
+  - **Symlinks under keeperd — owner decided B (document, don't fix for v1).** The agent's home being mode 750
+    means `_keeper` cannot traverse it, so `git_repo_is_safe` cannot resolve a symlink inside a declared safe
+    repo pointing at another repo, and `_nested_git_between` skips what it cannot stat; such a symlink is then
+    judged as the safe repo. No installer change: see docs/design-keeper.md, Known limits, for why (the symlink
+    needs a prior approved write to exist; the ACL that would fix it is real installer work better done
+    deliberately) and `go-gate/test_disguise.py`'s `SymlinkInSafeRepo` for the documented behaviour.
   - The LangGraph `interrupt()` row in "How this compares" is marked **not verified**: `docs.langchain.com` could
     not be reached from this environment (checked three times across two sessions), so the row still rests on a
     secondary summary of the official docs, not a direct read.
