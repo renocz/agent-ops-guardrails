@@ -57,19 +57,24 @@ steps below, then turn it back on.
 
 - With networking off, ask the agent: *"Propose a plan to run `touch /tmp/dry-run-marker`, scope:
   targets=dry-run, actions=edit, ttl=10 minutes."*
-- Agent shows: the proposal is reported as sent, OR — if you are running the version from this dry run's PR — a
-  plain message that Telegram could not be reached and the proposal was recorded; either way, nothing executed.
+- Agent shows: a reason that Telegram could not be reached and the proposal was recorded — something like
+  *"keeper: could not reach Telegram to send the plan for approval; the proposal was recorded, retry once it
+  answers again."* Not "sent to the human": nothing reached you, and the agent must not be told otherwise.
+  Nothing executed either way.
 - You see on Telegram: nothing yet (you have no network either, but that is beside the point: the daemon's own
   outbound call is what is being tested).
 - Ask the agent: *"Run `touch /tmp/dry-run-marker`."* → still refused, same as step a.
 - Ask the agent: *"Run `ls`."* → still allowed. A read never depends on Telegram being reachable.
-- Turn networking back on. Within a minute or so, check Telegram: the plan card should now arrive (the daemon
-  retries on its own; you do not need to ask the agent to propose again). Approve it, then ask the agent to run
-  the command, and check it now works.
-- "Pass" means: at every point above the agent was never left stuck with changes silently allowed, reads kept
-  working throughout, and the moment the network came back the daemon recovered on its own without a restart.
-- Failure → rollback: a change was allowed while the network was down; the agent was told a plan reached you when
-  it could not have; after reconnecting, the daemon never recovered without a manual restart.
+- Turn networking back on. The daemon's own polling recovers on its own within a few seconds — no restart
+  needed — but the proposal that failed above is **not** retried automatically: keeperd does not resend a
+  failed `send_plan()`. Ask the agent to propose the same plan again. This time the card arrives. Approve it,
+  then ask the agent to run the command, and check it now works.
+- "Pass" means: the agent was told the plan could **not** be sent while the network was down (not that it was
+  sent); no change was ever allowed during the outage; reads kept working throughout; the daemon's polling
+  recovered without a restart; a fresh proposal after reconnecting went through normally.
+- Failure → rollback: a change was allowed while the network was down; the agent was told a plan reached you
+  when it could not have; polling never recovered without a manual restart; the second proposal (after
+  reconnecting) also failed to reach you with the network back up.
 
 ## f. Stop
 
