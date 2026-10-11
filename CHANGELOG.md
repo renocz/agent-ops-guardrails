@@ -39,6 +39,11 @@ Next: one week of the keeper in block mode, after a dry run of refusal, approval
   under `/tmp`, never a restart, a delete or a push) — plus the rollback from keeper/README.md and when to use
   it. The daemon-down and `/summary` scenarios are machine-internal and already covered by
   `test_block_dryrun.py` in CI, so the checklist points to that instead of repeating it.
+  - **Fixed on owner review of PR #8: step e promised a retry that does not exist.** It said the daemon "retries
+    on its own" after reconnecting, and that the agent would report the plan as sent either way. Neither
+    matches the code: a failed `send_plan()` is never retried, and the agent is correctly told Telegram could
+    not be reached. Rewritten to ask the agent to propose again by hand after reconnecting, and "pass" now
+    requires being told the plan could NOT be sent during the outage, not that it was.
 - **keeper: the installed hook's environment is locked, and now tested (11/10).** `KEEPER_TEST_MODE` /
   `KEEPER_SOCKET_FOR_TESTS` in `keeper_client.py` are safe only because `install-keeper.sh` runs the hook and the
   `keeper-propose`/`keeper-status` wrappers with `/usr/bin/env -i … -I`, an empty environment a project's
