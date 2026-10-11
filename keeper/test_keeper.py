@@ -807,7 +807,16 @@ class LogSummary(Base):
         self.k.command(STRANGER, CHAT, "/summary")
         text = self.summary()
         self.assertIn("Telegram errors: 2", text)
+        self.assertIn("  URLError 1, at-start 1", text)
         self.assertIn("unknown socket peers 1, strangers on Telegram 2", text)
+
+    def test_telegram_error_types_are_validated(self):
+        for err in ("URLError", "URLError", "HTTPError", "bad type: secret=x", 42):
+            self.k.log({"event": "telegram-error", "error": err})
+        text = self.summary()
+        self.assertIn("Telegram errors: 5", text)
+        self.assertIn("  URLError 2, <other> 2, HTTPError 1", text)
+        self.assertNotIn("secret", text)
 
     def test_the_summary_is_asked_for_in_the_owners_language(self):
         k = keeperd.Keeper(dict(self.cfg, lang="fr", mode="observe", state_dir=os.path.join(self.dir, "fr")), self.bot,
