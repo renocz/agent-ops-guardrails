@@ -71,6 +71,38 @@ go-gate's [simulation](go-gate/README.md#our-numbers-simulation-before-installin
 
 These are one person's field notes, not a benchmark.
 
+## How this compares
+
+As read on 2026-10-11, from each project's own README/landing page or primary documentation (no blog posts, no
+sponsored write-ups). Quotes are paraphrased from the cited page; "not verified" means the page does not say and no
+other primary source was checked. These are young, mostly single-maintainer projects, including this one: none of
+this is an endorsement, and a thin or missing cell is not evidence of absence, only that the page does not say.
+
+| Project | Approval lives | Covers | Granularity | Out-of-band channel | Observe mode | Audit log | Secrets kept from the model |
+|---|---|---|---|---|---|---|---|
+| **keeper** (this repo) | Separate user (`_keeper`/`keeper` daemon); go-gate alone is same-process | Every tool call, via go-gate's classifier | Per plan (scope + TTL), checked call by call | Yes — a second Telegram bot the agent cannot read | Yes, default | Plain JSON lines (`log.jsonl`); not hash-chained or signed | **No.** Output filtering is secret-guard's job, in the agent's own process (keeper/README.md, "What the keeper does and does not guarantee") |
+| [tarides/sudo-proxy](https://github.com/tarides/sudo-proxy) | Same terminal as the human approver; a separate machine when used over SSH | Its own `execute` tool (shell), not other tool calls | Per command, no auto-approve | No — the keypress is in the same terminal flow, not a separate channel | Not documented | Only with `-v`; format not documented | Yes, claimed: no password stored, "sanitized allowlist" environment |
+| [luisgf/infrabroker](https://github.com/luisgf/infrabroker) | Separate process (`cmd/signer`) in server mode; same process in local/quickstart mode | SSH and Kubernetes only | Per command (SSH); per verb/resource/namespace (k8s) | Yes, an optional control-plane `/v1/approvals/{id}` endpoint (channel not named) | Yes, action budgets ("observe or enforce"); dry-run for commands | Yes, strong: append-only, Ed25519-signed, SHA-256-chained | Yes, explicit: "nothing enters the model's context" |
+| [BrightbeamAI/chap](https://github.com/BrightbeamAI/chap) | Not specified — coordinator can be "embedded in your own process or run as a server" | Work artefacts (diffs, tasks, reviews); an MCP gate exists but its scope isn't detailed | Per artefact (e.g. a diff), not per command | Not described | Yes, named ("shadow and trial modes"), no details given | Yes, strong: hash-chained, optional transparency log | Not verified |
+| [lacs-project/sysknife](https://github.com/lacs-project/sysknife) | Separate process **and** separate user (privileged daemon) | A catalogue of 192 typed actions only — "the AI never supplies a command" (though some actions still run via `sh -c`, built by SysKnife itself) | Per step, with a transaction id; `--yes` can skip up to a risk ceiling | Yes, the terminal ("a channel the model does not sit on"); Telegram is roadmap only | `--dry-run` (plan only) and a read-only observer role | Yes, strong: hash-chained SQLite/Postgres, Ed25519-signed | Not verified |
+| [OthmaneBlial/term_mcp_deepseek](https://github.com/OthmaneBlial/term_mcp_deepseek) | Local web UI on the same machine (`127.0.0.1:8000`); not stated as a separate OS user | Shell commands ("parsed without a shell"); coverage of non-shell tool calls not verified | Attaches to a versioned plan, not clearly per command | Not documented — approval is in the same local UI | `inspect` mode is read-only by default, but the README does not say it blocks execution | Yes: signed receipts per action | Not verified |
+| [Proofpane](https://github.com/Proofpane/releases) | Local MCP daemon on the same machine (stdio); **daemon is closed-source** | Claims coding agents, workflow tools and LLM APIs; the daemon itself ships 13 tools and its own `coverage` command admits "ungoverned" paths exist | Per call, claimed | "Pause for a human" / "human-approval gates" mentioned, channel not documented | Not documented | Claimed: SHA-256 hash-chained, Ed25519-anchored — **not verifiable, the daemon's code is proprietary** | Claimed for the daemon's mediated tools — **not verifiable, closed-source** |
+| LangGraph `interrupt()` — **not verified (official docs unreachable on 2026-10-11)** ([docs](https://docs.langchain.com/oss/python/add-human-in-the-loop); human-in-the-loop pattern used in NirDiamant/agents-towards-production's `tutorials/arcade-secure-tool-calling`) | **Same process as the agent.** The canonical example pauses with an `InMemorySaver` checkpointer — in-memory, not persisted — and resumes via a `Command` sent into that same thread | Whatever node the developer wraps in `interrupt()`; not an automatic gate over every tool call | Per interrupt point, as placed by the developer — no built-in per-plan concept | **No.** Resuming means calling back into the same process/thread; no separate channel is built in | Not a built-in concept | Not a built-in concept — would have to be custom-built on top of checkpointer state | Not addressed by the primitive; left to the application |
+
+**Where others are stronger than this project, plainly:** infrabroker, sysknife and (on paper) chap and Proofpane
+sign and hash-chain their audit log; keeper's `log.jsonl` is a plain, unsigned file an operator with disk access
+could edit. sysknife's typed-action catalogue is a stronger guarantee than go-gate's heuristic classifier — "the AI
+never supplies a command" closes a whole class of disguise this project can only chase case by case (see
+[go-gate/test_disguise.py](go-gate/test_disguise.py)). infrabroker states outright that secrets never enter the
+model's context; this project does not make that claim for keeper itself, only for secret-guard, which runs
+in-process.
+
+**Not verified:** sysknife and term_mcp_deepseek make no claim about secrets reaching the model; chap gives no
+detail on its out-of-band channel, MCP-gate scope or model secrecy; Proofpane's audit-log and secret-masking claims
+could not be checked past its README, since the daemon implementing them is proprietary; the whole LangGraph
+`interrupt()` row rests on a secondary summary of the official docs (a search result quoting them), not a direct
+read — `docs.langchain.com` could not be reached from this environment on 2026-10-11, checked three times.
+
 ## License
 
 MIT. Personal project by [renocz](https://github.com/renocz).

@@ -17,7 +17,7 @@ Anything opaque (python -c, running a script, eval, variables as commands) is a 
 
 classify(tool_name, tool_input) -> (kind, detail) with kind in {"read", "talk", "change", "opaque"}.
 """
-import importlib.util, os, re, shlex, sys
+import importlib.util, os, re, shlex, sys, urllib.parse
 
 
 def _load_splitter():
@@ -710,14 +710,49 @@ ACTION_LAST = {"run", "exec", "execute", "restart", "reboot", "shutdown", "start
                "reset", "refresh", "scan", "rescan", "sync", "import", "deploy", "update", "upgrade", "install", "command"}
 
 
+def _unquote(s):
+    """Best-effort percent-decoding."""
+    try:
+        return urllib.parse.unquote(s)
+    except Exception:
+        return s
+
+
+def _unquote_stable(s, rounds=3):
+    """Percent-decode up to `rounds` times, returning (text, converged). One round alone decodes %72estart but not
+    double encoding (%2572estart) or an encoded separator (%2F, %3F) that only becomes a real path/query boundary
+    once its own %25/%3 wrapper is peeled off first. Bounded so a crafted string cannot force unbounded work;
+    `converged` is False when decoding was STILL changing after the bound, so the caller can refuse to match
+    half-decoded text and fail closed instead (owner review, 11/10 and council of 11/10)."""
+    for _ in range(rounds):
+        decoded = _unquote(s)
+        if decoded == s:
+            return s, True
+        s = decoded
+    return s, False
+
+
 def is_action_url(arg):
     """A GET that can change state: a webhook or trigger anywhere in the path, an action word as the last path
-    segment (/api/v1/restart, not /api/sync/status), or an action-style query parameter (?action=delete)."""
-    m = re.search(r"://[^/\s?#]*(/[^\s?#]*)?(\?[^\s#]*)?", arg.strip("'\""))
+    segment (/api/v1/restart, not /api/sync/status; an extension does not save it, /restart.php still counts; a
+    servlet-style path parameter does not either, /restart;jsessionid=X still counts), or an action-style query
+    parameter (?action=delete). The whole URL is decoded to a fixed point FIRST, then re-split into path and
+    query on the now-real `/` `?` `#`: decoding each piece after it is already split cannot reveal a separator
+    that moves where the path ends and the query begins. Decoding that is still changing after the bound is
+    never matched half-decoded: treated as an action URL outright (owner review, 11/10 and council of 11/10)."""
+    s, converged = _unquote_stable(arg.strip("'\""))
+    if not converged:
+        return True
+    m = re.search(r"://[^/\s?#]*(/[^\s?#]*)?(\?[^\s#]*)?", s)
     if not m:
         return False
-    segs = [x.lower() for x in (m.group(1) or "").split("/") if x]
-    if any(x in ACTION_ANYWHERE for x in segs) or (segs and segs[-1] in ACTION_LAST):
+    # a `;` inside a path segment starts servlet-style matrix parameters (`;jsessionid=…`), which containers ignore
+    # when routing: stripped before comparing, so `/x/restart;a=1` still reaches the action word "restart".
+    segs = [p.split(";", 1)[0].lower() for p in (m.group(1) or "").split("/") if p]
+    segs = [x for x in segs if x]
+    last = segs[-1] if segs else ""
+    last_noext = re.sub(r"\.[A-Za-z0-9]{1,8}$", "", last)
+    if any(x in ACTION_ANYWHERE for x in segs) or last in ACTION_LAST or last_noext in ACTION_LAST:
         return True
     return bool(re.search(r"[?&](action|cmd|command|op|do|method)=", m.group(2) or "", re.I))
 
@@ -952,6 +987,11 @@ MCP_READ = re.compile(r"__(get|list|search|read|query|find|scrape|fetch|describe
 # External audit of v0.8 (07/10): `mcp__lab__get_and_delete_secret` was a read because it starts with get.
 MCP_WRITE = re.compile(r"(delete|remove|drop|purge|destroy|write|update|upsert|create|insert|set|send|post|put|patch|exec|"
                        r"run|kill|reset|move|rename|upload|trash|revoke|rotate|restart|stop|start|deploy|apply|commit)", re.I)
+# and/then/or fused with no separator onto a write verb (`anddelete`), wherever that pair lands in the method name
+# (owner review, 11/10): `get_itemanddelete`, `get_item_anddelete`, `listanddelete_item`. Anchored to the connector,
+# not a bare substring search, so an object noun that happens to contain a verb's letters (`list_commits`,
+# `get_check_run`) is never touched: a connector word never spells out by accident the way a verb's letters can.
+MCP_CONNECTOR_WRITE = re.compile(r"(?:and|then|or)(?:" + MCP_WRITE.pattern[1:-1] + r")", re.I)
 def _mcp_method(tool):
     """The method of an MCP tool, without the server name some servers repeat in front of it: `firecrawl_search` on
     the Firecrawl server is `search`. Only a first word contained in the server segment is dropped."""
@@ -966,10 +1006,21 @@ def _mcp_method(tool):
 
 def mcp_writes(method):
     """A write verb as a verb of the method name: its first word, or a word after and/then/or (`get_and_delete_x`).
-    `get_commit` or `list_settings` name an object, not an action (Gemini audit of v0.9)."""
+    `get_commit` or `list_settings` name an object, not an action (Gemini audit of v0.9).
+    Two ways a verb still hides with no separator to split on, both narrow on purpose so an object noun is never
+    caught by accident (owner review, 11/10):
+    - the WHOLE method is one run-on word (`getanddeleteitem`, `listdeletefiles`): searched for any write verb,
+      since there is no word left that could be an innocent object for it to collide with;
+    - and/then/or glued straight onto a write verb with no separator, in any word of a method that does split
+      (`get_itemanddelete`, `listanddelete_item`): a connector spelled out by coincidence inside an object word
+      (`list_commits`, `get_check_run`) essentially never happens, so this one is safe to search everywhere."""
     words = [w.lower() for w in re.split(r"[_\-.]|(?<=[a-z])(?=[A-Z])", method) if w]
     verbs = words[:1] + [words[i + 1] for i, w in enumerate(words[:-1]) if w in ("and", "then", "or")]
-    return any(MCP_WRITE.fullmatch(v) for v in verbs)
+    if any(MCP_WRITE.fullmatch(v) for v in verbs):
+        return True
+    if len(words) == 1 and MCP_WRITE.search(words[0]):
+        return True
+    return any(MCP_CONNECTOR_WRITE.search(w) for w in words)
 
 
 BROWSER_READ_ACTIONS = {"screenshot", "scroll", "zoom", "hover", "wait", "mouse_move", "scroll_to"}
@@ -1000,8 +1051,13 @@ def classify(tool, tool_input):
     if TALK_TOOLS.search(tool):
         return "talk", ""
     if tool.startswith("mcp__"):
+        full_method = tool.split("__")[-1]
         method = _mcp_method(tool)
-        if MCP_READ.search("__" + method) and not mcp_writes(method):
+        # council of 11/10: _mcp_method can drop the method's first word when it names the server; a hostile
+        # server picks its own name, so that dropped word can itself be a write verb (`mcp__delete__delete_search`
+        # strips to `search`). A write verb in EITHER form makes it a change; an empty method (nothing left after
+        # the drop, or an empty method to begin with) is never a read either.
+        if method and MCP_READ.search("__" + method) and not mcp_writes(method) and not mcp_writes(full_method):
             url = tool_input.get("url") if isinstance(tool_input, dict) else None
             if isinstance(url, str) and is_action_url(url):     # a fetch of a webhook or an action URL changes state
                 return "change", f"{tool} (action URL)"
