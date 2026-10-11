@@ -419,6 +419,365 @@ class InstallerLang(unittest.TestCase):
         self.assertIsNone(cfg)
 
 
+def fake_secrets():
+    """Fake secrets, assembled at run time so that secret scanners stay quiet on this file."""
+    return {"github": "gh" + "p_" + "A1b2C3d4E5f6G7h8I9j0" * 2, "aws": "AK" + "IA" + "ABCDEFGHIJKLMNOP",
+            "openai": "sk" + "-" + "Zq7Zq7Zq7Zq7Zq7Zq7Zq7Zq7", "jwt": "ey" + "Jhbgci" + "OiJIUzI1NiJ9.ey" + "Jzdwii" + "OiIxMjM0NTY3ODkwIn0.abc",
+            "bot": "1234567890" + ":" + "AAH" + "x" * 33, "url": "https://user:hunter" + "22@host.example/x",
+            "pem": "-----BEGIN RSA PRIVATE KEY-----\nMIIfake\n-----END RSA PRIVATE KEY-----"}
+
+
+class LogSummary(Base):
+    """`/summary`: what the owner reads about the keeper's log. Counts and shapes, never arguments, never a secret."""
+
+    def setUp(self):
+        super().setUp()
+        self.k.cfg["mode"] = "observe"
+
+    def summary(self, text="/summary", k=None):
+        out = (k or self.k).command(OWNER, CHAT, text)
+        self.assertIsNotNone(out, text)
+        for chunk in out:
+            self.assertLess(len(chunk), 4000)
+        return "\n".join(out)
+
+    def deny(self, *cmds, sid="s1"):
+        for cmd in cmds:
+            self.k.check(sid, *bash(cmd))
+
+    def log_at(self, days_ago, rec):
+        self.clock.t -= days_ago * 86400
+        self.k.log(rec)
+        self.clock.t += days_ago * 86400
+
+    def test_log_is_stamped_by_the_injected_clock(self):
+        self.k.log({"event": "x"})
+        with open(self.k.log_path) as f:
+            at = json.loads(f.readline())["at"]
+        self.assertEqual(keeperd.event_time({"at": at}), self.clock.t)
+
+    def test_counts_by_tool_category_and_shape(self):
+        self.deny("docker restart web", "docker restart db", "docker restart db", "rm -rf /srv/x")
+        self.k.check("s1", "Write", {"file_path": "/srv/app/a.py", "content": "x"})
+        text = self.summary()
+        self.assertIn("Would-deny: 5 | Denied: 0 | Allowed under an approved plan: 0", text)
+        self.assertIn("By tool: Bash 4, Write 1", text)
+        self.assertIn("By category: deploy 3, delete 1, edit 1", text)
+        self.assertIn("1. 3× docker … [deploy]", text)
+        self.assertIn("rm … [delete]", text)
+        self.assertIn("Write … [edit]", text)
+
+    def test_block_mode_counts_denied(self):
+        self.k.cfg["mode"] = "block"
+        self.deny("docker restart web")
+        text = self.summary()
+        self.assertIn("Would-deny: 0 | Denied: 1", text)
+        self.assertIn("mode block", text)
+
+    def test_allowed_under_an_approved_plan(self):
+        self.approve("id=p1 ; targets=web ; actions=deploy ; ttl=30")
+        self.assertTrue(self.allowed(*bash("docker restart web")))
+        self.assertIn("Allowed under an approved plan: 1", self.summary())
+
+    def test_plans_proposed_approved_rejected_expired(self):
+        self.approve("id=a ; actions=edit", sid="A")
+        ok, no = self.plan("id=b ; actions=edit", sid="B")
+        self.k.decide(OWNER, CHAT, no)
+        late, _ = self.plan("id=c ; actions=edit", sid="C")
+        self.clock.t += 121 * 60
+        self.k.decide(OWNER, CHAT, late)
+        self.assertIn("Plans: proposed 3, approved 1, rejected 1, expired 1", self.summary())
+
+    def test_window_is_seven_days_and_the_argument_narrows_it(self):
+        self.log_at(8, {"event": "would-deny", "tool": "Bash", "category": "git", "shape": "git … [git]"})
+        self.log_at(3, {"event": "would-deny", "tool": "Bash", "category": "edit", "shape": "tee … [edit]"})
+        self.deny("docker restart web")
+        default = self.summary()
+        self.assertIn("last 7 day(s)", default)
+        self.assertIn("Would-deny: 2", default)                      # today and 3 days ago, not 8
+        self.assertIn("Would-deny: 1", self.summary("/summary 1"))
+        self.assertIn("Would-deny: 3", self.summary("/summary 30"))
+        self.assertIn("last 30 day(s)", self.summary("/summary 99"))   # clamped
+        self.assertIn("last 1 day(s)", self.summary("/summary 0"))
+
+    def test_alias_bot_suffix_and_case(self):
+        for text in ("/resume", "/summary@my_keeper_bot", "/SUMMARY", "  /summary  ", "/resume 3"):
+            self.assertTrue(self.k.command(OWNER, CHAT, text), text)
+
+    def test_nothing_else_is_a_command(self):
+        for text in ("hello", "/start", "/summaryx", "/summary 1 2", "/summary; ls", "summary", "", "/ summary",
+                     "approve:" + "0" * 12 + ":" + "0" * 16, "GO", "/summary\n/summary"):
+            self.assertIsNone(self.k.command(OWNER, CHAT, text), text)
+        self.assertIsNone(self.k.command(OWNER, CHAT, None))
+        self.assertIsNone(self.k.command(OWNER, CHAT, 42))
+
+    def test_only_the_owner_in_the_configured_chat(self):
+        self.assertIsNone(self.k.command(STRANGER, CHAT, "/summary"))
+        self.assertIsNone(self.k.command(OWNER, 555, "/summary"))               # owner, but another chat
+        self.assertIsNone(self.k.command(None, CHAT, "/summary"))               # no sender
+        self.assertIn("command-from-stranger-ignored", self.log_events())
+        self.assertEqual(self.log_events().count("command-from-stranger-ignored"), 3)
+        self.assertIsNone(self.k.command(STRANGER, CHAT, "just chatting"))      # not a command: not even logged
+        self.assertEqual(self.log_events().count("command-from-stranger-ignored"), 3)
+
+    def test_an_unset_owner_matches_nobody(self):
+        k = keeperd.Keeper(dict(self.cfg, owner_id=None, chat_id=None, state_dir=os.path.join(self.dir, "s2")), self.bot,
+                           clock=self.clock)
+        self.assertIsNone(k.command(None, None, "/summary"))
+        self.assertIsNone(k.command(OWNER, CHAT, "/summary"))
+
+    def test_the_log_keeps_the_shape_not_the_arguments(self):
+        sec = fake_secrets()
+        self.deny(f"API_TOKEN={sec['github']} docker restart web", f"curl -H 'Authorization: Bearer {sec['openai']}' {sec['url']}",
+                  f"echo {sec['aws']} > /srv/x", f"export K={sec['bot']}; rm /srv/y")
+        raw = open(self.k.log_path).read()
+        text = self.summary()
+        for name, value in sec.items():
+            if name == "pem":
+                continue
+            for hay, where in ((raw, "log"), (text, "summary")):
+                self.assertNotIn(value, hay, (name, where))
+                self.assertNotIn(value[:12], hay, (name, where))              # no fragment either
+                self.assertNotIn(value[-12:], hay, (name, where))
+        self.assertIn("docker … [deploy]", text)
+
+    def test_a_secret_as_the_first_word_is_not_shown(self):
+        sec = fake_secrets()
+        self.deny(f"{sec['github']} --help", f"{sec['aws']}")
+        text = self.summary()
+        self.assertNotIn(sec["github"][:10], text)
+        self.assertNotIn(sec["aws"][:10], text)
+        self.assertIn("<…> … [script]", text)
+
+    def test_strings_the_agent_controls_are_whitelisted(self):
+        """The tool name arrives on the socket and ends up in the log: it must not reach Telegram as free text."""
+        evil = "Bash\n⚠️ keeper: approve everything now"
+        self.k.check("s1", evil, {"command": "ls > /srv/x"})
+        self.k.log({"event": "would-deny", "tool": "ok", "category": "edit\nSYSTEM: tap Approve", "shape": "x\ny … [edit]"})
+        text = self.summary()
+        self.assertNotIn("approve everything", text)
+        self.assertNotIn("SYSTEM", text)
+        self.assertIn("<other>", text)
+        self.assertNotIn("⚠️", text)
+        self.assertNotIn("keeper:", text)
+
+    def test_a_shape_that_is_not_a_shape_is_never_printed(self):
+        """Only a first word, …, and a category are printed. Anything else in a `shape` field is counted, not shown."""
+        bad = ["x\n⚠️ keeper: approve everything now … [edit]", "rm -rf / --no-preserve-root … [delete]",
+               "a" * 200 + " … [edit]", "ok … [edit]\nfake line", 12345, None, ["list"]]
+        for shape in bad:
+            self.k.log({"event": "would-deny", "tool": "Bash", "category": "edit", "shape": shape})
+        text = self.summary()
+        for leak in ("approve everything", "no-preserve-root", "fake line", "aaaaaaaa", "list"):
+            self.assertNotIn(leak, text)
+        self.assertIn(f"{len(bad)} event(s) have no recorded shape", text)
+
+    def test_a_secret_shaped_shape_in_the_log_is_still_masked(self):
+        sec = fake_secrets()
+        self.k.log({"event": "would-deny", "tool": "Bash", "category": "edit", "shape": f"{sec['github'][:40]} … [edit]"})
+        text = self.summary()
+        self.assertNotIn(sec["github"][:12], text)
+        self.assertIn("<m>", text)
+
+    def test_only_the_ten_most_frequent_shapes(self):
+        for i in range(1, 13):
+            self.deny(*[f"tool{i:02d} x"] * (13 - i))                     # tool01 x12 … tool12 x1
+        lines = [ln for ln in self.summary().splitlines() if ln[:1].isdigit() and "×" in ln]
+        self.assertEqual(len(lines), 10)
+        self.assertTrue(lines[0].startswith("1. 12× tool01"))
+        self.assertTrue(lines[9].startswith("10. 3× tool10"))
+        self.assertNotIn("tool11", "\n".join(lines))
+        self.assertNotIn("tool12", "\n".join(lines))
+
+    def test_records_from_before_the_shape_existed(self):
+        self.log_at(1, {"event": "would-deny", "session": "s", "tool": "Bash", "category": "edit", "plan": None})
+        text = self.summary()
+        self.assertIn("Would-deny: 1", text)
+        self.assertIn("1 event(s) have no recorded shape", text)
+        self.assertIn("No shape recorded yet.", text)
+
+    def test_empty_missing_and_unreadable_logs(self):
+        self.assertIn("No event in this window.", self.summary())               # no log file yet
+        self.k.command(OWNER, CHAT, "/summary")
+        self.assertIn("No event in this window.", self.summary())               # summary-sent is not an event
+        os.remove(self.k.log_path)
+        os.mkdir(self.k.log_path)                                               # a log that cannot be read
+        self.assertIn("The log cannot be read.", self.summary())
+
+    def test_garbage_lines_in_the_log_are_skipped(self):
+        self.deny("docker restart web")
+        with open(self.k.log_path, "a") as f:
+            f.write("not json\n[1, 2]\n{\"event\": \"would-deny\"}\n{\"at\": 5}\n\x00\xff\n")
+        self.assertIn("Would-deny: 1", self.summary())
+
+    def test_telegram_errors_and_ignored_attempts(self):
+        self.k.log({"event": "telegram-error", "error": "URLError"})
+        self.k.log({"event": "telegram-error-at-start"})
+        self.k.log({"event": "socket-peer-refused", "uid": 4242})
+        self.k.decide(STRANGER, CHAT, "stop:all")
+        self.k.command(STRANGER, CHAT, "/summary")
+        text = self.summary()
+        self.assertIn("Telegram errors: 2", text)
+        self.assertIn("unknown socket peers 1, strangers on Telegram 2", text)
+
+    def test_the_summary_is_asked_for_in_the_owners_language(self):
+        k = keeperd.Keeper(dict(self.cfg, lang="fr", mode="observe", state_dir=os.path.join(self.dir, "fr")), self.bot,
+                           clock=self.clock)
+        k.check("s1", *bash("docker restart web"))
+        text = self.summary(k=k)
+        self.assertIn("Résumé du keeper : 7 dernier(s) jour(s), mode observe", text)
+        self.assertIn("Refus simulés : 1", text)
+        self.assertIn("Plans : 0 proposé(s)", text)
+
+    def test_reading_the_log_never_waits_for_the_approval_lock(self):
+        """The hook's check holds the lock; a slow log read must not be able to stall it (and the reverse)."""
+        self.k.lock.acquire()
+        try:
+            result = []
+            th = threading.Thread(target=lambda: result.append(self.k.command(OWNER, CHAT, "/summary")), daemon=True)
+            th.start()
+            th.join(5)
+            self.assertFalse(th.is_alive(), "command() waited for keeper.lock")
+        finally:
+            self.k.lock.release()
+        self.assertTrue(result and result[0])
+
+    def test_a_very_large_log_is_read_from_its_end(self):
+        old = keeperd.LOG_TAIL_MAX
+        keeperd.LOG_TAIL_MAX = 4096
+        try:
+            for _ in range(200):
+                self.k.log({"event": "would-deny", "tool": "Bash", "category": "edit", "shape": "x … [edit]"})
+            n = int(self.summary().split("Would-deny: ")[1].split(" ")[0])
+            self.assertTrue(0 < n < 200, n)                                       # the end of the file only
+        finally:
+            keeperd.LOG_TAIL_MAX = old
+
+    def test_split_message_stays_under_the_limit(self):
+        text = "\n".join(f"line {i} " + "x" * 50 for i in range(500))
+        chunks = keeperd.split_message(text)
+        self.assertGreater(len(chunks), 1)
+        self.assertTrue(all(len(c) <= keeperd.TELEGRAM_CHUNK for c in chunks))
+        self.assertEqual("\n".join(chunks), text)
+        long_line = "y" * 10000
+        pieces = keeperd.split_message(long_line)
+        self.assertTrue(all(len(c) <= keeperd.TELEGRAM_CHUNK for c in pieces))
+        self.assertEqual("".join(pieces), long_line)
+        self.assertEqual(keeperd.split_message(""), [""])
+
+    def test_mask_text(self):
+        sec = fake_secrets()
+        for name, value in sec.items():
+            masked = keeperd.mask_text(f"before {value} after")
+            self.assertNotIn(value[:14], masked, name)
+            self.assertIn("<m>", masked, name)
+            self.assertTrue(masked.startswith("before ") or name == "url", name)
+        for text in ("API_KEY=" + "hunter" + "2", "token: abcdef123456", "--password supersecret", "password=Zq7Zq7 z",
+                     "Authorization: Bearer abcdef123456", "ssh://u:pw@h/", "a" * 5 + "1" * 30 + "b" * 5, "f" * 40):
+            self.assertIn("<m>", keeperd.mask_text(text), text)
+        for text in ("docker … [deploy]", "mcp__claude-in-chrome__computer", "Would-deny: 12 | Denied: 0", "1. 3× rm … [delete]",
+                     "mcp__plugin_telegram_telegram__reply 4", "<other>", "<…> … [script]"):
+            self.assertEqual(keeperd.mask_text(text), text)
+        once = keeperd.mask_text("x " + sec["github"])
+        self.assertEqual(keeperd.mask_text(once), once)                          # idempotent
+
+    def test_command_shape(self):
+        shape = keeperd.command_shape
+        self.assertEqual(shape("Bash", "docker restart web", "deploy"), "docker … [deploy]")
+        self.assertEqual(shape("Bash", "FOO=bar BAZ=1 /usr/bin/curl -X POST http://h", "api"), "curl … [api]")
+        self.assertEqual(shape("Bash", "( cd /tmp", "edit"), "cd … [edit]")
+        self.assertEqual(shape("Bash", "{ rm -rf x", "delete"), "rm … [delete]")
+        self.assertEqual(shape("Write", None, "edit"), "Write … [edit]")
+        self.assertEqual(shape("Bash", None, "script"), "Bash … [script]")
+        self.assertEqual(shape("Bash", "", "script"), "Bash … [script]")
+        self.assertEqual(shape("Bash", "weird\x00word x", "edit"), "<…> … [edit]")
+        self.assertEqual(shape("Bash", "ls", "Bad Category!"), "ls … [other]")
+        self.assertEqual(shape("x" * 100, None, "edit"), "<…> … [edit]")
+        self.assertLessEqual(len(shape("Bash", "a" * 40, "edit")), 80)
+        self.assertTrue(keeperd.SHAPE_FORMAT.fullmatch(shape("Bash", "git push", "git")))
+
+
+class TelegramCommands(Base):
+    """The bot side: `message` updates are asked for, routed to keeper.command, and nothing else is acted on."""
+
+    def setUp(self):
+        super().setUp()
+        token = os.path.join(self.dir, "bot.token")
+        with open(token, "w") as f:
+            f.write("0:FAKE-TOKEN-FOR-TESTS")
+        self.cfg["bot_token_file"] = token
+        self.tg = keeperd.TelegramBot(self.cfg)
+        self.calls = []
+        self.tg.api = lambda method, payload, timeout=40: (self.calls.append((method, payload)) or {"result": []})
+
+    def message(self, text, uid=OWNER, chat=CHAT, **extra):
+        return dict({"update_id": 7, "message": {"from": {"id": uid}, "chat": {"id": chat}, "text": text}}, **extra)
+
+    def sent(self):
+        return [p for m, p in self.calls if m == "sendMessage"]
+
+    def test_the_poll_asks_for_messages_and_button_presses(self):
+        self.tg.fetch_updates()
+        method, payload = self.calls[-1]
+        self.assertEqual(method, "getUpdates")
+        self.assertEqual(sorted(payload["allowed_updates"]), ["callback_query", "message"])
+
+    def test_the_owner_gets_the_summary_in_the_configured_chat(self):
+        self.k.check("s1", *bash("docker restart web"))
+        self.tg.handle_update(self.k, self.message("/summary"))
+        sent = self.sent()
+        self.assertEqual(len(sent), 1)
+        self.assertEqual(sent[0]["chat_id"], CHAT)
+        self.assertIn("Keeper summary", sent[0]["text"])
+        self.assertNotIn("reply_markup", sent[0])                              # no button on a summary
+        self.assertEqual(self.tg.offset, 8)
+
+    def test_a_stranger_gets_nothing(self):
+        self.tg.handle_update(self.k, self.message("/summary", uid=STRANGER))
+        self.tg.handle_update(self.k, self.message("/summary", chat=555))
+        self.assertEqual(self.calls, [])
+        self.assertEqual(self.log_events().count("command-from-stranger-ignored"), 2)    # both are "not the owner here"
+
+    def test_other_messages_are_ignored(self):
+        for upd in (self.message("hello"), self.message("/start"), self.message("GO"), {"update_id": 9},
+                    {"update_id": 9, "message": "text"}, {"update_id": 9, "message": {"photo": []}},
+                    {"update_id": 9, "message": {"text": "/summary"}}, {"update_id": 9, "edited_message": {"text": "/summary"}}):
+            self.tg.handle_update(self.k, upd)
+        self.assertEqual(self.calls, [])
+
+    def test_a_text_message_never_approves_anything(self):
+        ok, _ = self.plan("id=p1 ; actions=deploy")
+        for text in (ok, "approve " + ok, "GO", "/approve", f"/summary {ok}"):
+            self.tg.handle_update(self.k, self.message(text))
+        self.assertFalse(self.allowed(*bash("docker restart web")))
+
+    def test_button_presses_still_work(self):
+        ok, _ = self.plan("id=p1 ; targets=web ; actions=deploy ; ttl=30")
+        upd = {"update_id": 11, "callback_query": {"id": "cb1", "from": {"id": OWNER}, "data": ok,
+                                                   "message": {"chat": {"id": CHAT}, "message_id": 5}}}
+        self.tg.handle_update(self.k, upd)
+        methods = [m for m, _p in self.calls]
+        self.assertEqual(methods, ["answerCallbackQuery", "editMessageReplyMarkup", "sendMessage"])
+        self.assertEqual(self.calls[0][1]["text"], "approved for 30 min")
+        self.assertTrue(self.allowed(*bash("docker restart web")))
+
+    def test_a_stranger_button_press_is_answered_but_changes_nothing(self):
+        ok, _ = self.plan("id=p1 ; actions=deploy")
+        upd = {"update_id": 12, "callback_query": {"id": "cb2", "from": {"id": STRANGER}, "data": ok,
+                                                   "message": {"chat": {"id": CHAT}, "message_id": 5}}}
+        self.tg.handle_update(self.k, upd)
+        self.assertEqual([m for m, _p in self.calls], ["answerCallbackQuery"])     # no follow-up, buttons stay
+        self.assertFalse(self.allowed(*bash("docker restart web")))
+
+    def test_the_card_goes_out_in_the_configured_language(self):
+        fr = keeperd.TelegramBot(dict(self.cfg, lang="fr"))
+        fr.api = lambda method, payload, timeout=40: self.calls.append((method, payload))
+        ok, _ = self.plan("id=p1 ; actions=deploy")
+        fr.send_plan(*self.bot.plans[-1])
+        self.assertIn("Demande d'approbation", self.sent()[-1]["text"])
+        self.assertEqual(self.sent()[-1]["reply_markup"]["inline_keyboard"][0][0]["text"], "✅ Approuver")
+
+
 class Socket(Base):
     """The real socket and the real hook client, as separate processes."""
 
@@ -497,6 +856,30 @@ class Socket(Base):
             time.sleep(0.05)
         self.assertEqual(self.bot.plans[-1][0], "s1")
         self.assertEqual(self.bot.plans[-1][1]["plan"]["id"], "c1")
+
+    def test_the_log_summary_is_not_reachable_through_the_socket(self):
+        """/summary is for the human, on Telegram. No socket op returns it, whoever asks."""
+        self.k.cfg["mode"] = "observe"
+        self.k.check("s1", *bash("docker restart web"))
+        for op in ("summary", "resume", "/summary", "log", "log-summary", "logs", "command", "tally", "export", "dump",
+                   "status", "state", "approve", "propose"):
+            r = self.raw({"op": op, "session": "s1", "days": 7, "from_id": OWNER, "chat_id": CHAT, "text": "/summary"})
+            self.assertEqual(set(r), {"error"}, op)
+            self.assertNotIn("summary", json.dumps(r).lower().replace("unknown op", ""), op)
+        self.cfg["agent_uids"] = [os.getuid() + 12345]                              # a stranger gets a refusal, not data
+        r = self.raw({"op": "summary"})
+        self.assertEqual(set(r), {"decision", "reason"})
+        self.assertEqual(r["decision"], "deny")
+
+    def test_a_summary_command_run_by_the_agent_returns_no_data(self):
+        """Even as a Bash call checked by the hook, the answer is a decision and a reason, never log content."""
+        self.k.cfg["mode"] = "observe"
+        self.k.check("s1", *bash("docker restart web"))
+        for cmd in ("keeper-summary", "/summary", "sudo keeper-summary", "python3 -I /opt/agent-guardrails/lib/keeperd.py --summary"):
+            r = self.raw({"op": "check", "session": "s1", "tool": "Bash", "input": {"command": cmd}})
+            self.assertEqual(set(r), {"decision", "reason"}, cmd)
+            self.assertNotIn("docker", json.dumps(r), cmd)
+            self.assertNotIn("Keeper summary", json.dumps(r), cmd)
 
     def test_silent_client_does_not_block_others(self):
         idle = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
