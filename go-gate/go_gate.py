@@ -711,25 +711,42 @@ ACTION_LAST = {"run", "exec", "execute", "restart", "reboot", "shutdown", "start
 
 
 def _unquote(s):
-    """Best-effort percent-decoding, so is_action_url cannot be fooled by %72estart instead of restart (apex suite,
-    11/10). Decoding can't make a benign path look like an action one, since ACTION_ANYWHERE/ACTION_LAST/the query
-    keys are plain ASCII words with no percent-encoding of their own."""
+    """Best-effort percent-decoding."""
     try:
         return urllib.parse.unquote(s)
     except Exception:
         return s
 
 
+def _unquote_stable(s, rounds=3):
+    """Percent-decode up to `rounds` times, stopping as soon as a round changes nothing. One round alone decodes
+    %72estart but not double encoding (%2572estart) or an encoded separator (%2F, %3F) that only becomes a real
+    path/query boundary once its own %25/%3 wrapper is peeled off first. Bounded so a crafted string cannot force
+    unbounded work (owner review, 11/10: one round was not enough, see is_action_url)."""
+    for _ in range(rounds):
+        decoded = _unquote(s)
+        if decoded == s:
+            break
+        s = decoded
+    return s
+
+
 def is_action_url(arg):
     """A GET that can change state: a webhook or trigger anywhere in the path, an action word as the last path
-    segment (/api/v1/restart, not /api/sync/status), or an action-style query parameter (?action=delete)."""
-    m = re.search(r"://[^/\s?#]*(/[^\s?#]*)?(\?[^\s#]*)?", arg.strip("'\""))
+    segment (/api/v1/restart, not /api/sync/status; an extension does not save it, /restart.php still counts),
+    or an action-style query parameter (?action=delete). The whole URL is decoded to a fixed point FIRST, then
+    re-split into path and query on the now-real `/` `?` `#` `;`: decoding each piece after it is already split
+    cannot reveal a separator that moves where the path ends and the query begins (owner review, 11/10)."""
+    s = _unquote_stable(arg.strip("'\""))
+    m = re.search(r"://[^/\s?#]*(/[^\s?#]*)?(\?[^\s#]*)?", s)
     if not m:
         return False
-    segs = [_unquote(x).lower() for x in (m.group(1) or "").split("/") if x]
-    if any(x in ACTION_ANYWHERE for x in segs) or (segs and segs[-1] in ACTION_LAST):
+    segs = [x.lower() for x in re.split(r"[/;]", m.group(1) or "") if x]
+    last = segs[-1] if segs else ""
+    last_noext = re.sub(r"\.[A-Za-z0-9]{1,8}$", "", last)
+    if any(x in ACTION_ANYWHERE for x in segs) or last in ACTION_LAST or last_noext in ACTION_LAST:
         return True
-    return bool(re.search(r"[?&](action|cmd|command|op|do|method)=", _unquote(m.group(2) or ""), re.I))
+    return bool(re.search(r"[?&](action|cmd|command|op|do|method)=", m.group(2) or "", re.I))
 
 
 CURL_VALUE_OPTS = set("XdFTocuHeAbxmwrEyYzCPQD")  # curl short options that take a value (K handled separately: config file)
@@ -962,6 +979,11 @@ MCP_READ = re.compile(r"__(get|list|search|read|query|find|scrape|fetch|describe
 # External audit of v0.8 (07/10): `mcp__lab__get_and_delete_secret` was a read because it starts with get.
 MCP_WRITE = re.compile(r"(delete|remove|drop|purge|destroy|write|update|upsert|create|insert|set|send|post|put|patch|exec|"
                        r"run|kill|reset|move|rename|upload|trash|revoke|rotate|restart|stop|start|deploy|apply|commit)", re.I)
+# and/then/or fused with no separator onto a write verb (`anddelete`), wherever that pair lands in the method name
+# (owner review, 11/10): `get_itemanddelete`, `get_item_anddelete`, `listanddelete_item`. Anchored to the connector,
+# not a bare substring search, so an object noun that happens to contain a verb's letters (`list_commits`,
+# `get_check_run`) is never touched: a connector word never spells out by accident the way a verb's letters can.
+MCP_CONNECTOR_WRITE = re.compile(r"(?:and|then|or)(?:" + MCP_WRITE.pattern[1:-1] + r")", re.I)
 def _mcp_method(tool):
     """The method of an MCP tool, without the server name some servers repeat in front of it: `firecrawl_search` on
     the Firecrawl server is `search`. Only a first word contained in the server segment is dropped."""
@@ -977,13 +999,20 @@ def _mcp_method(tool):
 def mcp_writes(method):
     """A write verb as a verb of the method name: its first word, or a word after and/then/or (`get_and_delete_x`).
     `get_commit` or `list_settings` name an object, not an action (Gemini audit of v0.9).
-    With no separator or case boundary at all (`getanddeleteitem`), the word never splits, so the first-word check
-    above never sees the "delete": searched anywhere in that one run-on word instead (apex suite, 11/10)."""
+    Two ways a verb still hides with no separator to split on, both narrow on purpose so an object noun is never
+    caught by accident (owner review, 11/10):
+    - the WHOLE method is one run-on word (`getanddeleteitem`, `listdeletefiles`): searched for any write verb,
+      since there is no word left that could be an innocent object for it to collide with;
+    - and/then/or glued straight onto a write verb with no separator, in any word of a method that does split
+      (`get_itemanddelete`, `listanddelete_item`): a connector spelled out by coincidence inside an object word
+      (`list_commits`, `get_check_run`) essentially never happens, so this one is safe to search everywhere."""
     words = [w.lower() for w in re.split(r"[_\-.]|(?<=[a-z])(?=[A-Z])", method) if w]
     verbs = words[:1] + [words[i + 1] for i, w in enumerate(words[:-1]) if w in ("and", "then", "or")]
     if any(MCP_WRITE.fullmatch(v) for v in verbs):
         return True
-    return len(words) == 1 and bool(MCP_WRITE.search(words[0]))
+    if len(words) == 1 and MCP_WRITE.search(words[0]):
+        return True
+    return any(MCP_CONNECTOR_WRITE.search(w) for w in words)
 
 
 BROWSER_READ_ACTIONS = {"screenshot", "scroll", "zoom", "hover", "wait", "mouse_move", "scroll_to"}

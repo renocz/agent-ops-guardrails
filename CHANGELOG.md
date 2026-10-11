@@ -13,19 +13,30 @@ One version scheme: **a repository tag per release**. Components have no version
   versus keeper's plain `log.jsonl`; sysknife's typed-action catalogue versus go-gate's heuristic classifier), and
   marks cells "not verified" rather than guessing, including every claim that depends on Proofpane's closed-source
   daemon.
-- **go-gate: disguised-command test suite from the apex catalogue (11/10).** `go-gate/test_disguise.py` translates
-  encoding/decoding, Unicode look-alikes, quoting/splitting, indirection, substitution/redirection and path-trick
-  techniques (from NirDiamant/agents-towards-production's `tutorials/agent-security-apex/`, techniques only, not
-  its recommendations) into shell and MCP forms, calling `classify()` on strings only: no command is run, nothing
-  touches the network. Two real bypasses found and fixed, smallest change first, each proven by a test that fails
-  before the fix and a mutation check that breaks the fix and shows the test catch it:
+- **go-gate: disguised-command test suite from the apex catalogue (11/10, closed the class on a follow-up owner
+  review).** `go-gate/test_disguise.py` translates encoding/decoding, Unicode look-alikes, quoting/splitting,
+  indirection, substitution/redirection and path-trick techniques (from NirDiamant/agents-towards-production's
+  `tutorials/agent-security-apex/`, techniques only, not its recommendations) into shell and MCP forms, calling
+  `classify()` on strings only: no command is run, nothing touches the network. Two real bypasses found and
+  fixed, smallest change first, each proven by a test that fails before the fix and a mutation check that breaks
+  the fix and shows the test catch it. A follow-up owner review found both fixes closed their exact example but
+  not the class, so each was widened once more, measured against real tool names to rule out new false positives:
   - **`mcp_writes()`** only ever checked the first split word of an MCP method name, or a word right after
     and/then/or; a method with no separator or case boundary at all (`getanddeleteitem`) never splits, so the
-    embedded "delete" went unseen while the leading "get" still read as a read. It now also searches a single,
-    unsplit word for a write verb anywhere in it.
+    embedded "delete" went unseen while the leading "get" still read as a read. Closing the exact example: it also
+    searches a single, unsplit word for a write verb anywhere in it. Closing the class: a write verb still hid in
+    a non-first, non-whole-method word when and/then/or was fused onto it with no separator
+    (`get_itemanddelete`, `listanddelete_item`); it now also searches every word for that specific fusion. A
+    broader "any write verb anywhere in any word" rule was tried first and rejected: measured against 94 real
+    tool names from the GitHub, Google Drive, Slack and Chrome DevTools MCP servers, it misclassified
+    `get_commit`, `list_settings`, `get_check_run`, `list_commits` and `search_commits` as changes.
   - **`is_action_url()`** matched action words and query keys against the raw path and query text, so a
-    percent-encoded one (`%72estart`, `%77ebhook`, `%61ction=`) never spelled out the word it was checking for. It
-    now percent-decodes each path segment and the query string before matching.
+    percent-encoded one (`%72estart`, `%77ebhook`, `%61ction=`) never spelled out the word it was checking for.
+    Closing the exact example: it percent-decodes before matching. Closing the class: one round of decoding
+    missed double encoding (`%2572estart`), an encoded separator revealing a real `/` or `?` only after its own
+    wrapper is peeled off (`api%2Frestart`, `restart%3Fa`), and a file extension on the action word
+    (`restart.php`). It now decodes the whole URL to a fixed point (bounded at 3 rounds) before re-splitting path
+    from query on the now-real separators, and compares the last path segment with its extension stripped too.
 - **go-gate and keeper: first review of a week of observation (11/10).** 1,186 would-block events in go-gate and 414
   would-deny events in the keeper; most are real changes (python with subprocess, `sed -i`, `pct push`…), three
   classes were false positives:

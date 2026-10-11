@@ -73,7 +73,7 @@ These are one person's field notes, not a benchmark.
 
 ## How this compares
 
-As read on 11/10/2026, from each project's own README/landing page or primary documentation (no blog posts, no
+As read on 2026-10-11, from each project's own README/landing page or primary documentation (no blog posts, no
 sponsored write-ups). Quotes are paraphrased from the cited page; "not verified" means the page does not say and no
 other primary source was checked. These are young, mostly single-maintainer projects, including this one: none of
 this is an endorsement, and a thin or missing cell is not evidence of absence, only that the page does not say.
