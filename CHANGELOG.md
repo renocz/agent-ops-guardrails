@@ -4,6 +4,30 @@ One version scheme: **a repository tag per release**. Components have no version
 
 ## Unreleased (towards v1.0)
 
+- **go-gate and docs: council review of PR #6/#7, before v0.10 (11/10).** A multi-model council flagged four
+  items, owner-verified; fixed in commits of their own:
+  - **MCP: the server-prefix strip could erase a write verb.** `_mcp_method` drops the method's first word when
+    it matches the server segment, before `mcp_writes` ever ran — a hostile MCP server picks its own name, so
+    `mcp__delete__delete_search` stripped to the innocuous-looking `search`. `classify()` now also checks
+    `mcp_writes()` on the full, unstripped method; a write verb in either form is a change. An empty method
+    (nothing left after the drop, or empty to begin with) is also never a read.
+  - **`is_action_url()`, two leftovers.** A `/`-segment is now also split on its first `;` before comparing
+    (`restart;jsessionid=X` still reaches "restart" — containers route on the part before it and ignore the
+    rest). Percent-decoding that is still changing after the bounded rounds now returns True (an action URL)
+    outright, instead of matching whatever half-decoded text it got to.
+  - **Accepted false positive.** Comparing the last path segment with its extension stripped (added for
+    `restart.php`) means `https://h/status/sync.php` — a plausible read-only status page named "sync" — is now a
+    change too, since `sync` is one of the action words. Not fixed: the project's own rule is to classify as a
+    change when in doubt, and an allowlist of "safe" page names would need to be complete to be worth adding,
+    which a blocklist/allowlist of this shape never is (same reasoning as the awk/sed program checks elsewhere in
+    this file).
+  - **Symlinks under keeperd.** The agent's home being mode 750 means `_keeper` cannot traverse it, so
+    `git_repo_is_safe` cannot resolve a symlink inside a declared safe repo pointing at another repo, and
+    `_nested_git_between` skips what it cannot stat; such a symlink is then judged as the safe repo. Owner
+    decision pending — see docs/design-keeper.md, Known limits, once decided.
+  - The LangGraph `interrupt()` row in "How this compares" is marked **not verified**: `docs.langchain.com` could
+    not be reached from this environment (checked three times across two sessions), so the row still rests on a
+    secondary summary of the official docs, not a direct read.
 - **docs: "How this compares" — six peer projects and the LangGraph HITL pattern (11/10).** A dated table in
   README.md, sourced from each project's own README/docs only (no blog posts, no sponsored write-ups): tarides/
   sudo-proxy, luisgf/infrabroker, BrightbeamAI/chap, lacs-project/sysknife, OthmaneBlial/term_mcp_deepseek,
