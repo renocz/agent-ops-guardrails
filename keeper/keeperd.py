@@ -630,6 +630,12 @@ class TelegramBot:
     # so nothing the agent or a config file controls can redirect this. Production keeps the real values.
     API_BASE = "https://api.telegram.org"
     DEFAULT_TIMEOUT = 40
+    # send_plan() runs from serve()'s handler while a hook is still blocked reading the socket reply (its own
+    # timeout there is 10 s, see keeper_client.py's ask() and serve()'s connection.settimeout). A Telegram that
+    # hangs must give up and let the handler reply BEFORE that 10 s, or the client times out first, reports
+    # "daemon not reachable" (wrong: the daemon answered, just late), and the handler's reply then lands on a
+    # closed socket. Must stay well under that 10 s (owner review, 11/10).
+    HOOK_WAIT_TIMEOUT = 5
 
     def __init__(self, cfg):
         self.cfg = cfg
@@ -646,7 +652,8 @@ class TelegramBot:
 
     def send_plan(self, sid, p):
         text, kb = render_plan_card(self.lang, p)
-        self.api("sendMessage", {"chat_id": self.cfg["chat_id"], "text": text, "reply_markup": kb})
+        self.api("sendMessage", {"chat_id": self.cfg["chat_id"], "text": text, "reply_markup": kb},
+                 timeout=self.HOOK_WAIT_TIMEOUT)
 
     def send(self, text):
         self.api("sendMessage", {"chat_id": self.cfg["chat_id"], "text": text[:4000]})
