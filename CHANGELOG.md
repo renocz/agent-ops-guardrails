@@ -4,6 +4,21 @@ One version scheme: **a repository tag per release**. Components have no version
 
 ## Unreleased (towards v1.0)
 
+- **go-gate and keeper: first review of a week of observation (11/10).** 1,186 would-block events in go-gate and 414
+  would-deny events in the keeper; most are real changes (python with subprocess, `sed -i`, `pct push`…), three
+  classes were false positives:
+  - **`cd ~/repo && git status` was a script.** `cd` to `~/…`, `$HOME/…` or `${HOME}/…` is now resolved to the
+    agent's home, so the git read is judged against a declared safe repo. `~user`, other variables, globs and
+    `cd ~` alone stay unknown or are judged on the resolved directory (still opaque unless the home itself is declared).
+  - **MCP servers that repeat their name in the method** (`firecrawl_search` on the Firecrawl server) were never
+    reads. The repeated server word is dropped before the verb check, so `search` is a read and `monitor_create`,
+    `crawl` and `get_and_delete_x` stay changes. A read tool given an action URL (webhook, `/restart`) is a change,
+    as for curl.
+  - **`ffprobe`, `mediainfo` and `apt-mark showhold|showmanual|showauto`** are reads; `apt-mark hold` is not.
+  - Keeper: **idle long polls that time out** (`getUpdates`, 30 s) were logged as Telegram errors, 337 in 7 days.
+    They are now their own event and a separate line in `/summary`; no update is lost (the offset only moves after a
+    successful poll). `sendMessage` failures, which could delay an approval, stay errors.
+
 - **keeper: two fixes after the first reinstall (11/10).** The summary breaks Telegram errors down by exception type
   (a laptop asleep gives URLError, a bad token HTTPError), validated like the other printed names. The installer waits
   for launchd to unload the old service before bootstrapping the new one ("Bootstrap failed: 5" on macOS). It also

@@ -109,7 +109,8 @@ PVE_READ_CMDS = {"pvesm": {"status", "list"}, "pvecm": {"status", "nodes"}, "pve
                  "brew": {"list", "info", "outdated", "--version", "search", "deps", "leaves", "config", "doctor"},
                  "npm": {"ls", "list", "view", "outdated", "--version", "-v"}, "pip": {"list", "show", "freeze"},
                  "pip3": {"list", "show", "freeze"}, "apt": {"list", "show", "policy", "search"},
-                 "apt-cache": None, "dpkg": {"-l", "-L", "-s", "--list", "-S"}, "crontab": {"-l"},
+                 "apt-cache": None, "apt-mark": {"showhold", "showmanual", "showauto"},
+                 "ffprobe": None, "mediainfo": None, "dpkg": {"-l", "-L", "-s", "--list", "-S"}, "crontab": {"-l"},
                  "launchctl": {"list", "print"}, "security": {"find-generic-password", "find-internet-password"},
                  "gh": {"--version", "status"}, "claude": {"--version", "-v"}, "node": {"--version", "-v"},
                  "python3": {"--version", "-V"}, "python": {"--version", "-V"}, "perl": {"-v"},
@@ -354,7 +355,11 @@ def _cd_target(stmt):
     if not paths:
         return ("unknown",)                               # `cd` with no path = home, which is not a declared repo
     t = paths[0]
-    if t == "-" or t.startswith("~") or any(ch in t for ch in "$`*?"):
+    if t == "~" or t.startswith("~/"):                    # the agent's own home: HOME is the agent's, also under keeperd
+        t = os.path.expanduser(t)
+    else:
+        t = re.sub(r"^\$(?:HOME|\{HOME\})(?=/|$)", lambda _m: os.path.expanduser("~"), t)
+    if t == "-" or t.startswith("~") or any(ch in t for ch in "$`*?"):    # ~user, other variables, globs: unknown
         return ("unknown",)
     return ("literal", t)
 
@@ -947,6 +952,18 @@ MCP_READ = re.compile(r"__(get|list|search|read|query|find|scrape|fetch|describe
 # External audit of v0.8 (07/10): `mcp__lab__get_and_delete_secret` was a read because it starts with get.
 MCP_WRITE = re.compile(r"(delete|remove|drop|purge|destroy|write|update|upsert|create|insert|set|send|post|put|patch|exec|"
                        r"run|kill|reset|move|rename|upload|trash|revoke|rotate|restart|stop|start|deploy|apply|commit)", re.I)
+def _mcp_method(tool):
+    """The method of an MCP tool, without the server name some servers repeat in front of it: `firecrawl_search` on
+    the Firecrawl server is `search`. Only a first word contained in the server segment is dropped."""
+    parts = tool.split("__")
+    method = parts[-1]
+    server = parts[1].lower() if len(parts) > 2 else ""
+    words = [w for w in re.split(r"[_\-]", method) if w]
+    if len(words) > 1 and server and words[0].lower() in re.split(r"[_\-]", server):
+        return "_".join(words[1:])
+    return method
+
+
 def mcp_writes(method):
     """A write verb as a verb of the method name: its first word, or a word after and/then/or (`get_and_delete_x`).
     `get_commit` or `list_settings` name an object, not an action (Gemini audit of v0.9)."""
@@ -982,8 +999,13 @@ def classify(tool, tool_input):
         return "read", ""
     if TALK_TOOLS.search(tool):
         return "talk", ""
-    if tool.startswith("mcp__") and MCP_READ.search(tool) and not mcp_writes(tool.rsplit("__", 1)[-1]):
-        return "read", ""
+    if tool.startswith("mcp__"):
+        method = _mcp_method(tool)
+        if MCP_READ.search("__" + method) and not mcp_writes(method):
+            url = tool_input.get("url") if isinstance(tool_input, dict) else None
+            if isinstance(url, str) and is_action_url(url):     # a fetch of a webhook or an action URL changes state
+                return "change", f"{tool} (action URL)"
+            return "read", ""
     return "change", tool
 
 

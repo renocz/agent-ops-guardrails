@@ -16,6 +16,10 @@ BASH = [
     ("grep -rn foo /etc 2>/dev/null | head", "read"),
     ("for f in a b; do wc -l $f; done", "read"),
     ("ssh host 'docker ps -a; zfs list'", "read"),
+    ("ffprobe -v error -show_streams movie.mkv", "read"),
+    ("apt-mark showhold", "read"),
+    ("apt-mark hold nginx", "change"),
+    ("apt-mark unhold nginx", "change"),
     ("ssh -i k root@h \"pct exec 100 -- bash -c 'cd /opt/stacks && git diff'\"", "read"),
     ("curl -s https://api.example.com/v1/status | jq .", "read"),
     ("python3 -c 'import json,sys; print(json.load(sys.stdin)[\"a\"])'", "read"),
@@ -293,6 +297,18 @@ class Classifier(unittest.TestCase):
                     "cd /tmp && ls", "cd /tmp/x && cat f"):
             self.assertNotEqual(g.classify("Bash", {"command": cmd})[0], "opaque", cmd)
 
+    def test_cd_home_is_resolved(self):                              # review 11/10: `cd ~/repo && git status` was a script
+        home = os.path.expanduser("~")
+        g.SAFE_GIT_REPOS[:] = [home + "/ops-council"]
+        g.CWD = "/tmp"
+        for cmd in ("cd ~/ops-council && git status", "cd $HOME/ops-council && git log", "cd ${HOME}/ops-council/ci && git diff",
+                    "cd ~/ops-council; git status"):
+            self.assertEqual(g.classify("Bash", {"command": cmd})[0], "read", cmd)
+        for cmd in ("cd ~/autre && git status", "cd ~ && git status", "cd ~root/x && git status",
+                    "cd ~/ops-council/../autre && git status", "cd $HOMEX/ops-council && git status",
+                    "cd ~/ops-council && git push"):
+            self.assertNotEqual(g.classify("Bash", {"command": cmd})[0], "read", cmd)
+
     def test_git_exec_config_surface_needs_script(self):             # R4 part 1
         edit = {"targets": ["/opt/stacks/web"], "actions": ["edit", "git"]}
         script = {"targets": ["/opt/stacks/web"], "actions": ["edit", "git", "script"]}
@@ -341,6 +357,17 @@ class Classifier(unittest.TestCase):
         self.assertEqual(g.classify("mcp__github__get_commit", {})[0], "read")              # Gemini audit of v0.9
         self.assertEqual(g.classify("mcp__x__list_settings", {})[0], "read")
         self.assertEqual(g.classify("mcp__x__getAndDeleteSecret", {})[0], "change")
+        fc = "mcp__claude_ai_Firecrawl__firecrawl_"                                         # review 11/10: server name repeated
+        self.assertEqual(g.classify(fc + "search", {"query": "x"})[0], "read")
+        self.assertEqual(g.classify(fc + "scrape", {"url": "https://example.com/doc"})[0], "read")
+        self.assertEqual(g.classify(fc + "scrape", {"url": "https://example.com/webhook/abc"})[0], "change")
+        self.assertEqual(g.classify(fc + "scrape", {"url": "https://example.com/api/restart"})[0], "change")
+        self.assertEqual(g.classify(fc + "monitor_create", {})[0], "change")
+        self.assertEqual(g.classify(fc + "monitor_delete", {})[0], "change")
+        self.assertEqual(g.classify(fc + "crawl", {})[0], "change")
+        self.assertEqual(g.classify("mcp__x__x_delete_item", {})[0], "change")             # a dropped prefix hides no verb
+        self.assertEqual(g.classify("mcp__x__x_get_and_delete_item", {})[0], "change")
+        self.assertEqual(g.classify("mcp__x__y_search", {})[0], "change")                  # only a prefix naming the server goes
         for code, kind in (("from os import remove as r; r('/srv/x')", "change"),           # GG-01
                            ("import pathlib; pathlib.Path('/srv/x').unlink()", "change"),
                            ("getattr(__import__('os'), 'remove')('/srv/x')", "change"),
