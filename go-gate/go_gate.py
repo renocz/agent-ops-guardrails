@@ -1051,8 +1051,13 @@ def classify(tool, tool_input):
     if TALK_TOOLS.search(tool):
         return "talk", ""
     if tool.startswith("mcp__"):
+        full_method = tool.split("__")[-1]
         method = _mcp_method(tool)
-        if MCP_READ.search("__" + method) and not mcp_writes(method):
+        # council of 11/10: _mcp_method can drop the method's first word when it names the server; a hostile
+        # server picks its own name, so that dropped word can itself be a write verb (`mcp__delete__delete_search`
+        # strips to `search`). A write verb in EITHER form makes it a change; an empty method (nothing left after
+        # the drop, or an empty method to begin with) is never a read either.
+        if method and MCP_READ.search("__" + method) and not mcp_writes(method) and not mcp_writes(full_method):
             url = tool_input.get("url") if isinstance(tool_input, dict) else None
             if isinstance(url, str) and is_action_url(url):     # a fetch of a webhook or an action URL changes state
                 return "change", f"{tool} (action URL)"

@@ -59,6 +59,13 @@ FIXED_BYPASSES = [
      "each '/'-segment is also split on the first ';' before comparing (containers route on the part before it "
      "and ignore the rest, same as a real servlet); decoding that is still changing after the bound now returns "
      "True (an action URL) instead of matching whatever it got to."),
+    ("MCP method, server-prefix strip erases a write verb (`mcp__delete__delete_search`)",
+     "mcp__delete__delete_search",
+     "_mcp_method drops the method's first word when it matches the server segment, BEFORE mcp_writes ever runs; "
+     "a hostile server picks its own name, so it can pick a write verb and have the classifier erase its own "
+     "warning sign.",
+     "classify() now also runs mcp_writes() on the full, unstripped method; a write verb in either form makes it "
+     "a change. An empty method (nothing left after the drop) is also never a read."),
 ]
 
 
@@ -181,6 +188,17 @@ MCP_FUSED_VERB = [
     ("list+and+delete fused in the first word", "mcp__x__listanddelete_item"),
 ]
 
+# A hostile MCP server picks its own name: when the method's first word (a write verb) matches the server
+# segment, _mcp_method used to drop it before mcp_writes ever ran, erasing the verb.
+MCP_SERVER_PREFIX_HIDES_VERB = [
+    ("write verb as the method's first word, stripped remainder reads as 'search'", "mcp__delete__delete_search"),
+    ("write verb as the method's first word, stripped remainder reads as 'status'", "mcp__restart__restart_status"),
+    ("write verb as the method's first word, stripped remainder reads as 'list'", "mcp__set__set_list"),
+]
+
+# A malformed, empty method (nothing after the last "__") must never read as a read either.
+MCP_EMPTY_METHOD = ["mcp__x__"]
+
 # Genuinely read-only commands: must stay "read" through every fix above.
 SAFE_READS = [
     "git status",
@@ -279,6 +297,19 @@ class Disguise(unittest.TestCase):
             with self.subTest(name=name, tool=tool):
                 kind, _detail = g.classify(tool, {})
                 self.assertIn(kind, NOT_READ, f"{name!r} ({tool!r}) classified as read")
+
+    def test_mcp_server_prefix_cannot_hide_a_write_verb(self):
+        """Fixed bypass: classify() now checks mcp_writes() on the full method too, not only the stripped one."""
+        for name, tool in MCP_SERVER_PREFIX_HIDES_VERB:
+            with self.subTest(name=name, tool=tool):
+                kind, _detail = g.classify(tool, {})
+                self.assertIn(kind, NOT_READ, f"{name!r} ({tool!r}) classified as read")
+
+    def test_mcp_empty_method_is_not_a_read(self):
+        for tool in MCP_EMPTY_METHOD:
+            with self.subTest(tool=tool):
+                kind, _detail = g.classify(tool, {})
+                self.assertIn(kind, NOT_READ, f"{tool!r} classified as read")
 
     def test_safe_reads_stay_reads(self):
         for cmd in SAFE_READS:
