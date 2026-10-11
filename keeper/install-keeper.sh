@@ -6,8 +6,9 @@
 #                                                                       no service, no chown (to inspect the result)
 #   sudo ./install-keeper.sh --agent-user you --owner-id 12345 --apply      really installs (needs root)
 #
-# Options: --chat-id N (default: the owner id); --observe (log only, do not block); --safe-git-repo DIR (repeatable:
-# a repo where a git read verb is trusted; without any, every git read needs a plan — see K6 in docs/design-keeper.md).
+# Options: --chat-id N (default: the owner id); --observe (log only, do not block); --lang en|fr (language of what the
+# human reads on Telegram, default en; what the agent reads stays English); --safe-git-repo DIR (repeatable: a repo
+# where a git read verb is trusted; without any, every git read needs a plan — see K6 in docs/design-keeper.md).
 # The keeper bot's token is never passed on the command line: with --apply, the script asks for it on the terminal
 # (hidden input) if /etc/keeper/bot.token does not exist yet.
 # Precondition: the agent user is not root and cannot sudo without a password it does not have.
@@ -15,7 +16,7 @@ set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 REPO="$(cd "$HERE/.." && pwd)"
-MODE=dry PREFIX="" AGENT="" OWNER="" CHAT="" GATE_MODE=block
+MODE=dry PREFIX="" AGENT="" OWNER="" CHAT="" GATE_MODE=block UI_LANG=en
 SAFE_REPOS=()                 # K6: repos where a git read verb is trusted (empty = every git read needs a plan)
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -26,7 +27,8 @@ while [ $# -gt 0 ]; do
     --chat-id) CHAT="$2"; shift ;;
     --safe-git-repo) SAFE_REPOS+=("$2"); shift ;;       # repeatable; absolute path to a repo the agent cannot tamper with
     --observe) GATE_MODE=observe ;;
-    -h|--help) sed -n '2,13p' "$0"; exit 0 ;;
+    --lang) UI_LANG="$2"; shift ;;
+    -h|--help) sed -n '2,14p' "$0"; exit 0 ;;
     *) echo "unknown option: $1" >&2; exit 2 ;;
   esac
   shift
@@ -34,6 +36,7 @@ done
 [ -n "$AGENT" ] && [ -n "$OWNER" ] || { echo "need --agent-user and --owner-id" >&2; exit 2; }
 [[ "$OWNER" =~ ^[0-9]+$ ]] || { echo "--owner-id must be a Telegram numeric id" >&2; exit 2; }
 CHAT="${CHAT:-$OWNER}"
+case "$UI_LANG" in en|fr) ;; *) echo "--lang must be en or fr" >&2; exit 2 ;; esac
 [ "$AGENT" != root ] || { echo "refusing: the agent must not be root (see the design's precondition)" >&2; exit 2; }
 id "$AGENT" >/dev/null 2>&1 || { echo "no such user: $AGENT" >&2; exit 2; }
 AGENT_UID=$(id -u "$AGENT")
@@ -150,13 +153,14 @@ put "$BIN/keeper-propose" 755 "root:$ROOTGRP" "$TMP/keeper-propose"
 put "$BIN/keeper-status" 755 "root:$ROOTGRP" "$TMP/keeper-status"
 
 echo "-- 3. config, state and socket directory"
-"$PY" - "$OWNER" "$CHAT" "$AGENT_UID" "$AGENT_HOME" "$GROUP" "$RUN_DIR" "$GATE_MODE" \
+"$PY" - "$OWNER" "$CHAT" "$AGENT_UID" "$AGENT_HOME" "$GROUP" "$RUN_DIR" "$GATE_MODE" "$UI_LANG" \
   ${SAFE_REPOS[@]+"${SAFE_REPOS[@]}"} > "$TMP/config.json" <<'PYEOF'
 import json, sys
-o, c, uid, home, grp, run, mode, *safe_repos = sys.argv[1:]
+o, c, uid, home, grp, run, mode, lang, *safe_repos = sys.argv[1:]
 print(json.dumps({"owner_id": int(o), "chat_id": int(c), "agent_uids": [int(uid)], "agent_home": home,
                   "client_group": grp, "socket": run + "/keeper.sock", "state_dir": "/var/lib/keeper",
-                  "bot_token_file": "/etc/keeper/bot.token", "mode": mode, "safe_git_repos": safe_repos}, indent=1))
+                  "bot_token_file": "/etc/keeper/bot.token", "mode": mode, "lang": lang,
+                  "safe_git_repos": safe_repos}, indent=1))
 PYEOF
 mkd /etc/keeper 750 "root:$KUSER"
 put /etc/keeper/config.json 640 "root:$KUSER" "$TMP/config.json"

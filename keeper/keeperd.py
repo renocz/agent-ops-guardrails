@@ -22,7 +22,119 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 DEFAULTS = {"socket": "/var/run/keeper/keeper.sock", "state_dir": "/var/lib/keeper", "agent_uids": [],
             "owner_id": None, "chat_id": None, "bot_token_file": "/etc/keeper/bot.token",
             "ttl_default_min": 60, "ttl_max_min": 240, "pending_max_age_min": 120, "max_proposals_per_hour": 3,
-            "mode": "block", "agent_home": None, "client_group": None, "safe_git_repos": []}
+            "mode": "block", "agent_home": None, "client_group": None, "safe_git_repos": [], "lang": "en"}
+
+
+# ---------------------------------------------------------------------------------------------------------------
+# What the HUMAN reads on Telegram: one catalogue per language (config key "lang", default "en").
+# What the AGENT reads (the deny reasons the hook returns, keeper-status) is not here: it stays English, because it
+# is part of the agent contract and of the tests. Callback data (approve:<hash>:<nonce>) is protocol, never translated.
+# ---------------------------------------------------------------------------------------------------------------
+MESSAGES = {
+    "en": {
+        "card_head": "🔐 Approval requested",
+        "card_plan": "Plan: {id}",
+        "card_targets": "Targets: {targets}",
+        "card_any": "ANY",
+        "card_actions": "Actions: {actions}",
+        "card_duration": "Duration: {ttl} min",
+        "card_fingerprint": "Fingerprint: {fp}",
+        "warn_script": "⚠️ script: the agent may run ANY program during this plan.",
+        "warn_delete": "⚠️ delete: the agent may delete files.",
+        "warn_no_targets": "⚠️ no targets: the actions apply to everything.",
+        "card_stop_note": "Stop ends the plan; it does not stop a process already started.",
+        "card_explain": "The agent's explanation:",
+        "btn_approve": "✅ Approve",
+        "btn_reject": "❌ Reject",
+        "btn_stop": "⏹ Stop everything",
+        "ans_not_owner": "ignored: not the owner",
+        "ans_malformed": "ignored: malformed",
+        "ans_replay": "ignored: already used",
+        "ans_unknown": "ignored: no such pending plan",
+        "ans_stopped": "stopped: no plan is active",
+        "ans_nothing_active": "nothing was active; pending plans dropped",
+        "ans_rejected": "rejected",
+        "ans_expired": "expired: ask the agent to propose again",
+        "ans_approved": "approved for {ttl} min",
+        "started": "🔐 keeper started: changes now need your approval here.",
+    },
+    "fr": {
+        "card_head": "🔐 Demande d'approbation",
+        "card_plan": "Plan : {id}",
+        "card_targets": "Cibles : {targets}",
+        "card_any": "TOUTES",
+        "card_actions": "Actions : {actions}",
+        "card_duration": "Durée : {ttl} min",
+        "card_fingerprint": "Empreinte : {fp}",
+        "warn_script": "⚠️ script : l'agent peut lancer N'IMPORTE QUEL programme pendant ce plan.",
+        "warn_delete": "⚠️ delete : l'agent peut supprimer des fichiers.",
+        "warn_no_targets": "⚠️ aucune cible : les actions s'appliquent à tout.",
+        "card_stop_note": "Arrêter met fin au plan ; cela n'interrompt pas un processus déjà lancé.",
+        "card_explain": "Explication de l'agent :",
+        "btn_approve": "✅ Approuver",
+        "btn_reject": "❌ Refuser",
+        "btn_stop": "⏹ Tout arrêter",
+        "ans_not_owner": "ignoré : vous n'êtes pas le propriétaire",
+        "ans_malformed": "ignoré : demande mal formée",
+        "ans_replay": "ignoré : déjà utilisé",
+        "ans_unknown": "ignoré : aucun plan en attente ne correspond",
+        "ans_stopped": "arrêté : plus aucun plan n'est actif",
+        "ans_nothing_active": "rien n'était actif ; les plans en attente sont abandonnés",
+        "ans_rejected": "refusé",
+        "ans_expired": "expiré : demandez à l'agent de proposer à nouveau",
+        "ans_approved": "approuvé pour {ttl} min",
+        "started": "🔐 keeper démarré : les modifications demandent maintenant votre approbation ici.",
+    },
+}
+IGNORED = frozenset({"ans_not_owner", "ans_malformed", "ans_replay", "ans_unknown"})   # answers that are not a decision
+
+
+def norm_lang(lang):
+    """A configured language, or English when it is unknown (a typo in the config must not stop the daemon)."""
+    lang = str(lang or "en").lower()
+    return lang if lang in MESSAGES else "en"
+
+
+def t(lang, key, **kw):
+    """A human message in `lang`. A key missing from that language falls back to English, never to a crash."""
+    for table in (MESSAGES.get(norm_lang(lang), {}), MESSAGES["en"]):
+        if key in table:
+            try:
+                return table[key].format(**kw)
+            except (KeyError, IndexError, ValueError):
+                continue
+    return key
+
+
+class Msg(str):
+    """A rendered human message that remembers its catalogue key: the Telegram layer tests the key, not the words
+    (which change with the language)."""
+    def __new__(cls, text, key):
+        obj = str.__new__(cls, text)
+        obj.key = key
+        return obj
+
+
+def render_plan_card(lang, p):
+    """The approval message and its buttons. The first lines come from the structured scope, never from the agent's
+    prose, so prose cannot hide a wide scope; the agent's explanation comes last, labelled as such."""
+    plan, h = p["plan"], p["hash"][:12]
+    warn = ""
+    if "script" in plan["actions"]:
+        warn += t(lang, "warn_script") + "\n"
+    if "delete" in plan["actions"]:
+        warn += t(lang, "warn_delete") + "\n"
+    if not plan["targets"]:
+        warn += t(lang, "warn_no_targets") + "\n"
+    head = "\n".join([t(lang, "card_head"), t(lang, "card_plan", id=plan.get("id") or "-"),
+                      t(lang, "card_targets", targets=", ".join(plan["targets"]) or t(lang, "card_any")),
+                      t(lang, "card_actions", actions=", ".join(plan["actions"])),
+                      t(lang, "card_duration", ttl=plan["ttl"]), t(lang, "card_fingerprint", fp=h)]) + "\n"
+    head += warn + t(lang, "card_stop_note") + "\n———\n" + t(lang, "card_explain") + "\n"
+    kb = {"inline_keyboard": [[{"text": t(lang, "btn_approve"), "callback_data": f"approve:{h}:{p['nonce']}"},
+                               {"text": t(lang, "btn_reject"), "callback_data": f"reject:{h}:{p['nonce']}"}],
+                              [{"text": t(lang, "btn_stop"), "callback_data": "stop:all"}]]}
+    return (head + p["text"])[:4000], kb
 
 
 def load_gate(agent_home=None):
@@ -48,6 +160,7 @@ def load_gate(agent_home=None):
 class Keeper:
     def __init__(self, cfg, notifier, clock=time.time):
         self.cfg, self.notify, self.now = cfg, notifier, clock
+        self.lang = norm_lang(cfg.get("lang"))                             # what the human reads; the agent's stays English
         self.gate = load_gate(cfg.get("agent_home"))
         self.gate.SAFE_GIT_REPOS[:] = cfg.get("safe_git_repos") or []      # K6: trusted repos for git read verbs
         self.lock = threading.Lock()
@@ -175,11 +288,15 @@ class Keeper:
         return {"active": None, "pending": bool(s.get("pending"))}
 
     # ----- human side (only reached from the bot) ---------------------------------------------------------------
+    def msg(self, key, **kw):
+        """A human message in the configured language, tagged with its key."""
+        return Msg(t(self.lang, key, **kw), key)
+
     def decide(self, from_id, chat_id, data):
         """A button press. data = approve:<hash12>:<nonce> | reject:<hash12>:<nonce> | stop:<session>"""
         if str(from_id) != str(self.cfg["owner_id"]) or (self.cfg.get("chat_id") and str(chat_id) != str(self.cfg["chat_id"])):
             self.log({"event": "decision-from-stranger-ignored"})
-            return "ignored: not the owner"
+            return self.msg("ans_not_owner")
         parts = data.split(":")
         if parts[0] == "stop":                                  # every plan of every session (council review 08/10)
             had = False
@@ -188,14 +305,14 @@ class Keeper:
                 s.pop("pending", None)
             self.save()
             self.log({"event": "revoked-all"})
-            return "stopped: no plan is active" if had else "nothing was active; pending plans dropped"
+            return self.msg("ans_stopped") if had else self.msg("ans_nothing_active")
         if len(parts) != 3 or parts[0] not in ("approve", "reject") or not re.fullmatch(r"[0-9a-f]{12}", parts[1]) \
                 or not re.fullmatch(r"[0-9a-f]{16}", parts[2]):
-            return "ignored: malformed"
+            return self.msg("ans_malformed")
         action, h, nonce = parts
         if nonce in self.state["used_nonces"]:
             self.log({"event": "decision-replay-ignored"})
-            return "ignored: already used"
+            return self.msg("ans_replay")
         for sid, s in self.state["sessions"].items():
             p = s.get("pending")
             if p and p["hash"][:12] == h and secrets.compare_digest(p["nonce"], nonce):
@@ -204,18 +321,18 @@ class Keeper:
                 if action == "reject":
                     self.save()
                     self.log({"event": "rejected", "session": sid})
-                    return "rejected"
+                    return self.msg("ans_rejected")
                 if self.now() - p["proposed_at"] > self.cfg["pending_max_age_min"] * 60:
                     self.save()
                     self.log({"event": "approval-of-expired-plan-ignored", "session": sid})
-                    return "expired: ask the agent to propose again"
+                    return self.msg("ans_expired")
                 s["active"] = {"plan": p["plan"], "hash": p["hash"], "approved_at": self.now(),
                                "expires": self.now() + p["plan"]["ttl"] * 60}
                 self.save()
                 self.log({"event": "approved", "session": sid, "plan": p["plan"].get("id"), "hash": h})
-                return f"approved for {p['plan']['ttl']} min"
+                return self.msg("ans_approved", ttl=p["plan"]["ttl"])
         self.log({"event": "decision-unknown-plan-ignored"})
-        return "ignored: no such pending plan"
+        return self.msg("ans_unknown")
 
 
 # ---------------------------------------------------------------------------------------------------------------
@@ -224,6 +341,7 @@ class Keeper:
 class TelegramBot:
     def __init__(self, cfg):
         self.cfg = cfg
+        self.lang = norm_lang(cfg.get("lang"))
         self.token = open(cfg["bot_token_file"]).read().strip()
         self.offset = 0
 
@@ -233,22 +351,8 @@ class TelegramBot:
         return json.load(urllib.request.urlopen(req, timeout=timeout))
 
     def send_plan(self, sid, p):
-        plan = p["plan"]
-        warn = ""
-        if "script" in plan["actions"]:
-            warn += "⚠️ script: the agent may run ANY program during this plan.\n"
-        if "delete" in plan["actions"]:
-            warn += "⚠️ delete: the agent may delete files.\n"
-        if not plan["targets"]:
-            warn += "⚠️ no targets: the actions apply to everything.\n"
-        head = (f"🔐 Approval requested\nPlan: {plan.get('id') or '-'}\nTargets: {', '.join(plan['targets']) or 'ANY'}\n"
-                f"Actions: {', '.join(plan['actions'])}\nDuration: {plan['ttl']} min\nFingerprint: {p['hash'][:12]}\n{warn}"
-                "Stop ends the plan; it does not stop a process already started.\n———\nThe agent's explanation:\n")
-        h = p["hash"][:12]
-        kb = {"inline_keyboard": [[{"text": "✅ Approve", "callback_data": f"approve:{h}:{p['nonce']}"},
-                                   {"text": "❌ Reject", "callback_data": f"reject:{h}:{p['nonce']}"}],
-                                  [{"text": "⏹ Stop everything", "callback_data": "stop:all"}]]}
-        self.api("sendMessage", {"chat_id": self.cfg["chat_id"], "text": (head + p["text"])[:4000], "reply_markup": kb})
+        text, kb = render_plan_card(self.lang, p)
+        self.api("sendMessage", {"chat_id": self.cfg["chat_id"], "text": text, "reply_markup": kb})
 
     def send(self, text):
         self.api("sendMessage", {"chat_id": self.cfg["chat_id"], "text": text[:4000]})
@@ -267,7 +371,7 @@ class TelegramBot:
                                             cq.get("data", ""))
                     self.api("answerCallbackQuery", {"callback_query_id": cq["id"], "text": out[:180]})
                     msg = cq.get("message") or {}
-                    if msg and not out.startswith("ignored"):
+                    if msg and out.key not in IGNORED:
                         try:                                            # one decision per message: drop the buttons
                             self.api("editMessageReplyMarkup", {"chat_id": msg["chat"]["id"],
                                                                  "message_id": msg["message_id"], "reply_markup": {}})
@@ -357,7 +461,7 @@ def main():
     keeper = Keeper(cfg, bot)
     threading.Thread(target=bot.poll, args=(keeper,), daemon=True).start()
     try:
-        bot.send("🔐 keeper started: changes now need your approval here.")
+        bot.send(t(keeper.lang, "started"))
     except Exception:
         keeper.log({"event": "telegram-error-at-start"})
     serve(keeper, cfg)

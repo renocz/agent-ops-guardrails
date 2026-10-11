@@ -3,7 +3,7 @@
 
 Run: python3 keeper/test_keeper.py   (no network, no install: a fake Telegram and a socket in a temp dir)
 """
-import json, os, shlex, shutil, socket, stat, subprocess, sys, tempfile, threading, time, unittest
+import json, os, shlex, shutil, socket, stat, string, subprocess, sys, tempfile, threading, time, unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -285,6 +285,138 @@ class ClassifierTricks(Base):
         self.assertEqual(self.k.check("s1", *bash("git -C /opt/stacks/web status"), None)["decision"], "allow")
         self.assertEqual(self.k.check("s1", *bash("git log --oneline"), "/opt/stacks/web/sub")["decision"], "allow")
         self.assertNotEqual(self.k.check("s1", *bash("git status"), "/tmp/other")["decision"], "allow")
+
+
+class Messages(Base):
+    """What the human reads is one catalogue per language; what the agent reads stays English."""
+
+    def keeper_in(self, lang):
+        cfg = dict(self.cfg, lang=lang, state_dir=os.path.join(self.dir, "state-" + lang))
+        return keeperd.Keeper(cfg, self.bot, clock=self.clock)
+
+    def pending_on(self, k, scope="id=p1 ; targets=web ; actions=deploy ; ttl=30", text="why"):
+        r = k.check("s1", *bash(self.propose_cmd(scope, text)))
+        return r["_notify"][1]
+
+    @staticmethod
+    def fields(template):
+        return {f for _lit, f, _spec, _conv in string.Formatter().parse(template) if f}
+
+    def test_every_key_exists_in_both_languages(self):
+        en, fr = keeperd.MESSAGES["en"], keeperd.MESSAGES["fr"]
+        self.assertEqual(set(en), set(fr))
+        for key in en:
+            self.assertEqual(self.fields(en[key]), self.fields(fr[key]), key)      # same placeholders
+            kw = {f: "x" for f in self.fields(en[key])}
+            for lang in ("en", "fr"):
+                text = keeperd.t(lang, key, **kw)
+                self.assertTrue(text.strip(), (lang, key))
+                self.assertNotIn("{", text, (lang, key))                             # nothing left unrendered
+            self.assertNotEqual(keeperd.t("en", key, **kw), keeperd.t("fr", key, **kw), key)
+
+    def test_plan_card_in_english_is_unchanged(self):
+        p = self.pending_on(self.k)
+        text, kb = keeperd.render_plan_card("en", p)
+        self.assertEqual(text, "🔐 Approval requested\nPlan: p1\nTargets: web\nActions: deploy\nDuration: 30 min\n"
+                               f"Fingerprint: {p['hash'][:12]}\n"
+                               "Stop ends the plan; it does not stop a process already started.\n———\n"
+                               "The agent's explanation:\nwhy")
+        self.assertEqual([b["text"] for row in kb["inline_keyboard"] for b in row],
+                         ["✅ Approve", "❌ Reject", "⏹ Stop everything"])
+        wide = self.pending_on(self.k, "id=w ; actions=script,delete")
+        self.assertIn("Targets: ANY\nActions: script, delete", keeperd.render_plan_card("en", wide)[0])
+        self.assertIn("⚠️ script: the agent may run ANY program during this plan.\n⚠️ delete: the agent may delete files.\n"
+                      "⚠️ no targets: the actions apply to everything.\nStop ends", keeperd.render_plan_card("en", wide)[0])
+
+    def test_plan_card_in_french(self):
+        p = self.pending_on(self.k, "id=w ; actions=script,delete", text="pourquoi")
+        text, kb = keeperd.render_plan_card("fr", p)
+        for want in ("Demande d'approbation", "Plan : w", "Cibles : TOUTES", "Actions : script, delete", "Durée : 60 min",
+                     f"Empreinte : {p['hash'][:12]}", "N'IMPORTE QUEL programme", "aucune cible", "Arrêter met fin",
+                     "Explication de l'agent :\npourquoi"):
+            self.assertIn(want, text)
+        self.assertEqual([b["text"] for row in kb["inline_keyboard"] for b in row],
+                         ["✅ Approuver", "❌ Refuser", "⏹ Tout arrêter"])
+
+    def test_callback_data_is_protocol_in_every_language(self):
+        p = self.pending_on(self.k)
+        data = lambda lang: [b["callback_data"] for row in keeperd.render_plan_card(lang, p)[1]["inline_keyboard"] for b in row]
+        self.assertEqual(data("en"), data("fr"))
+        self.assertEqual(data("fr")[0], f"approve:{p['hash'][:12]}:{p['nonce']}")
+
+    def test_answers_to_buttons_follow_the_language(self):
+        k = self.keeper_in("fr")
+        p = self.pending_on(k)
+        h = p["hash"][:12]
+        self.assertEqual(k.decide(STRANGER, CHAT, "stop:all"), "ignoré : vous n'êtes pas le propriétaire")
+        self.assertEqual(k.decide(OWNER, CHAT, "approve:zz"), "ignoré : demande mal formée")
+        self.assertEqual(k.decide(OWNER, CHAT, "approve:" + "0" * 12 + ":" + "0" * 16), "ignoré : aucun plan en attente ne correspond")
+        self.assertEqual(k.decide(OWNER, CHAT, f"approve:{h}:{p['nonce']}"), "approuvé pour 30 min")
+        self.assertEqual(k.decide(OWNER, CHAT, f"approve:{h}:{p['nonce']}"), "ignoré : déjà utilisé")
+        self.assertEqual(k.decide(OWNER, CHAT, "stop:all"), "arrêté : plus aucun plan n'est actif")
+        self.assertEqual(k.decide(OWNER, CHAT, "stop:all"), "rien n'était actif ; les plans en attente sont abandonnés")
+        p2 = self.pending_on(k, "id=p2 ; actions=edit")
+        self.assertEqual(k.decide(OWNER, CHAT, f"reject:{p2['hash'][:12]}:{p2['nonce']}"), "refusé")
+        p3 = self.pending_on(k, "id=p3 ; actions=edit")
+        self.clock.t += 121 * 60
+        self.assertEqual(k.decide(OWNER, CHAT, f"approve:{p3['hash'][:12]}:{p3['nonce']}"),
+                         "expiré : demandez à l'agent de proposer à nouveau")
+
+    def test_answers_carry_a_key_so_the_bot_does_not_parse_words(self):
+        k = self.keeper_in("fr")
+        self.assertEqual(k.decide(STRANGER, CHAT, "stop:all").key, "ans_not_owner")
+        self.assertIn(k.decide(OWNER, CHAT, "garbage").key, keeperd.IGNORED)
+        p = self.pending_on(k)
+        self.assertNotIn(k.decide(OWNER, CHAT, f"approve:{p['hash'][:12]}:{p['nonce']}").key, keeperd.IGNORED)
+
+    def test_what_the_agent_reads_stays_english(self):
+        k = self.keeper_in("fr")
+        k.cfg["mode"] = "block"
+        deny = k.check("s1", *bash("docker restart web"))
+        self.assertTrue(deny["reason"].startswith("keeper: this is a change (deploy) and no approved plan covers it."))
+        sent = k.check("s1", *bash(self.propose_cmd("id=p1 ; actions=edit")))
+        self.assertIn("plan sent to the human for approval", sent["reason"])
+        self.assertIn("Nothing was run.", sent["reason"])
+        self.assertIn("keeper status (nothing was run)", k.check("s1", *bash("keeper-status"))["reason"])
+
+    def test_unknown_language_falls_back_to_english(self):
+        k = self.keeper_in("xx")
+        self.assertEqual(k.lang, "en")
+        self.assertEqual(k.decide(OWNER, CHAT, "garbage"), "ignored: malformed")
+        self.assertEqual(keeperd.norm_lang("FR"), "fr")
+        self.assertEqual(keeperd.norm_lang(None), "en")
+        self.assertEqual(keeperd.t("xx", "ans_rejected"), "rejected")
+        self.assertEqual(keeperd.t("fr", "no-such-key"), "no-such-key")             # never a crash
+
+    def test_default_language_is_english(self):
+        self.assertEqual(keeperd.DEFAULTS["lang"], "en")
+        self.assertEqual(self.k.lang, "en")
+
+
+@unittest.skipUnless(shutil.which("bash") and os.path.exists("/usr/bin/python3") and
+                     subprocess.run(["id", "nobody"], capture_output=True).returncode == 0, "needs bash, /usr/bin/python3, user nobody")
+class InstallerLang(unittest.TestCase):
+    """install-keeper.sh --lang, in prefix mode (files only: no user, no service, nothing outside the temp dir)."""
+
+    def install(self, *extra):
+        prefix = tempfile.mkdtemp(prefix="ki", dir="/tmp")
+        self.addCleanup(shutil.rmtree, prefix, ignore_errors=True)
+        r = subprocess.run(["bash", os.path.join(HERE, "install-keeper.sh"), "--agent-user", "nobody", "--owner-id", "1",
+                            "--prefix", prefix, *extra], capture_output=True, text=True, timeout=60)
+        cfg = os.path.join(prefix, "etc", "keeper", "config.json")
+        return r, (json.load(open(cfg)) if os.path.exists(cfg) else None)
+
+    def test_lang_is_written_to_the_config(self):
+        self.assertEqual(self.install("--lang", "fr")[1]["lang"], "fr")
+        self.assertEqual(self.install("--lang", "en")[1]["lang"], "en")
+
+    def test_default_is_english(self):
+        self.assertEqual(self.install()[1]["lang"], "en")
+
+    def test_unknown_language_is_refused(self):
+        r, cfg = self.install("--lang", "de")
+        self.assertEqual(r.returncode, 2)
+        self.assertIsNone(cfg)
 
 
 class Socket(Base):
