@@ -16,7 +16,8 @@ change or forge that approval**, even if it tries. Output filtering (secret-guar
 ## Threat model
 
 - In scope: an agent that is careless, or that deliberately tries to act without approval (writes files, edits its own
-  hooks, crafts messages, replays an old GO).
+  hooks, crafts messages, replays an old GO), or that tries to **read the keeper's log and state**, or to make the
+  keeper print them (a socket op, a command, a message to the bot).
 - Out of scope: an agent with root/admin rights on the machine where the keeper runs; a compromised human phone or
   Telegram account; side channels.
 - Precondition, stated in the README: **the agent must not be root/admin where the keeper runs.** On the Mac, Claude
@@ -134,6 +135,34 @@ execution. Keep the current rule (a git read is a read only in a declared safe r
 needs `script`), and make the real fix ownership: the installer chowns each safe repo's `.git/config` (and
 `.git/hooks`) to root, so the agent cannot arm an exec key in the one place the environment and `-c` cannot cover.
 Revisit rewriting only as defence in depth once that is in place.
+
+## The log summary: why it goes to Telegram only
+
+Before block mode the owner must read what would have been refused, and that is in the keeper's log, which only `_keeper`
+reads. Two exits exist, both for the human: `/summary` on the keeper bot, and `sudo keeper-summary` for root. **No socket
+op returns any of it.** The socket is the agent's door: anything it can ask for, a compromised agent can ask for, and the
+log shows which commands the keeper let through and why, which is a map of the gate. So the summary is not an op, and a
+Bash call such as `keeper-summary` gets a decision and a reason like any other call.
+
+The summary is built so that it is safe even if it is read by someone it was not meant for:
+
+1. **The log does not hold the arguments of a refused call.** It is logged as a *shape*: its first word, the subcommand for a
+   short list of known CLIs (git, docker, kubectl, systemctl…), and its category, arguments replaced by `…`
+   (`docker restart … [deploy]`). The subcommand is kept only when it is a plain lowercase word that the mask leaves
+   untouched; anything else (a path, a value) ends the shape. A secret typed in a command therefore never reaches the log, let alone
+   Telegram. (Other fields exist, such as plan and session ids; the summary prints none of them.)
+2. **Only validated values are printed.** The tool name arrives on the socket, so it is agent-controlled text. Tool names,
+   categories and shapes are printed only if they match a strict format; anything else is counted as `<other>` or "no
+   recorded shape". An agent cannot put a sentence in front of the owner through the summary.
+3. **The whole text is masked** (patterns from secret-guard) before it is sent, as a last layer, and cut below the
+   Telegram limit.
+
+Only the owner, in the configured chat, is answered (the same test as for the approval buttons). The summary is computed
+without the approval lock, so reading a big log cannot make the hook wait. The log is append-only and never rotated; the
+summary reads at most its last 32 MiB.
+
+Residual risk: the keeper's own Telegram channel. Whoever reads the owner's chat reads the summary, which shows counts and
+shapes, not arguments. That is the same exposure as the approval cards.
 
 ## Failure modes
 
