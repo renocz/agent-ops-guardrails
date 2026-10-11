@@ -22,6 +22,12 @@ Next: one week of the keeper in block mode, after a dry run of refusal, approval
     actually unreachable. `send_plan()` is now attempted first; the reason is rewritten to say so only on
     failure. Proven by a test that fails before the fix and a mutation check that reverts the ordering and shows
     it fail again (3/8 outage tests, the ones that check what the agent is told at propose time).
+- **docs: owner checklist for the block-mode dry run (11/10).** `docs/block-mode-dry-run.md`: a ~15-minute pass
+  on the real machine, right after reinstalling without `--observe`, covering refusal, approval, expiry, replay,
+  a Telegram outage (turn networking off briefly) and stop — only ever with harmless commands (`touch`/`ls`
+  under `/tmp`, never a restart, a delete or a push) — plus the rollback from keeper/README.md and when to use
+  it. The daemon-down and `/summary` scenarios are machine-internal and already covered by
+  `test_block_dryrun.py` in CI, so the checklist points to that instead of repeating it.
 - **keeper: the installed hook's environment is locked, and now tested (11/10).** `KEEPER_TEST_MODE` /
   `KEEPER_SOCKET_FOR_TESTS` in `keeper_client.py` are safe only because `install-keeper.sh` runs the hook and the
   `keeper-propose`/`keeper-status` wrappers with `/usr/bin/env -i … -I`, an empty environment a project's
