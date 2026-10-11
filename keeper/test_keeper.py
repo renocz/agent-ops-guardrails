@@ -810,6 +810,20 @@ class LogSummary(Base):
         self.assertIn("  URLError 1, at-start 1", text)
         self.assertIn("unknown socket peers 1, strangers on Telegram 2", text)
 
+    def test_cut_polls_are_counted_apart_from_errors(self):                  # review 11/10: 337 timeouts in 7 days
+        for _ in range(3):
+            self.k.log({"event": "telegram-poll-timeout"})
+        self.k.log({"event": "telegram-error", "error": "URLError"})
+        text = self.summary()
+        self.assertIn("Telegram errors: 1", text)
+        self.assertIn("Idle polls cut off (retried, nothing lost): 3", text)
+        self.assertIn("  URLError 1", text)
+
+    def test_cut_polls_alone_do_not_make_the_summary_look_active(self):
+        self.k.log({"event": "telegram-poll-timeout"})
+        st = keeperd.tally(self.k.log_path, 0)
+        self.assertEqual((st["events"], st["tg_polls_cut"], st["tg_errors"]), (0, 1, 0))
+
     def test_telegram_error_types_are_validated(self):
         for err in ("URLError", "URLError", "HTTPError", "bad type: secret=x", 42):
             self.k.log({"event": "telegram-error", "error": err})
@@ -961,6 +975,30 @@ class TelegramCommands(Base):
         method, payload = self.calls[-1]
         self.assertEqual(method, "getUpdates")
         self.assertEqual(sorted(payload["allowed_updates"]), ["callback_query", "message"])
+
+    def test_a_timed_out_poll_is_logged_apart_and_loses_no_update(self):    # review 11/10
+        class Stop(BaseException):
+            pass
+        steps = [TimeoutError("timed out"), [self.message("/summary")], OSError("boom"), Stop()]
+
+        def fetch():
+            step = steps.pop(0)
+            if isinstance(step, BaseException):
+                raise step
+            return step
+        self.tg.fetch_updates = fetch
+        real_sleep, keeperd.time.sleep = keeperd.time.sleep, lambda _s: None
+        try:
+            with self.assertRaises(Stop):
+                self.tg.poll(self.k)
+        finally:
+            keeperd.time.sleep = real_sleep
+        with open(self.k.log_path) as f:
+            events = [json.loads(x) for x in f if x.strip()]
+        self.assertEqual([e["event"] for e in events if e["event"].startswith("telegram")],
+                         ["telegram-poll-timeout", "telegram-error"])
+        self.assertEqual(self.tg.offset, 8)                    # the update after the timeout was handled, not skipped
+        self.assertEqual(len(self.sent()), 1)
 
     def test_the_owner_gets_the_summary_in_the_configured_chat(self):
         self.k.check("s1", *bash("docker restart web"))
