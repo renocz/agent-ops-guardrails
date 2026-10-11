@@ -6,6 +6,13 @@ One version scheme: **a repository tag per release**. Components have no version
 
 Next: one week of the keeper in block mode, after a dry run of refusal, approval, expiry, replay and a Telegram outage.
 
+- **keeper: the installed hook's environment is locked, and now tested (11/10).** `KEEPER_TEST_MODE` /
+  `KEEPER_SOCKET_FOR_TESTS` in `keeper_client.py` are safe only because `install-keeper.sh` runs the hook and the
+  `keeper-propose`/`keeper-status` wrappers with `/usr/bin/env -i … -I`, an empty environment a project's
+  `.claude/settings.json` `env` key or a shell profile cannot see through. `test_keeper.py`'s new
+  `InstallerEnvLock` runs the installer in `--prefix` mode (no root) and checks the hook command and both
+  wrappers for `env -i`/`-I`; mutation-checked by dropping `env -i` in a scratch copy.
+
 ## v0.10 (11/10/2026)
 
 **The keeper, its first week in observe mode, and go-gate against disguised commands.** keeperd enforces go-gate's

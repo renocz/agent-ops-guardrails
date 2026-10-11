@@ -608,6 +608,30 @@ class InstallerLang(unittest.TestCase):
             self.assertEqual(stat.S_IMODE(os.stat(os.path.join(os.path.dirname(wrapper), other)).st_mode), 0o755)
 
 
+@unittest.skipUnless(shutil.which("bash") and os.path.exists("/usr/bin/python3") and
+                     subprocess.run(["id", "nobody"], capture_output=True).returncode == 0, "needs bash, /usr/bin/python3, user nobody")
+class InstallerEnvLock(unittest.TestCase):
+    """KEEPER_TEST_MODE / KEEPER_SOCKET_FOR_TESTS in keeper_client.py are safe only because the hook and the
+    keeper-propose/keeper-status wrappers run with an EMPTY environment (`env -i`): otherwise a project
+    .claude/settings.json `env` key, or a shell profile, could set those variables and point the hook at a fake
+    socket. `-I` (isolated mode) on top of that stops the interpreter from also picking up PYTHON* variables."""
+
+    def test_hook_and_wrappers_run_with_an_empty_environment(self):
+        prefix = tempfile.mkdtemp(prefix="kenv", dir="/tmp")
+        self.addCleanup(shutil.rmtree, prefix, ignore_errors=True)
+        subprocess.run(["bash", os.path.join(HERE, "install-keeper.sh"), "--agent-user", "nobody", "--owner-id", "1",
+                        "--prefix", prefix], capture_output=True, text=True, timeout=60, check=True)
+        managed = json.load(open(os.path.join(prefix, "etc", "claude-code", "managed-settings.json")))
+        hook_cmd = managed["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+        self.assertTrue(hook_cmd.startswith("/usr/bin/env -i "), hook_cmd)
+        self.assertIn(" -I ", hook_cmd, hook_cmd)
+        bin_dir = os.path.join(prefix, "opt", "agent-guardrails", "bin")
+        for wrapper in ("keeper-propose", "keeper-status"):
+            text = open(os.path.join(bin_dir, wrapper)).read()
+            self.assertIn("exec /usr/bin/env -i ", text, wrapper)
+            self.assertIn(" -I ", text, wrapper)
+
+
 def fake_secrets():
     """Fake secrets, assembled at run time so that secret scanners stay quiet on this file."""
     return {"github": "gh" + "p_" + "A1b2C3d4E5f6G7h8I9j0" * 2, "aws": "AK" + "IA" + "ABCDEFGHIJKLMNOP",
