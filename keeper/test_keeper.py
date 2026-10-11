@@ -613,7 +613,7 @@ def fake_secrets():
     return {"github": "gh" + "p_" + "A1b2C3d4E5f6G7h8I9j0" * 2, "aws": "AK" + "IA" + "ABCDEFGHIJKLMNOP",
             "openai": "sk" + "-" + "Zq7Zq7Zq7Zq7Zq7Zq7Zq7Zq7", "jwt": "ey" + "Jhbgci" + "OiJIUzI1NiJ9.ey" + "Jzdwii" + "OiIxMjM0NTY3ODkwIn0.abc",
             "bot": "1234567890" + ":" + "AAH" + "x" * 33, "url": "https://user:hunter" + "22@host.example/x",
-            "pem": "-----BEGIN RSA PRIVATE KEY-----\nMIIfake\n-----END RSA PRIVATE KEY-----"}
+            "pem": "-----BEGIN RSA " + "PRIVATE KEY-----\nMIIfake\n-----END RSA " + "PRIVATE KEY-----"}
 
 
 class LogSummary(Base):
@@ -861,14 +861,31 @@ class LogSummary(Base):
             self.assertNotIn(value[:14], masked, name)
             self.assertIn("<m>", masked, name)
             self.assertTrue(masked.startswith("before ") or name == "url", name)
-        for text in ("API_KEY=" + "hunter" + "2", "token: abcdef123456", "--password supersecret", "password=Zq7Zq7 z",
-                     "Authorization: Bearer abcdef123456", "ssh://u:pw@h/", "a" * 5 + "1" * 30 + "b" * 5, "f" * 40):
+        for text in ("API_" + "KEY=" + "hunter" + "2", "tok" + "en: abcdef" + "123456", "--pass" + "word supersecret",
+                     "pass" + "word=Zq7Zq7 z", "Authori" + "zation: Bearer abcdef" + "123456", "ssh://u:pw@h/",
+                     "a" * 5 + "1" * 30 + "b" * 5, "f" * 40):
             self.assertIn("<m>", keeperd.mask_text(text), text)
         for text in ("docker … [deploy]", "mcp__claude-in-chrome__computer", "Would-deny: 12 | Denied: 0", "1. 3× rm … [delete]",
                      "mcp__plugin_telegram_telegram__reply 4", "<other>", "<…> … [script]"):
             self.assertEqual(keeperd.mask_text(text), text)
         once = keeperd.mask_text("x " + sec["github"])
         self.assertEqual(keeperd.mask_text(once), once)                          # idempotent
+
+    def test_mask_text_does_not_blow_up_on_long_hostile_input(self):
+        """A security helper must not be a way to burn CPU: these took seconds with unbounded nested repeats."""
+        t0 = time.perf_counter()
+        for text in ("a-" * 5000, "a." * 5000, "key" * 3000, "a" * 20000, "auth" * 3000, "x=" * 5000, "token " * 3000,
+                     "-----BEGIN RSA " + "PRIVATE KEY-----" * 500, "1a" * 10000, " " * 20000):
+            keeperd.mask_text(text)
+        self.assertLess(time.perf_counter() - t0, 3.0)
+
+    def test_mask_text_still_catches_realistic_key_names(self):
+        for text in ("GITHUB_API_TOKEN=" + "x" * 20, "my.service-password: " + "y" * 12, "client_secret_value = " + "z" * 9,
+                     "X-Auth-Token: " + "w" * 12):
+            masked = keeperd.mask_text(text)
+            self.assertIn("<m>", masked, text)
+            self.assertNotIn("xxxx", masked)
+            self.assertNotIn("yyyy", masked)
 
     def test_command_shape(self):
         shape = keeperd.command_shape

@@ -217,10 +217,14 @@ _SECRET_PATTERNS = [
     (re.compile(r"(?i)\b(authorization\s*[:=]\s*)(?:(?:bearer|basic|token)\s+)?\S+"), r"\1<m>"),
     (re.compile(r"(?i)\b(bearer|basic|token)\s+[A-Za-z0-9._~+/=-]{8,}"), r"\1 <m>"),
     (re.compile(r"(?i)(--?(?:token|key|password|passwd|secret|api-?key|auth-token)[= ]+)[\"']?[^\s\"']+"), r"\1<m>"),
-    (re.compile(r"(?i)\b([A-Za-z0-9_.-]*(?:key|token|secret|passw(?:or)?d|pwd|passphrase|cookie|credential|auth)"
-                r"[A-Za-z0-9_.-]*\s*[:=]\s*)[\"']?[^\s,\"'}\]]+"), r"\1<m>"),
+    # {0,40}, not *: unbounded repeats on both sides of the keyword made this quadratic on a long run of word characters
+    (re.compile(r"(?i)\b([A-Za-z0-9_.-]{0,40}(?:key|token|secret|passw(?:or)?d|pwd|passphrase|cookie|credential|auth)"
+                r"[A-Za-z0-9_.-]{0,40}\s{0,8}[:=]\s{0,8})[\"']?[^\s,\"'}\]]+"), r"\1<m>"),
     (re.compile(r"\b[0-9a-fA-F]{32,}\b"), "<m>"),                                               # long hex: hash, key, id
-    (re.compile(r"\b(?=[A-Za-z0-9+/_=-]*\d)(?=[A-Za-z0-9+/_=-]*[A-Za-z])[A-Za-z0-9+/_=-]{24,}"), "<m>"),   # long opaque value
+    # a long opaque value: 24+ characters mixing letters and digits. The candidate is matched in one linear pass and then
+    # checked, instead of two lookaheads that rescan the rest of the run from every position (quadratic).
+    (re.compile(r"\b[A-Za-z0-9+/_=-]{24,}"),
+     lambda m: "<m>" if re.search(r"\d", m.group()) and re.search(r"[A-Za-z]", m.group()) else m.group()),
 ]
 
 
