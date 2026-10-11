@@ -114,8 +114,8 @@ Still open, and stated so a reader does not over-trust the gate:
     resulting behaviour (a symlink the check cannot stat is treated as inside the safe repo) rather than asserting
     it should be a change, since asserting that would require the fix this limit explicitly defers.
   Until it is fixed: do not declare `--safe-git-repo` on a tree where the agent can create symlinks and you have not
-  reviewed what they point at; a `script`-only plan for anything that writes inside a safe repo closes the gap in
-  practice, at the cost of asking for script approval on edits that are otherwise ordinary.
+  reviewed what they point at, and read any plan that writes inside a safe repo before approving it: creating the
+  symlink there is the step that opens this gap.
 - **TOCTOU on files.** `python3 script.py` is judged on the file keeperd reads; the file can change before it runs.
 - **A process started under an approved plan keeps running after the plan ends.** The keeper gates tool calls, not
   the processes they spawn.
