@@ -9,6 +9,7 @@ example but not the class; FIXED_BYPASSES also covers the two follow-up entries 
 Everything else below is a technique the classifier already resists, kept here as a regression test.
 """
 import os, sys, unittest
+import unittest.mock
 import urllib.parse
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -336,6 +337,37 @@ class Disguise(unittest.TestCase):
             with self.subTest(tool=tool):
                 kind, _detail = g.classify(tool, {})
                 self.assertEqual(kind, "read", f"{tool!r} classified as {kind}, expected read")
+
+
+class SymlinkInSafeRepo(unittest.TestCase):
+    """Documents a known, accepted limit (docs/design-keeper.md, "A symlink inside a safe repo...", council of
+    11/10): under keeperd, `_keeper` cannot traverse the agent's (mode 750) home, so `os.path.realpath` cannot
+    follow a symlink inside a declared safe repo, and `_nested_git_between` cannot stat what the symlink actually
+    points at either. A symlink planted inside a safe repo, pointing at a different repo, is then judged as the
+    safe repo itself. The owner decided (11/10) to accept this for v1 rather than widen the installer's reach
+    into the agent's home with a new ACL; this test documents the behaviour, it does not assert it should change.
+    Permissions are simulated by patching (this suite never touches a real machine, and never runs as a user
+    whose root-bypass would make a real chmod meaningless anyway)."""
+
+    def setUp(self):
+        self._safe, self._cwd = list(g.SAFE_GIT_REPOS), g.CWD
+        g.SAFE_GIT_REPOS[:] = ["/safe"]
+        g.CWD = "/safe/link"                 # really a symlink to a different, agent-writable repo
+
+    def tearDown(self):
+        g.SAFE_GIT_REPOS[:] = self._safe
+        g.CWD = self._cwd
+
+    def test_unresolved_symlink_is_judged_as_the_safe_repo(self):
+        def _no_resolve(p):
+            return p                         # what realpath returns when it cannot follow the symlink at all
+
+        def _cannot_stat(p):
+            raise PermissionError(p)         # what exists() raises when it cannot traverse into the real target
+
+        with unittest.mock.patch("go_gate.os.path.realpath", side_effect=_no_resolve), \
+             unittest.mock.patch("go_gate.os.path.exists", side_effect=_cannot_stat):
+            self.assertTrue(g.git_repo_is_safe([]))
 
 
 if __name__ == "__main__":

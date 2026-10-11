@@ -96,6 +96,26 @@ Still open, and stated so a reader does not over-trust the gate:
   needs `actions=script`, not `edit`. The nested-repo check reads the filesystem, which keeperd (running as `_keeper`)
   may not be able to traverse in the agent's tree; there it is best-effort and falls back to the prefix rule. The strong
   parade, for later: the installer makes each safe repo's `.git/config` root-owned.
+- **A symlink inside a safe repo can point at a different repo (council of 11/10, owner-checked).** The agent's home
+  is normally mode 750, and `_keeper` has no group membership there, so it cannot traverse into it. `os.path.realpath`
+  then cannot follow (or even stat) a symlink inside a declared safe repo that points outside it, and
+  `_nested_git_between` skips what it cannot stat (same best-effort fallback as above). The symlink's target is then
+  judged AS the safe repo: a git read verb run through it is a read, with none of the target's own `.git/config` or
+  hooks checked. This is accepted, not fixed, for v1 (see the owner's decision below), for two reasons:
+  - **it needs a prior write to exist.** The agent cannot plant the symlink, or clone the hostile repo it points at,
+    without that write itself going through go-gate: in block mode it needs a plan whose actions cover it (`edit` at
+    least; see the `~/bin` / `script` carve-out above for the same reasoning applied to planted executables). A
+    careless `edit` plan scoped broadly inside the safe repo's tree is the realistic way this gets created, not a
+    cold read-only bypass with no prior approval at all.
+  - **the installer cannot grant the traversal without widening `_keeper`'s reach past this repo.** An ACL giving
+    `_keeper` search-only access to the agent's home (so it could resolve the symlink) would need to be scoped
+    per-repo to stay narrow, applied only with `--apply`, and reversed by the rollback; that is real installer work,
+    better done once, deliberately, than as a last-minute item here. `go-gate/test_disguise.py` documents the
+    resulting behaviour (a symlink the check cannot stat is treated as inside the safe repo) rather than asserting
+    it should be a change, since asserting that would require the fix this limit explicitly defers.
+  Until it is fixed: do not declare `--safe-git-repo` on a tree where the agent can create symlinks and you have not
+  reviewed what they point at; a `script`-only plan for anything that writes inside a safe repo closes the gap in
+  practice, at the cost of asking for script approval on edits that are otherwise ordinary.
 - **TOCTOU on files.** `python3 script.py` is judged on the file keeperd reads; the file can change before it runs.
 - **A process started under an approved plan keeps running after the plan ends.** The keeper gates tool calls, not
   the processes they spawn.
