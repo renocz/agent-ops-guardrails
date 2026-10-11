@@ -6,6 +6,22 @@ One version scheme: **a repository tag per release**. Components have no version
 
 Next: one week of the keeper in block mode, after a dry run of refusal, approval, expiry, replay and a Telegram outage.
 
+- **keeper: end-to-end dry run of block mode (11/10, council of 11/10).** `keeper/test_block_dryrun.py` exercises
+  the real chain the `FakeBot`-based unit tests never touch: hook client subprocess -> socket -> `Keeper` -> the
+  real `TelegramBot` HTTP code -> a fake, local-only Telegram Bot API (`http.server` on 127.0.0.1, never a real
+  network call) -> button click -> `getUpdates` -> decision -> next hook call. 24 tests across refusal, approval,
+  expiry, replay (same update_id twice, a used nonce under a new update_id, an old plan's button after a new
+  proposal, a stranger, another chat), a Telegram outage (502, a hang past the client's timeout, connection
+  refused), stop, and `/summary`; the daemon-down/no-mode-file case was already covered exactly by
+  `test_keeper.py`'s `Socket.test_daemon_down_fails_closed`, so it is not duplicated. `TelegramBot` gained
+  `API_BASE` and `DEFAULT_TIMEOUT` class attributes, overridden per test INSTANCE (never on the class, so a
+  leaked poll thread from a finished test can only ever keep hitting its own dead fake server). The whole file
+  runs in about 6 seconds.
+  - **Bug found and fixed:** `serve()`'s socket handler replied to the hook (`"plan sent to the human for
+    approval"`) BEFORE attempting `send_plan()`, so the agent was told the plan was sent even when Telegram was
+    actually unreachable. `send_plan()` is now attempted first; the reason is rewritten to say so only on
+    failure. Proven by a test that fails before the fix and a mutation check that reverts the ordering and shows
+    it fail again (3/8 outage tests, the ones that check what the agent is told at propose time).
 - **keeper: the installed hook's environment is locked, and now tested (11/10).** `KEEPER_TEST_MODE` /
   `KEEPER_SOCKET_FOR_TESTS` in `keeper_client.py` are safe only because `install-keeper.sh` runs the hook and the
   `keeper-propose`/`keeper-status` wrappers with `/usr/bin/env -i … -I`, an empty environment a project's
