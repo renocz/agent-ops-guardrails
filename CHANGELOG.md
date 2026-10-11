@@ -6,22 +6,33 @@ One version scheme: **a repository tag per release**. Components have no version
 
 Next: one week of the keeper in block mode, after a dry run of refusal, approval, expiry, replay and a Telegram outage.
 
-- **keeper: end-to-end dry run of block mode (11/10, council of 11/10).** `keeper/test_block_dryrun.py` exercises
-  the real chain the `FakeBot`-based unit tests never touch: hook client subprocess -> socket -> `Keeper` -> the
-  real `TelegramBot` HTTP code -> a fake, local-only Telegram Bot API (`http.server` on 127.0.0.1, never a real
-  network call) -> button click -> `getUpdates` -> decision -> next hook call. 24 tests across refusal, approval,
-  expiry, replay (same update_id twice, a used nonce under a new update_id, an old plan's button after a new
-  proposal, a stranger, another chat), a Telegram outage (502, a hang past the client's timeout, connection
-  refused), stop, and `/summary`; the daemon-down/no-mode-file case was already covered exactly by
-  `test_keeper.py`'s `Socket.test_daemon_down_fails_closed`, so it is not duplicated. `TelegramBot` gained
-  `API_BASE` and `DEFAULT_TIMEOUT` class attributes, overridden per test INSTANCE (never on the class, so a
-  leaked poll thread from a finished test can only ever keep hitting its own dead fake server). The whole file
-  runs in about 6 seconds.
+- **keeper: end-to-end dry run of block mode (11/10, council of 11/10, owner review of PR #8).**
+  `keeper/test_block_dryrun.py` exercises the real chain the `FakeBot`-based unit tests never touch: hook client
+  subprocess -> socket -> `Keeper` -> the real `TelegramBot` HTTP code -> a fake, local-only Telegram Bot API
+  (`http.server` on 127.0.0.1, never a real network call) -> button click -> `getUpdates` -> decision -> next
+  hook call. 24 tests across refusal, approval, expiry, replay (same update_id twice, a used nonce under a new
+  update_id, an old plan's button after a new proposal, a stranger, another chat), a Telegram outage (502, a
+  hang past the client's timeout, connection refused), stop, and `/summary`; the daemon-down/no-mode-file case
+  was already covered exactly by `test_keeper.py`'s `Socket.test_daemon_down_fails_closed`, so it is not
+  duplicated. `TelegramBot` gained `API_BASE` and `DEFAULT_TIMEOUT` class attributes, overridden per test
+  INSTANCE (never on the class, so a leaked poll thread from a finished test can only ever keep hitting its own
+  dead fake server). The whole file runs in 6-13 seconds depending on which timing-sensitive scenarios run.
   - **Bug found and fixed:** `serve()`'s socket handler replied to the hook (`"plan sent to the human for
     approval"`) BEFORE attempting `send_plan()`, so the agent was told the plan was sent even when Telegram was
     actually unreachable. `send_plan()` is now attempted first; the reason is rewritten to say so only on
     failure. Proven by a test that fails before the fix and a mutation check that reverts the ordering and shows
     it fail again (3/8 outage tests, the ones that check what the agent is told at propose time).
+  - **Second bug, found on the owner's own review: a real Telegram hang still told the agent the wrong thing.**
+    `send_plan()` ran with `DEFAULT_TIMEOUT` (40 s), well past the hook client's own 10 s socket read (`ask()` in
+    `keeper_client.py`) — so a hanging Telegram made the client give up first, wrongly report "the keeper daemon
+    is not reachable", and keeperd's reply then land on a closed socket (`BrokenPipeError`). `send_plan()` now
+    uses its own `HOOK_WAIT_TIMEOUT` (5 s, named next to `API_BASE`/`DEFAULT_TIMEOUT`), clearly under the
+    client's 10 s; `getUpdates`' long poll keeps 40 s, and every other `sendMessage` (confirmations, `/summary`,
+    the startup line) keeps the default too, since none of them run while a hook is waiting. Tested with the
+    production constants, no override (a real ~5 s wait, one test), and mutation-checked by setting
+    `HOOK_WAIT_TIMEOUT` back to 40.
+  - **Installer path fixed for macOS too:** `InstallerEnvLock` hardcoded the Linux managed-settings path; it now
+    mirrors `install-keeper.sh`'s own `uname -s` branch instead, so it passes on the owner's Mac as well as CI.
 - **docs: owner checklist for the block-mode dry run (11/10).** `docs/block-mode-dry-run.md`: a ~15-minute pass
   on the real machine, right after reinstalling without `--observe`, covering refusal, approval, expiry, replay,
   a Telegram outage (turn networking off briefly) and stop — only ever with harmless commands (`touch`/`ls`
@@ -33,9 +44,8 @@ Next: one week of the keeper in block mode, after a dry run of refusal, approval
   `keeper-propose`/`keeper-status` wrappers with `/usr/bin/env -i … -I`, an empty environment a project's
   `.claude/settings.json` `env` key or a shell profile cannot see through. `test_keeper.py`'s new
   `InstallerEnvLock` runs the installer in `--prefix` mode (no root) and checks the hook command and both
-  wrappers for `env -i`/`-I`; mutation-checked by dropping `env -i` in a scratch copy. Reads the managed-settings
-  path for the platform it actually runs on (owner review, 11/10: a Linux-only path made this fail on the
-  owner's own Mac, where the installer writes it under `/Library/Application Support/ClaudeCode/`).
+  wrappers for `env -i`/`-I`; mutation-checked by dropping `env -i` in a scratch copy (later fixed to read the
+  managed-settings path per platform, see the owner-review entry above).
 
 ## v0.10 (11/10/2026)
 

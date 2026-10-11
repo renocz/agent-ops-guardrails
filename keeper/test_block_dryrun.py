@@ -392,10 +392,14 @@ class ETelegramOutage(DryRunBase):
         self.assertFalse(self.fake.state.sent)                     # genuinely nothing was sent
 
     def test_hang_past_the_client_timeout_at_propose_time(self):
-        self.bot.DEFAULT_TIMEOUT = 0.3
-        self.fake.state.fail_mode, self.fake.state.hang_seconds = "hang", 1.5
+        """Production constants, no override (owner review, 11/10): send_plan()'s HOOK_WAIT_TIMEOUT (5s) must
+        give up well before the hook's own 10s socket read, or the client times out first and wrongly reports
+        the daemon itself unreachable, with keeperd's later reply landing on a closed socket (BrokenPipeError).
+        A real wait a little over 5s; one test only."""
+        self.fake.state.fail_mode, self.fake.state.hang_seconds = "hang", 6.0
         reason = self.propose("id=p1 ; targets=web ; actions=deploy ; ttl=20")
         self.assertIn("could not reach Telegram", reason)
+        self.assertNotIn("daemon is not reachable", reason)
         self.assertTrue(self.wait_for(lambda: "telegram-error" in self.log_events()))
         self.assertIn(self.log_records("telegram-error")[-1]["error"], ("TimeoutError", "timeout"))
 
