@@ -4,6 +4,15 @@ One version scheme: **a repository tag per release**. Components have no version
 
 ## Unreleased (towards v1.0)
 
+- **docs: "How this compares" — six peer projects and the LangGraph HITL pattern (11/10).** A dated table in
+  README.md, sourced from each project's own README/docs only (no blog posts, no sponsored write-ups): tarides/
+  sudo-proxy, luisgf/infrabroker, BrightbeamAI/chap, lacs-project/sysknife, OthmaneBlial/term_mcp_deepseek,
+  Proofpane, and LangGraph's `interrupt()` pattern. Columns: where the approval lives, what it covers, its
+  granularity, its out-of-band channel, an observe mode, an audit log, and whether secrets are kept from the
+  model. States plainly where others are stronger (infrabroker's and sysknife's signed, hash-chained audit logs
+  versus keeper's plain `log.jsonl`; sysknife's typed-action catalogue versus go-gate's heuristic classifier), and
+  marks cells "not verified" rather than guessing, including every claim that depends on Proofpane's closed-source
+  daemon.
 - **go-gate: disguised-command test suite from the apex catalogue (11/10).** `go-gate/test_disguise.py` translates
   encoding/decoding, Unicode look-alikes, quoting/splitting, indirection, substitution/redirection and path-trick
   techniques (from NirDiamant/agents-towards-production's `tutorials/agent-security-apex/`, techniques only, not
