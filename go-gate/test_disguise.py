@@ -4,8 +4,9 @@ methods, example_prompts.csv's attack categories) and from the project's own rev
 classify() with a string only: nothing is executed, nothing touches the network.
 
 Two real bypasses turned up and are fixed in go_gate.py; see FIXED_BYPASSES for each one's technique, example, why
-it used to pass, and how it is closed now. Everything else below is a technique the classifier already resists,
-kept here as a regression test.
+it used to pass, and how it is closed now. A follow-up owner review (11/10) found both fixes closed their exact
+example but not the class; FIXED_BYPASSES also covers the two follow-up entries that close the class itself.
+Everything else below is a technique the classifier already resists, kept here as a regression test.
 """
 import os, sys, unittest
 
@@ -24,12 +25,30 @@ FIXED_BYPASSES = [
      "the write-verb check only ever looked at the first split word or a word right after and/then/or; with no "
      "separator at all the whole name is one word, so the embedded 'delete' was never seen, while the read check "
      "matched the leading 'get'.",
-     "mcp_writes() also searches a single, unsplit word for a write verb anywhere in it, not just as the whole word."),
+     "mcp_writes() also searches a single, unsplit word for a write verb anywhere in it."),
+    ("MCP method, and/then/or fused with no separator onto a write verb, in a word that is not the whole method "
+     "(`get_itemanddelete`, `get_item_anddelete`, `listanddelete_item`)",
+     "mcp__x__get_itemanddelete",
+     "the single-run-on-word search above only runs when the WHOLE method is one word; here the method still "
+     "splits on '_', so the fused 'anddelete' sat in a non-first word that nothing was checking.",
+     "mcp_writes() also searches every word for and/then/or glued straight onto a write verb, since a connector "
+     "spelled out by coincidence inside an object word essentially never happens (checked against 94 real tool "
+     "names from the GitHub, Google Drive, Slack and Chrome DevTools MCP servers: 0 false positives, see "
+     "REAL_MCP_TOOL_NAMES; a broader 'any write verb anywhere in any word' rule was tried first and rejected: it "
+     "misclassified get_commit and list_settings, which this fix must keep as reads, plus 3 more of those 94 real "
+     "names reachable through classify() — get_check_run, list_commits, search_commits)."),
     ("Percent-encoded action word in a GET URL (`%72estart`, `%77ebhook`, `%61ction=`)",
      "curl https://example.com/api/v1/%72estart",
      "is_action_url() matched the action words and query keys against the raw path/query text, which never spelled "
      "out 'restart', 'webhook' or 'action' literally.",
-     "is_action_url() percent-decodes each path segment and the query string before matching."),
+     "is_action_url() percent-decodes the whole URL before matching."),
+    ("Double percent-encoding, an encoded path separator, and a file extension on the action word "
+     "(`%2572estart`, `api%2Frestart`, `restart%3Fa`, `restart.php`)",
+     "curl https://h/api%2Frestart",
+     "one round of decoding does not turn %2572estart into restart, or %2F/%3F into the real `/`/`?` that would "
+     "move where the path actually ends; a `.php` on the action word never matched the plain word either.",
+     "the whole URL is percent-decoded to a fixed point (bounded at 3 rounds) BEFORE the path/query split runs "
+     "again on the now-real separators, and the last path segment is also compared with its extension stripped."),
 ]
 
 
@@ -126,12 +145,20 @@ URL_ENCODING = [
     ("percent-encoded action word, last path segment", "curl https://example.com/api/v1/%72estart"),
     ("percent-encoded action word, webhook segment", "curl 'https://example.com/svc/%77ebhook/x'"),
     ("percent-encoded action query key", "curl 'https://example.com/svc?%61ction=delete'"),
+    ("double percent-encoding", "curl https://h/api/%2572estart"),
+    ("double percent-encoding in a query key", "curl 'https://h/x?%2561ction=1'"),
+    ("percent-encoded path separator (%2F)", "curl https://h/api%2Frestart"),
+    ("percent-encoded query separator (%3F)", "curl 'https://h/x/restart%3Fa'"),
+    ("action word with a file extension", "curl https://h/x/restart.php"),
 ]
 
 MCP_FUSED_VERB = [
     ("get+delete, no separator at all", "mcp__x__getanddeleteitem"),
     ("list+delete, no separator at all", "mcp__x__listdeletefiles"),
     ("find+remove, no separator at all", "mcp__x__findandremoveitem"),
+    ("get+and+delete fused in a middle word", "mcp__x__get_itemanddelete"),
+    ("get, item, and+delete fused (3-way split)", "mcp__x__get_item_anddelete"),
+    ("list+and+delete fused in the first word", "mcp__x__listanddelete_item"),
 ]
 
 # Genuinely read-only commands: must stay "read" through every fix above.
@@ -147,6 +174,7 @@ SAFE_READS = [
     "sed -n '1,5p' /etc/hosts",
     "curl https://example.com/api/v1/status",
     "tar -tf /srv/backup.tar.gz",
+    "curl https://h/docs/index.php",                 # extension stripped ("index"), still not an action word
 ]
 
 # MCP methods that start with a read verb and are a single run-on word, but hide no write verb: the fix for
@@ -155,6 +183,30 @@ SAFE_MCP_SINGLE_WORD = [
     "mcp__x__getstatuses",
     "mcp__x__searchrepositories",
     "mcp__x__scrape",
+]
+
+# Known object-naming methods the connector fix must not touch either, named explicitly by the owner's review.
+SAFE_MCP_OBJECT_WORDS = [
+    "mcp__x__get_status",
+    "mcp__github__get_commit",
+    "mcp__x__list_settings",
+]
+
+# A sample of real, documented MCP tool names (GitHub, Google Drive, Slack and Chrome DevTools servers) that are
+# genuine reads today and must stay reads: the measured check that the connector fix (mcp_writes) does not turn
+# real read tools into changes. The broader "any write verb anywhere in any word" rule considered and rejected for
+# this fix (see FIXED_BYPASSES) would have misclassified 5 of these: get_check_run, list_commits, search_commits,
+# plus get_commit and list_settings above (the server's own name-prefix drop, _mcp_method, is unaffected either
+# way). Some other real names (issue_write, fork_repository, performance_start_trace, …) are already "change" by
+# plain default-deny, before and after, and are not read-false-positive candidates, so they are not in this list.
+REAL_MCP_TOOL_NAMES = [
+    "mcp__github__get_check_run", "mcp__github__list_commits", "mcp__github__search_commits",
+    "mcp__github__get_me", "mcp__github__list_pull_requests", "mcp__github__search_repositories",
+    "mcp__github__get_latest_release",
+    "mcp__Google_Drive__search_files", "mcp__Google_Drive__list_recent_files",
+    "mcp__Google_Drive__get_file_metadata", "mcp__Google_Drive__read_file_content",
+    "mcp__slack__list_channels", "mcp__slack__get_channel_history", "mcp__slack__get_thread_replies",
+    "mcp__chrome-devtools__list_network_requests", "mcp__chrome-devtools__list_console_messages",
 ]
 
 
@@ -211,6 +263,20 @@ class Disguise(unittest.TestCase):
 
     def test_safe_mcp_single_word_stays_read(self):
         for tool in SAFE_MCP_SINGLE_WORD:
+            with self.subTest(tool=tool):
+                kind, _detail = g.classify(tool, {})
+                self.assertEqual(kind, "read", f"{tool!r} classified as {kind}, expected read")
+
+    def test_safe_mcp_object_words_stay_read(self):
+        """Named explicitly by the owner's review: must not regress when the connector check is extended."""
+        for tool in SAFE_MCP_OBJECT_WORDS:
+            with self.subTest(tool=tool):
+                kind, _detail = g.classify(tool, {})
+                self.assertEqual(kind, "read", f"{tool!r} classified as {kind}, expected read")
+
+    def test_real_mcp_tool_names_stay_read(self):
+        """Measured false-positive check for the connector fix, on real documented MCP tool names."""
+        for tool in REAL_MCP_TOOL_NAMES:
             with self.subTest(tool=tool):
                 kind, _detail = g.classify(tool, {})
                 self.assertEqual(kind, "read", f"{tool!r} classified as {kind}, expected read")
