@@ -56,7 +56,9 @@ MESSAGES = {
         "ans_rejected": "rejected",
         "ans_expired": "expired: ask the agent to propose again",
         "ans_approved": "approved for {ttl} min",
-        "started": "🔐 keeper started: changes now need your approval here.",
+        "start_block": "🔐 keeper started: changes now need your approval here.",
+        "start_observe": "🔐 keeper started in observe mode: nothing is blocked, events are only logged. "
+                         "Send /summary to see what would have been refused.",
         "sum_title": "📊 Keeper summary: last {days} day(s), mode {mode}",
         "sum_empty": "No event in this window.",
         "sum_unreadable": "The log cannot be read.",
@@ -96,7 +98,9 @@ MESSAGES = {
         "ans_rejected": "refusé",
         "ans_expired": "expiré : demandez à l'agent de proposer à nouveau",
         "ans_approved": "approuvé pour {ttl} min",
-        "started": "🔐 keeper démarré : les modifications demandent maintenant votre approbation ici.",
+        "start_block": "🔐 keeper démarré : les modifications demandent maintenant votre approbation ici.",
+        "start_observe": "🔐 keeper démarré en mode observation : rien n'est bloqué, les événements sont seulement "
+                         "journalisés. Envoyez /summary (ou /resume) pour voir ce qui aurait été refusé.",
         "sum_title": "📊 Résumé du keeper : {days} dernier(s) jour(s), mode {mode}",
         "sum_empty": "Aucun événement sur cette période.",
         "sum_unreadable": "Le journal est illisible.",
@@ -130,6 +134,12 @@ def t(lang, key, **kw):
             except (KeyError, IndexError, ValueError):
                 continue
     return key
+
+
+def startup_message(lang, mode):
+    """What the human reads when the daemon starts. Anything but "block" is observe, as in Keeper.check(): there nothing
+    is refused, so "changes now need your approval" would be a false promise."""
+    return t(lang, "start_block" if mode == "block" else "start_observe")
 
 
 class Msg(str):
@@ -703,7 +713,7 @@ def main():
     keeper = Keeper(cfg, bot)
     threading.Thread(target=bot.poll, args=(keeper,), daemon=True).start()
     try:
-        bot.send(t(keeper.lang, "started"))
+        bot.send(startup_message(keeper.lang, cfg["mode"]))
     except Exception:
         keeper.log({"event": "telegram-error-at-start"})
     serve(keeper, cfg)

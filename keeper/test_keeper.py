@@ -393,6 +393,88 @@ class Messages(Base):
         self.assertEqual(self.k.lang, "en")
 
 
+class Startup(Base):
+    """The line sent when the daemon starts must say what the mode really does."""
+
+    def start(self, mode, lang="en"):
+        """Run the real main() with a fake Telegram and no socket; return what it sent to the human."""
+        path = os.path.join(self.dir, f"config-{mode}-{lang}.json")
+        with open(path, "w") as f:
+            json.dump(dict(self.cfg, mode=mode, lang=lang, state_dir=os.path.join(self.dir, f"st-{mode}-{lang}")), f)
+        sent = []
+
+        class FakeTelegram:
+            def __init__(self, cfg):
+                self.cfg = cfg
+
+            def send(self, text):
+                sent.append(text)
+
+            def poll(self, keeper):
+                pass
+
+        saved = keeperd.TelegramBot, keeperd.serve, sys.argv
+        keeperd.TelegramBot, keeperd.serve, sys.argv = FakeTelegram, (lambda keeper, cfg, ready=None: None), ["keeperd.py", path]
+        try:
+            keeperd.main()
+        finally:
+            keeperd.TelegramBot, keeperd.serve, sys.argv = saved
+        return sent
+
+    def test_block_mode_keeps_the_original_meaning(self):
+        self.assertEqual(self.start("block"), ["🔐 keeper started: changes now need your approval here."])
+
+    def test_observe_mode_says_nothing_is_blocked(self):
+        (text,) = self.start("observe")
+        self.assertIn("observe mode", text)
+        self.assertIn("nothing is blocked", text)
+        self.assertIn("only logged", text)
+        self.assertIn("/summary", text)
+        self.assertNotIn("need your approval", text)
+
+    def test_both_modes_in_french(self):
+        (block,) = self.start("block", "fr")
+        self.assertIn("demandent maintenant votre approbation", block)
+        (observe,) = self.start("observe", "fr")
+        for want in ("mode observation", "rien n'est bloqué", "journalisés", "/summary"):
+            self.assertIn(want, observe)
+        self.assertNotIn("demandent maintenant votre approbation", observe)
+
+    def test_any_mode_but_block_is_observe_as_in_check(self):
+        """Keeper.check() refuses nothing unless mode == "block"; the message follows the same rule."""
+        for mode in ("observe", "log", "", None, "BLOCK"):
+            self.assertIn("nothing is blocked", keeperd.startup_message("en", mode), mode)
+            self.k.cfg["mode"] = mode
+            self.assertTrue(self.allowed(*bash("docker restart web")), mode)       # really not blocked
+        self.assertNotIn("nothing is blocked", keeperd.startup_message("en", "block"))
+
+    def test_a_failing_telegram_at_start_is_logged_not_fatal(self):
+        path = os.path.join(self.dir, "config-down.json")
+        with open(path, "w") as f:
+            json.dump(dict(self.cfg, mode="observe", state_dir=os.path.join(self.dir, "st-down")), f)
+
+        class DownTelegram:
+            def __init__(self, cfg):
+                pass
+
+            def send(self, text):
+                raise OSError("network down")
+
+            def poll(self, keeper):
+                pass
+
+        served = []
+        saved = keeperd.TelegramBot, keeperd.serve, sys.argv
+        keeperd.TelegramBot, keeperd.serve, sys.argv = DownTelegram, (lambda keeper, cfg, ready=None: served.append(1)), ["keeperd.py", path]
+        try:
+            keeperd.main()
+        finally:
+            keeperd.TelegramBot, keeperd.serve, sys.argv = saved
+        self.assertEqual(served, [1])                                               # the daemon still serves
+        with open(os.path.join(self.dir, "st-down", "log.jsonl")) as f:
+            self.assertIn("telegram-error-at-start", [json.loads(x)["event"] for x in f])
+
+
 @unittest.skipUnless(shutil.which("bash") and os.path.exists("/usr/bin/python3") and
                      subprocess.run(["id", "nobody"], capture_output=True).returncode == 0, "needs bash, /usr/bin/python3, user nobody")
 class InstallerLang(unittest.TestCase):

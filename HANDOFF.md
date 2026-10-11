@@ -9,7 +9,7 @@ Delete this file in the last commit once everything is done.
 |---|---|
 | 3. FR/EN messages (`lang`, `--lang`) | DONE, committed + pushed |
 | 1. `/summary` (Telegram only) | DONE, committed + pushed |
-| 2. Startup message by mode | not started |
+| 2. Startup message by mode | DONE, committed + pushed |
 | Docs (CHANGELOG, keeper/README, design-keeper) | not started |
 | Manual secret scan (no gitleaks in the sandbox), optional `keeper-summary` CLI | not started |
 | Draft PR | not opened |
@@ -31,12 +31,11 @@ Order chosen: 3, 1, 2 (the observe startup text mentions `/summary`, so it needs
 - Mutation check done by hand (13 guards broken one at a time in a copy: owner check, mask, shape validation, tool whitelist,
   socket op, lock, window, clamp, allowed_updates, language): every one is caught by a test.
 
-## Next: item 2
+## Done: item 2
 
-`start_block` / `start_observe` keys in both catalogues (the existing `started` key is the block text); `main()` in
-`keeper/keeperd.py` picks by `cfg["mode"]`; the observe text says nothing is blocked, events are only logged, and mentions
-`/summary`. Extract the choice into a small pure function so it can be tested without a network. Test both modes, both languages.
-Then drop the old `started` key (and its use in `main()`).
+`startup_message(lang, mode)` in `keeper/keeperd.py` (anything but `"block"` is observe, like `Keeper.check`); keys
+`start_block` / `start_observe` in both catalogues (the old `started` key is gone); `main()` sends it. Tests: class `Startup`
+runs the real `main()` with a fake Telegram and no socket.
 
 ## Left after that
 
@@ -48,7 +47,7 @@ this file in the last commit.
 
 ## Last test result
 
-go-gate 39 OK, keeper 90 OK (also under Python 3.9.25, 3.11, 3.12, 3.13), secret-guard 9 OK, council 14 OK, leak-check 32 OK;
+go-gate 39 OK, keeper 95 OK (the first 90 also under Python 3.9.25, 3.11, 3.12, 3.13; rerun 3.9 before the PR), secret-guard 9 OK, council 14 OK, leak-check 32 OK;
 installer dry-run OK. The `BrokenPipeError`/`JSONDecodeError` traceback printed during the keeper tests also appears on main
 (silent-client socket test): pre-existing.
 
