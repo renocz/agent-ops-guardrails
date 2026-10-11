@@ -17,7 +17,7 @@ Anything opaque (python -c, running a script, eval, variables as commands) is a 
 
 classify(tool_name, tool_input) -> (kind, detail) with kind in {"read", "talk", "change", "opaque"}.
 """
-import importlib.util, os, re, shlex, sys
+import importlib.util, os, re, shlex, sys, urllib.parse
 
 
 def _load_splitter():
@@ -710,16 +710,26 @@ ACTION_LAST = {"run", "exec", "execute", "restart", "reboot", "shutdown", "start
                "reset", "refresh", "scan", "rescan", "sync", "import", "deploy", "update", "upgrade", "install", "command"}
 
 
+def _unquote(s):
+    """Best-effort percent-decoding, so is_action_url cannot be fooled by %72estart instead of restart (apex suite,
+    11/10). Decoding can't make a benign path look like an action one, since ACTION_ANYWHERE/ACTION_LAST/the query
+    keys are plain ASCII words with no percent-encoding of their own."""
+    try:
+        return urllib.parse.unquote(s)
+    except Exception:
+        return s
+
+
 def is_action_url(arg):
     """A GET that can change state: a webhook or trigger anywhere in the path, an action word as the last path
     segment (/api/v1/restart, not /api/sync/status), or an action-style query parameter (?action=delete)."""
     m = re.search(r"://[^/\s?#]*(/[^\s?#]*)?(\?[^\s#]*)?", arg.strip("'\""))
     if not m:
         return False
-    segs = [x.lower() for x in (m.group(1) or "").split("/") if x]
+    segs = [_unquote(x).lower() for x in (m.group(1) or "").split("/") if x]
     if any(x in ACTION_ANYWHERE for x in segs) or (segs and segs[-1] in ACTION_LAST):
         return True
-    return bool(re.search(r"[?&](action|cmd|command|op|do|method)=", m.group(2) or "", re.I))
+    return bool(re.search(r"[?&](action|cmd|command|op|do|method)=", _unquote(m.group(2) or ""), re.I))
 
 
 CURL_VALUE_OPTS = set("XdFTocuHeAbxmwrEyYzCPQD")  # curl short options that take a value (K handled separately: config file)
@@ -966,10 +976,14 @@ def _mcp_method(tool):
 
 def mcp_writes(method):
     """A write verb as a verb of the method name: its first word, or a word after and/then/or (`get_and_delete_x`).
-    `get_commit` or `list_settings` name an object, not an action (Gemini audit of v0.9)."""
+    `get_commit` or `list_settings` name an object, not an action (Gemini audit of v0.9).
+    With no separator or case boundary at all (`getanddeleteitem`), the word never splits, so the first-word check
+    above never sees the "delete": searched anywhere in that one run-on word instead (apex suite, 11/10)."""
     words = [w.lower() for w in re.split(r"[_\-.]|(?<=[a-z])(?=[A-Z])", method) if w]
     verbs = words[:1] + [words[i + 1] for i, w in enumerate(words[:-1]) if w in ("and", "then", "or")]
-    return any(MCP_WRITE.fullmatch(v) for v in verbs)
+    if any(MCP_WRITE.fullmatch(v) for v in verbs):
+        return True
+    return len(words) == 1 and bool(MCP_WRITE.search(words[0]))
 
 
 BROWSER_READ_ACTIONS = {"screenshot", "scroll", "zoom", "hover", "wait", "mouse_move", "scroll_to"}
