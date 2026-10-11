@@ -36,9 +36,45 @@ state, replay a GO or remove the hook. The keeper moves the approval out of the 
 sudo ./install-keeper.sh --agent-user you --owner-id <id> --apply [--observe]          # real install
 ```
 
+Options worth knowing: `--observe` (log only, block nothing), `--lang fr` (what you read on Telegram in French, default
+`en`), `--safe-git-repo DIR` (repeatable, see the limits below).
+
 Create the keeper bot with BotFather first. With `--apply`, the installer asks for its token on the terminal (hidden
 input); the token is never passed as an argument. If managed settings already exist, the installer merges into them: it puts
 the keeper hook first, adds the deny rules, shows the diff and keeps a `.bak-keeper` copy.
+
+## Review the log before switching to block mode: `/summary`
+
+In observe mode nothing is blocked; every call that **would** have been refused is logged. That log belongs to the keeper
+user, so you cannot (and the agent must not) read it. Ask the bot instead: send it `/summary` (alias `/resume`) from your
+own chat.
+
+- `/summary` covers the last 7 days; `/summary 1` the last day (1 to 30 allowed).
+- You get: would-deny / denied / allowed-under-an-approved-plan counts, grouped by tool and by category; the 10 most
+  frequent **shapes**; plans proposed / approved / rejected / expired; Telegram errors; and what was ignored (unknown
+  socket clients, strangers writing to the bot, proposal floods).
+- A **shape** is the first word of the command and its category, arguments replaced by `…`: `docker … [deploy]`. The log
+  does not store the arguments of a refused command, so there is nothing secret to show. Lines logged by an older version have no shape; the summary
+  counts them ("no recorded shape") instead of guessing.
+- Only you can ask: the sender must be `owner_id` and the chat must be the configured one. A command attempt (text starting
+  with `/`) from anyone else is ignored and logged without its text. Any other message to the bot is ignored.
+- It is not available through the socket, whoever asks. It cannot reach the agent.
+- On the machine, as root: `sudo keeper-summary [days]` prints the same text. Mode 700, not setuid, refuses non-root.
+  **Do not run it inside an agent session**: the output would then be in front of the agent.
+
+What to look at before blocking: which shapes dominate (a routine you forgot to cover with a plan?), anything in the
+`script` category (it needs `actions=script`), and whether `Telegram errors` is zero (an approval you cannot receive is a
+block you cannot lift).
+
+## Language
+
+The config key `lang` (`en` by default, or `fr`; `install-keeper.sh --lang fr` writes it) sets the language of everything
+**you** read on Telegram: the approval card, the buttons, the answers, the startup line and the summary. What the **agent**
+reads (the reasons the hook returns when it refuses a call) always stays English: it is part of the agent contract. An
+unknown value falls back to English.
+
+The startup line follows the mode: in observe it says that nothing is blocked and events are only logged (and points to
+`/summary`); in block it says changes now need your approval.
 
 ## What the keeper does and does not guarantee (read these)
 
@@ -95,4 +131,8 @@ cover:
 - an unknown socket peer;
 - an `approve` op sent on the socket;
 - a daemon that is down;
-- classifier tricks.
+- classifier tricks;
+- the `/summary` command: who may ask, that no socket op returns it, that no argument or secret reaches the text, the
+  window, the split below the Telegram limit;
+- the French and English messages (every key in both languages, the English card unchanged), the startup line by mode,
+  and `keeper-summary`.

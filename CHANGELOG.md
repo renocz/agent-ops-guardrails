@@ -4,6 +4,20 @@ One version scheme: **a repository tag per release**. Components have no version
 
 ## Unreleased (towards v1.0)
 
+- **keeper: review the log before block mode (11/10).** Three things, none of them changes how approvals work.
+  - **`/summary` on the keeper bot** (alias `/resume`, `/summary 1` for one day, 7 by default, up to 30): counts of
+    would-deny / denied / allowed-under-a-plan by tool and category, the 10 most frequent command shapes, plans
+    proposed / approved / rejected / expired, Telegram errors, ignored attempts. Owner and configured chat only; not
+    reachable through the socket. The log now keeps a *shape* (first word and category, never arguments) for each refusal;
+    the summary re-validates what it prints and masks it. `sudo keeper-summary [days]` prints the same for root (mode 700,
+    not setuid). Design: "The log summary" in `docs/design-keeper.md`.
+  - **The startup message matches the mode.** In observe it no longer says "changes now need your approval": it says
+    nothing is blocked and events are only logged, and points to `/summary`.
+  - **Messages in French.** Everything the human reads on Telegram comes from one catalogue per language: config key
+    `lang` (`en` default), `install-keeper.sh --lang fr`. What the agent reads stays English. The English approval card is
+    byte-identical to before.
+  - Small fixes on the way: `poll()` split into `fetch_updates` / `handle_update` / `handle_message` (button handling moved
+    unchanged), the log is stamped by the injected clock, the config and token files are closed after reading.
 - **classifier: follow-ups from the PR review (09/10, R1-R4).** A second pass on the same PR found more "read" commands
   that execute or write; each has a test that fails before the fix.
   - **R1 (cd):** a `cd`/`pushd`/`popd` before a git command is followed, so `cd /tmp/x && git status` is judged against
