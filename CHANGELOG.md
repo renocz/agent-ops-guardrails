@@ -33,7 +33,9 @@ Next: one week of the keeper in block mode, after a dry run of refusal, approval
   `keeper-propose`/`keeper-status` wrappers with `/usr/bin/env -i … -I`, an empty environment a project's
   `.claude/settings.json` `env` key or a shell profile cannot see through. `test_keeper.py`'s new
   `InstallerEnvLock` runs the installer in `--prefix` mode (no root) and checks the hook command and both
-  wrappers for `env -i`/`-I`; mutation-checked by dropping `env -i` in a scratch copy.
+  wrappers for `env -i`/`-I`; mutation-checked by dropping `env -i` in a scratch copy. Reads the managed-settings
+  path for the platform it actually runs on (owner review, 11/10: a Linux-only path made this fail on the
+  owner's own Mac, where the installer writes it under `/Library/Application Support/ClaudeCode/`).
 
 ## v0.10 (11/10/2026)
 
