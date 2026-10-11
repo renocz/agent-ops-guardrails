@@ -4,6 +4,15 @@ One version scheme: **a repository tag per release**. Components have no version
 
 ## Unreleased (towards v1.0)
 
+Next: one week of the keeper in block mode, after a dry run of refusal, approval, expiry, replay and a Telegram outage.
+
+## v0.10 (11/10/2026)
+
+**The keeper, its first week in observe mode, and go-gate against disguised commands.** keeperd enforces go-gate's
+decision under a separate user, with approval on a second Telegram bot; a week of its would-deny log was reviewed and
+its false positives fixed; go-gate was run against a catalogue of disguised commands. A multi-model council reviewed
+the last two pull requests before the tag; its four items are fixed or, for one, documented as a known limit.
+
 - **go-gate and docs: council review of PR #6/#7, before v0.10 (11/10).** A multi-model council flagged four
   items, owner-verified; fixed in commits of their own:
   - **MCP: the server-prefix strip could erase a write verb.** `_mcp_method` drops the method's first word when
