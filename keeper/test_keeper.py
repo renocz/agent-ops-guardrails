@@ -3,7 +3,7 @@
 
 Run: python3 keeper/test_keeper.py   (no network, no install: a fake Telegram and a socket in a temp dir)
 """
-import contextlib, io, json, os, shlex, shutil, socket, stat, string, subprocess, sys, tempfile, threading, time, unittest
+import contextlib, io, json, os, platform, shlex, shutil, socket, stat, string, subprocess, sys, tempfile, threading, time, unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -621,7 +621,11 @@ class InstallerEnvLock(unittest.TestCase):
         self.addCleanup(shutil.rmtree, prefix, ignore_errors=True)
         subprocess.run(["bash", os.path.join(HERE, "install-keeper.sh"), "--agent-user", "nobody", "--owner-id", "1",
                         "--prefix", prefix], capture_output=True, text=True, timeout=60, check=True)
-        managed = json.load(open(os.path.join(prefix, "etc", "claude-code", "managed-settings.json")))
+        # Mirrors install-keeper.sh's own `uname -s` branch: MANAGED is a different path on macOS (owner review,
+        # 11/10 — the fixed path below only matched Linux, so this failed on the owner's own Mac).
+        managed_rel = ("Library/Application Support/ClaudeCode/managed-settings.json" if platform.system() == "Darwin"
+                       else "etc/claude-code/managed-settings.json")
+        managed = json.load(open(os.path.join(prefix, managed_rel)))
         hook_cmd = managed["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
         self.assertTrue(hook_cmd.startswith("/usr/bin/env -i "), hook_cmd)
         self.assertIn(" -I ", hook_cmd, hook_cmd)
