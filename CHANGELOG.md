@@ -4,6 +4,65 @@ One version scheme: **a repository tag per release**. Components have no version
 
 ## Unreleased (towards v1.0)
 
+- **go-gate and docs: council review of PR #6/#7, before v0.10 (11/10).** A multi-model council flagged four
+  items, owner-verified; fixed in commits of their own:
+  - **MCP: the server-prefix strip could erase a write verb.** `_mcp_method` drops the method's first word when
+    it matches the server segment, before `mcp_writes` ever ran — a hostile MCP server picks its own name, so
+    `mcp__delete__delete_search` stripped to the innocuous-looking `search`. `classify()` now also checks
+    `mcp_writes()` on the full, unstripped method; a write verb in either form is a change. An empty method
+    (nothing left after the drop, or empty to begin with) is also never a read.
+  - **`is_action_url()`, two leftovers.** A `/`-segment is now also split on its first `;` before comparing
+    (`restart;jsessionid=X` still reaches "restart" — containers route on the part before it and ignore the
+    rest). Percent-decoding that is still changing after the bounded rounds now returns True (an action URL)
+    outright, instead of matching whatever half-decoded text it got to.
+  - **Accepted false positive.** Comparing the last path segment with its extension stripped (added for
+    `restart.php`) means `https://h/status/sync.php` — a plausible read-only status page named "sync" — is now a
+    change too, since `sync` is one of the action words. Not fixed: the project's own rule is to classify as a
+    change when in doubt, and an allowlist of "safe" page names would need to be complete to be worth adding,
+    which a blocklist/allowlist of this shape never is (same reasoning as the awk/sed program checks elsewhere in
+    this file).
+  - **Symlinks under keeperd — owner decided B (document, don't fix for v1).** The agent's home being mode 750
+    means `_keeper` cannot traverse it, so `git_repo_is_safe` cannot resolve a symlink inside a declared safe
+    repo pointing at another repo, and `_nested_git_between` skips what it cannot stat; such a symlink is then
+    judged as the safe repo. No installer change: see docs/design-keeper.md, Known limits, for why (the symlink
+    needs a prior approved write to exist; the ACL that would fix it is real installer work better done
+    deliberately) and `go-gate/test_disguise.py`'s `SymlinkInSafeRepo` for the documented behaviour.
+  - The LangGraph `interrupt()` row in "How this compares" is marked **not verified**: `docs.langchain.com` could
+    not be reached from this environment (checked three times across two sessions), so the row still rests on a
+    secondary summary of the official docs, not a direct read.
+- **docs: "How this compares" — six peer projects and the LangGraph HITL pattern (11/10).** A dated table in
+  README.md, sourced from each project's own README/docs only (no blog posts, no sponsored write-ups): tarides/
+  sudo-proxy, luisgf/infrabroker, BrightbeamAI/chap, lacs-project/sysknife, OthmaneBlial/term_mcp_deepseek,
+  Proofpane, and LangGraph's `interrupt()` pattern. Columns: where the approval lives, what it covers, its
+  granularity, its out-of-band channel, an observe mode, an audit log, and whether secrets are kept from the
+  model. States plainly where others are stronger (infrabroker's and sysknife's signed, hash-chained audit logs
+  versus keeper's plain `log.jsonl`; sysknife's typed-action catalogue versus go-gate's heuristic classifier), and
+  marks cells "not verified" rather than guessing, including every claim that depends on Proofpane's closed-source
+  daemon.
+- **go-gate: disguised-command test suite from the apex catalogue (11/10, closed the class on a follow-up owner
+  review).** `go-gate/test_disguise.py` translates encoding/decoding, Unicode look-alikes, quoting/splitting,
+  indirection, substitution/redirection and path-trick techniques (from NirDiamant/agents-towards-production's
+  `tutorials/agent-security-apex/`, techniques only, not its recommendations) into shell and MCP forms, calling
+  `classify()` on strings only: no command is run, nothing touches the network. Two real bypasses found and
+  fixed, smallest change first, each proven by a test that fails before the fix and a mutation check that breaks
+  the fix and shows the test catch it. A follow-up owner review found both fixes closed their exact example but
+  not the class, so each was widened once more, measured against real tool names to rule out new false positives:
+  - **`mcp_writes()`** only ever checked the first split word of an MCP method name, or a word right after
+    and/then/or; a method with no separator or case boundary at all (`getanddeleteitem`) never splits, so the
+    embedded "delete" went unseen while the leading "get" still read as a read. Closing the exact example: it also
+    searches a single, unsplit word for a write verb anywhere in it. Closing the class: a write verb still hid in
+    a non-first, non-whole-method word when and/then/or was fused onto it with no separator
+    (`get_itemanddelete`, `listanddelete_item`); it now also searches every word for that specific fusion. A
+    broader "any write verb anywhere in any word" rule was tried first and rejected: measured against 94 real
+    tool names from the GitHub, Google Drive, Slack and Chrome DevTools MCP servers, it misclassified
+    `get_commit`, `list_settings`, `get_check_run`, `list_commits` and `search_commits` as changes.
+  - **`is_action_url()`** matched action words and query keys against the raw path and query text, so a
+    percent-encoded one (`%72estart`, `%77ebhook`, `%61ction=`) never spelled out the word it was checking for.
+    Closing the exact example: it percent-decodes before matching. Closing the class: one round of decoding
+    missed double encoding (`%2572estart`), an encoded separator revealing a real `/` or `?` only after its own
+    wrapper is peeled off (`api%2Frestart`, `restart%3Fa`), and a file extension on the action word
+    (`restart.php`). It now decodes the whole URL to a fixed point (bounded at 3 rounds) before re-splitting path
+    from query on the now-real separators, and compares the last path segment with its extension stripped too.
 - **go-gate and keeper: first review of a week of observation (11/10).** 1,186 would-block events in go-gate and 414
   would-deny events in the keeper; most are real changes (python with subprocess, `sed -i`, `pct push`…), three
   classes were false positives:
