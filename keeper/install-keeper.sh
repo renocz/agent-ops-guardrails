@@ -151,6 +151,10 @@ printf '%s\n' "$GATE_MODE" > "$TMP/mode"      # observe: the hook lets changes t
 put "$LIB/mode" 644 "root:$ROOTGRP" "$TMP/mode"
 put "$BIN/keeper-propose" 755 "root:$ROOTGRP" "$TMP/keeper-propose"
 put "$BIN/keeper-status" 755 "root:$ROOTGRP" "$TMP/keeper-status"
+# For the human, as root: the log summary, printed locally. Mode 700, never setuid: the agent must not be able to run it
+# (the script also refuses anyone who is not root, and the log itself belongs to $KUSER).
+printf '#!/bin/sh\nexec /usr/bin/env -i %s -I %s/keeperd.py --summary "$@"\n' "$PY" "$LIB" > "$TMP/keeper-summary"
+put "$BIN/keeper-summary" 700 "root:$ROOTGRP" "$TMP/keeper-summary"
 
 echo "-- 3. config, state and socket directory"
 "$PY" - "$OWNER" "$CHAT" "$AGENT_UID" "$AGENT_HOME" "$GROUP" "$RUN_DIR" "$GATE_MODE" "$UI_LANG" \

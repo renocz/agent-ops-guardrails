@@ -3,7 +3,7 @@
 
 Run: python3 keeper/test_keeper.py   (no network, no install: a fake Telegram and a socket in a temp dir)
 """
-import json, os, shlex, shutil, socket, stat, string, subprocess, sys, tempfile, threading, time, unittest
+import contextlib, io, json, os, shlex, shutil, socket, stat, string, subprocess, sys, tempfile, threading, time, unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -475,6 +475,98 @@ class Startup(Base):
             self.assertIn("telegram-error-at-start", [json.loads(x)["event"] for x in f])
 
 
+class SummaryCli(Base):
+    """`sudo keeper-summary [days]`: the same masked summary, printed locally, for root only."""
+
+    def setUp(self):
+        super().setUp()
+        self.k.cfg["mode"] = "observe"
+        self.config = os.path.join(self.dir, "config.json")
+        with open(self.config, "w") as f:
+            json.dump(dict(self.cfg, mode="observe"), f)
+        self._env = os.environ.get("KEEPER_CONFIG")
+        os.environ["KEEPER_CONFIG"] = self.config
+        self._euid = os.geteuid
+        self.addCleanup(self.restore)
+
+    def restore(self):
+        os.geteuid = self._euid
+        if self._env is None:
+            os.environ.pop("KEEPER_CONFIG", None)
+        else:
+            os.environ["KEEPER_CONFIG"] = self._env
+
+    def run_cli(self, *args, euid=0):
+        os.geteuid = lambda: euid
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = keeperd.summary_cli(list(args))
+        return rc, out.getvalue(), err.getvalue()
+
+    def test_root_gets_the_masked_summary(self):
+        self.k.check("s1", *bash("docker restart web"))
+        self.k.check("s1", *bash(f"API_TOKEN={fake_secrets()['github']} rm /srv/x"))
+        rc, out, err = self.run_cli()
+        self.assertEqual((rc, err), (0, ""))
+        self.assertIn("Keeper summary: last 7 day(s), mode observe", out)
+        self.assertIn("Would-deny: 2", out)
+        self.assertIn("docker … [deploy]", out)
+        self.assertNotIn(fake_secrets()["github"][:12], out)
+        self.assertEqual(self.run_cli("1")[1].splitlines()[0].split(": ")[1].split(",")[0], "last 1 day(s)")
+
+    def test_the_last_layer_masks_a_secret_shaped_value_from_the_log(self):
+        sec = fake_secrets()["github"]
+        self.k.log({"event": "would-deny", "tool": "Bash", "category": "edit", "shape": f"{sec[:40]} … [edit]"})
+        rc, out, _ = self.run_cli()
+        self.assertEqual(rc, 0)
+        self.assertNotIn(sec[:12], out)
+        self.assertIn("<m>", out)
+
+    def test_nobody_else_can_run_it(self):
+        self.k.check("s1", *bash("docker restart web"))
+        for euid in (1, 501, 1000, 65534):
+            rc, out, err = self.run_cli(euid=euid)
+            self.assertEqual((rc, out), (2, ""), euid)                              # nothing on stdout
+            self.assertIn("as root", err)
+            self.assertNotIn("docker", err)
+
+    def test_arguments_are_checked(self):
+        for args in (("abc",), ("1", "2"), ("-1",), ("7; ls",), ("100",), ("1.5",), ("",)):
+            rc, out, err = self.run_cli(*args)
+            self.assertEqual((rc, out), (2, ""), args)
+            self.assertIn("usage", err)
+        self.assertIn("last 30 day(s)", self.run_cli("30")[1])
+        self.assertIn("last 1 day(s)", self.run_cli("0")[1])                       # clamped, as for /summary
+
+    def test_no_log_is_an_empty_summary_and_an_unreadable_one_is_an_error(self):
+        rc, out, _ = self.run_cli()
+        self.assertEqual(rc, 0)
+        self.assertIn("No event in this window.", out)
+        os.mkdir(os.path.join(self.cfg["state_dir"], "log.jsonl"))
+        rc, out, err = self.run_cli()
+        self.assertEqual((rc, out), (1, ""))
+        self.assertIn("cannot read the log", err)
+
+    def test_it_reads_the_log_and_nothing_else(self):
+        """No Keeper object: no state file is created, no directory made, no classifier loaded."""
+        fresh = os.path.join(self.dir, "fresh-state")
+        with open(self.config, "w") as f:
+            json.dump(dict(self.cfg, state_dir=fresh), f)
+        self.assertEqual(self.run_cli()[0], 0)
+        self.assertFalse(os.path.exists(fresh))
+
+    def test_main_routes_the_flag_and_exits_with_its_code(self):
+        saved = sys.argv
+        sys.argv = ["keeperd.py", "--summary", "oops"]
+        os.geteuid = lambda: 0
+        try:
+            with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as cm:
+                keeperd.main()
+        finally:
+            sys.argv = saved
+        self.assertEqual(cm.exception.code, 2)
+
+
 @unittest.skipUnless(shutil.which("bash") and os.path.exists("/usr/bin/python3") and
                      subprocess.run(["id", "nobody"], capture_output=True).returncode == 0, "needs bash, /usr/bin/python3, user nobody")
 class InstallerLang(unittest.TestCase):
@@ -499,6 +591,21 @@ class InstallerLang(unittest.TestCase):
         r, cfg = self.install("--lang", "de")
         self.assertEqual(r.returncode, 2)
         self.assertIsNone(cfg)
+
+    def test_keeper_summary_is_root_only_and_never_setuid(self):
+        prefix = tempfile.mkdtemp(prefix="ki", dir="/tmp")
+        self.addCleanup(shutil.rmtree, prefix, ignore_errors=True)
+        subprocess.run(["bash", os.path.join(HERE, "install-keeper.sh"), "--agent-user", "nobody", "--owner-id", "1",
+                        "--prefix", prefix], capture_output=True, text=True, timeout=60, check=True)
+        wrapper = os.path.join(prefix, "opt", "agent-guardrails", "bin", "keeper-summary")
+        mode = os.stat(wrapper).st_mode
+        self.assertEqual(stat.S_IMODE(mode), 0o700)                              # nobody but the owner (root) can run it
+        self.assertFalse(mode & (stat.S_ISUID | stat.S_ISGID))
+        text = open(wrapper).read()
+        self.assertIn("--summary", text)
+        self.assertIn("-I", text)
+        for other in ("keeper-propose", "keeper-status"):                         # the agent's commands stay runnable
+            self.assertEqual(stat.S_IMODE(os.stat(os.path.join(os.path.dirname(wrapper), other)).st_mode), 0o755)
 
 
 def fake_secrets():

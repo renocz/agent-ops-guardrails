@@ -703,11 +703,35 @@ def serve(keeper, cfg, ready=None):
 def load_config(path=None):
     cfg = dict(DEFAULTS)
     p = path or os.environ.get("KEEPER_CONFIG", "/etc/keeper/config.json")
-    cfg.update(json.load(open(p)))
+    with open(p) as f:
+        cfg.update(json.load(f))
     return cfg
 
 
+def summary_cli(args):
+    """`keeper-summary [days]`, run by root on the keeper's machine: the same masked summary as /summary, printed locally.
+    Refused to anyone else: the log is private to the keeper user and must never be readable by the agent. Do not run it
+    inside an agent session either: its output would then be in front of the agent."""
+    if os.geteuid() != 0:
+        print("keeper-summary: run it as root (sudo keeper-summary [days])", file=sys.stderr)
+        return 2
+    if len(args) > 1 or (args and not re.fullmatch(r"\d{1,2}", args[0])):
+        print("usage: keeper-summary [days 1-30]", file=sys.stderr)
+        return 2
+    days = min(max(int(args[0]) if args else SUMMARY_DAYS_DEFAULT, 1), SUMMARY_DAYS_MAX)
+    cfg = load_config()
+    try:
+        st = tally(os.path.join(cfg["state_dir"], "log.jsonl"), time.time() - days * 86400)
+    except OSError as e:
+        print(f"keeper-summary: cannot read the log ({type(e).__name__})", file=sys.stderr)
+        return 1
+    print(mask_text(render_summary(norm_lang(cfg.get("lang")), st, days, cfg["mode"])))
+    return 0
+
+
 def main():
+    if sys.argv[1:2] == ["--summary"]:
+        sys.exit(summary_cli(sys.argv[2:]))
     cfg = load_config(sys.argv[1] if len(sys.argv) > 1 else None)
     bot = TelegramBot(cfg)
     keeper = Keeper(cfg, bot)
