@@ -71,6 +71,7 @@ MESSAGES = {
         "sum_shapes_unlogged": "{n} event(s) have no recorded shape (logged before this version, or not a known shape).",
         "sum_plans": "Plans: proposed {proposed}, approved {approved}, rejected {rejected}, expired {expired}",
         "sum_errors": "Telegram errors: {n}",
+        "sum_polls_cut": "  Idle polls cut off (retried, nothing lost): {n}",
         "sum_ignored": "Ignored: unknown socket peers {socket}, strangers on Telegram {strangers}, proposal floods {floods}",
     },
     "fr": {
@@ -113,6 +114,7 @@ MESSAGES = {
         "sum_shapes_unlogged": "{n} événement(s) sans forme enregistrée (journalisés avant cette version, ou forme inconnue).",
         "sum_plans": "Plans : {proposed} proposé(s), {approved} approuvé(s), {rejected} refusé(s), {expired} expiré(s)",
         "sum_errors": "Erreurs Telegram : {n}",
+        "sum_polls_cut": "  Sondages inactifs coupés (relancés, rien de perdu) : {n}",
         "sum_ignored": "Ignorés : clients de socket inconnus {socket}, inconnus sur Telegram {strangers}, rafales de propositions {floods}",
     },
 }
@@ -316,7 +318,7 @@ def tally(path, since):
     """Count the events of the log at or after `since` (epoch). Streams the file, reads at most LOG_TAIL_MAX of its end
     and skips lines it cannot parse. A missing log gives empty counts; other OSErrors propagate."""
     st = {"events": 0, "would": 0, "denied": 0, "allowed": 0, "no_shape": 0, "proposed": 0, "approved": 0,
-          "rejected": 0, "expired": 0, "tg_errors": 0, "socket": 0, "strangers": 0, "floods": 0,
+          "rejected": 0, "expired": 0, "tg_errors": 0, "tg_polls_cut": 0, "socket": 0, "strangers": 0, "floods": 0,
           "tools": collections.Counter(), "cats": collections.Counter(), "shapes": collections.Counter(),
           "tg_types": collections.Counter()}
     single = {"proposed": "proposed", "approved": "approved", "rejected": "rejected",
@@ -342,6 +344,9 @@ def tally(path, since):
             if ts is None or ts < since:
                 continue
             ev = rec.get("event")
+            if ev == "telegram-poll-timeout":                  # an idle long poll cut off: not an error, not an event
+                st["tg_polls_cut"] += 1
+                continue
             if ev in ("would-deny", "denied", "allowed") or ev in single:
                 st["events"] += 1                              # unknown events (e.g. summary-sent) are not counted
             if ev in ("would-deny", "denied"):
@@ -389,6 +394,8 @@ def render_summary(lang, st, days, mode):
     lines.append(t(lang, "sum_plans", proposed=st["proposed"], approved=st["approved"], rejected=st["rejected"],
                    expired=st["expired"]))
     lines.append(t(lang, "sum_errors", n=st["tg_errors"]))
+    if st["tg_polls_cut"]:                                     # kept apart: a cut poll loses no update (offset moves on success)
+        lines.append(t(lang, "sum_polls_cut", n=st["tg_polls_cut"]))
     if st["tg_types"]:                                         # which kind: URLError (offline, asleep) is not HTTPError (token)
         lines.append("  " + ", ".join(f"{k} {n}" for k, n in st["tg_types"].most_common(5)))
     lines.append(t(lang, "sum_ignored", socket=st["socket"], strangers=st["strangers"], floods=st["floods"]))
@@ -678,6 +685,9 @@ class TelegramBot:
             try:
                 for u in self.fetch_updates():
                     self.handle_update(keeper, u)
+            except (TimeoutError, socket.timeout):                  # an idle long poll that dropped: retry at once
+                keeper.log({"event": "telegram-poll-timeout"})      # the offset only moves on success, so no update is lost
+                time.sleep(1)
             except Exception as e:                                  # network hiccup: retry, never crash the daemon
                 keeper.log({"event": "telegram-error", "error": type(e).__name__})
                 time.sleep(5)
