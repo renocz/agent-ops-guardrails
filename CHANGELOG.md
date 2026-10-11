@@ -44,6 +44,11 @@ Next: one week of the keeper in block mode, after a dry run of refusal, approval
     matches the code: a failed `send_plan()` is never retried, and the agent is correctly told Telegram could
     not be reached. Rewritten to ask the agent to propose again by hand after reconnecting, and "pass" now
     requires being told the plan could NOT be sent during the outage, not that it was.
+  - **Also fixed: the checklist as written would hit `max_proposals_per_hour` (3, a rolling window counted from
+    each attempt) around step d.** Not raised, not bypassed: the checklist is now run in two parts at least an
+    hour apart. Part 1 (a, b, d, plus step f merged into b's section since Stop needs no proposal of its own)
+    spends exactly 3 proposals and ends with a bonus step that deliberately triggers a 4th to show the refusal
+    text verbatim; part 2 (c, e) spends the other 3, after the window has rolled over.
 - **keeper: the installed hook's environment is locked, and now tested (11/10).** `KEEPER_TEST_MODE` /
   `KEEPER_SOCKET_FOR_TESTS` in `keeper_client.py` are safe only because `install-keeper.sh` runs the hook and the
   `keeper-propose`/`keeper-status` wrappers with `/usr/bin/env -i … -I`, an empty environment a project's
