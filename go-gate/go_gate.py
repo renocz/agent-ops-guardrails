@@ -719,29 +719,37 @@ def _unquote(s):
 
 
 def _unquote_stable(s, rounds=3):
-    """Percent-decode up to `rounds` times, stopping as soon as a round changes nothing. One round alone decodes
-    %72estart but not double encoding (%2572estart) or an encoded separator (%2F, %3F) that only becomes a real
-    path/query boundary once its own %25/%3 wrapper is peeled off first. Bounded so a crafted string cannot force
-    unbounded work (owner review, 11/10: one round was not enough, see is_action_url)."""
+    """Percent-decode up to `rounds` times, returning (text, converged). One round alone decodes %72estart but not
+    double encoding (%2572estart) or an encoded separator (%2F, %3F) that only becomes a real path/query boundary
+    once its own %25/%3 wrapper is peeled off first. Bounded so a crafted string cannot force unbounded work;
+    `converged` is False when decoding was STILL changing after the bound, so the caller can refuse to match
+    half-decoded text and fail closed instead (owner review, 11/10 and council of 11/10)."""
     for _ in range(rounds):
         decoded = _unquote(s)
         if decoded == s:
-            break
+            return s, True
         s = decoded
-    return s
+    return s, False
 
 
 def is_action_url(arg):
     """A GET that can change state: a webhook or trigger anywhere in the path, an action word as the last path
-    segment (/api/v1/restart, not /api/sync/status; an extension does not save it, /restart.php still counts),
-    or an action-style query parameter (?action=delete). The whole URL is decoded to a fixed point FIRST, then
-    re-split into path and query on the now-real `/` `?` `#` `;`: decoding each piece after it is already split
-    cannot reveal a separator that moves where the path ends and the query begins (owner review, 11/10)."""
-    s = _unquote_stable(arg.strip("'\""))
+    segment (/api/v1/restart, not /api/sync/status; an extension does not save it, /restart.php still counts; a
+    servlet-style path parameter does not either, /restart;jsessionid=X still counts), or an action-style query
+    parameter (?action=delete). The whole URL is decoded to a fixed point FIRST, then re-split into path and
+    query on the now-real `/` `?` `#`: decoding each piece after it is already split cannot reveal a separator
+    that moves where the path ends and the query begins. Decoding that is still changing after the bound is
+    never matched half-decoded: treated as an action URL outright (owner review, 11/10 and council of 11/10)."""
+    s, converged = _unquote_stable(arg.strip("'\""))
+    if not converged:
+        return True
     m = re.search(r"://[^/\s?#]*(/[^\s?#]*)?(\?[^\s#]*)?", s)
     if not m:
         return False
-    segs = [x.lower() for x in re.split(r"[/;]", m.group(1) or "") if x]
+    # a `;` inside a path segment starts servlet-style matrix parameters (`;jsessionid=…`), which containers ignore
+    # when routing: stripped before comparing, so `/x/restart;a=1` still reaches the action word "restart".
+    segs = [p.split(";", 1)[0].lower() for p in (m.group(1) or "").split("/") if p]
+    segs = [x for x in segs if x]
     last = segs[-1] if segs else ""
     last_noext = re.sub(r"\.[A-Za-z0-9]{1,8}$", "", last)
     if any(x in ACTION_ANYWHERE for x in segs) or last in ACTION_LAST or last_noext in ACTION_LAST:
