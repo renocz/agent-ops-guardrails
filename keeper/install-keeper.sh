@@ -268,11 +268,16 @@ put "$MANAGED" 644 "root:$ROOTGRP" "$TMP/managed.json"
 
 echo "-- 6. after install"
 cat <<EOF
+   - Restart every Claude Code session that was already open before this (re)install: a running session keeps the
+     hooks it started with, so it will not pick up the keeper hook until restarted.
    - Remove go-gate's own PreToolUse/Stop/UserPromptSubmit hook from ~/.claude/settings.json (keeper replaces it).
    - Check as $AGENT, each must FAIL: write /var/lib/keeper/state.json; edit $LIB/keeperd.py; rename $BASE; kill keeperd;
      send {"op":"approve"} to the socket; set "disableAllHooks": true in ~/.claude/settings.json and see whether the
      managed hook still runs (it must).
    - The agent proposes with: $BIN/keeper-propose --scope "id=… ; targets=… ; actions=… ; ttl=60" --text "why"
+   - On the keeper bot: /stop revokes every active and pending plan right now; /status shows the mode and what is
+     active or pending; /plans [n] shows the last plan events; /summary [days] (alias /resume) shows the refusal/
+     approval log; /help lists these on the bot itself. All five also show up in Telegram's "/" menu for this chat.
    - Start in --observe for a day if you want only logs, then block mode for a week before v1.0.
 EOF
 [ "$MODE" = apply ] || echo "== nothing was installed ($MODE). Re-run with --apply (as root) to install."
