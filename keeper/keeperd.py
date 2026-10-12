@@ -648,7 +648,11 @@ class Keeper:
             return None
         text = text.strip()
         if re.fullmatch(r"/stop(?:@\w+)?", text, re.I):
-            return [self.msg("ans_stopped") if self._revoke_all() else self.msg("ans_nothing_active")]
+            # Unlike /status and /plans below (reads, same no-lock precedent as /summary), this mutates self.state:
+            # it must take the lock, exactly as decide()'s own stop branch does when the button is pressed instead.
+            with self.lock:
+                had = self._revoke_all()
+            return [self.msg("ans_stopped") if had else self.msg("ans_nothing_active")]
         if re.fullmatch(r"/status(?:@\w+)?", text, re.I):
             return self.status_report()
         m = re.fullmatch(r"/plans(?:@\w+)?(?:\s+(\d{1,2}))?", text, re.I)

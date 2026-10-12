@@ -1006,6 +1006,24 @@ class OwnerCommands(Base):
         self.assertEqual(out[0].key, "ans_stopped")
         self.assertFalse(self.allowed(*bash("docker restart web")))            # the next hook call for a change is refused
 
+    def test_stop_waits_for_the_approval_lock_unlike_status_and_plans(self):
+        """Unlike /status and /plans (reads, same no-lock precedent as /summary), /stop mutates state and must
+        take keeper.lock, exactly as the button's own branch of decide() does under its caller's lock."""
+        self.approve("id=p1 ; targets=web ; actions=deploy ; ttl=30")
+        self.k.lock.acquire()
+        try:
+            result = []
+            th = threading.Thread(target=lambda: result.append(self.command("/stop")), daemon=True)
+            th.start()
+            th.join(0.2)
+            self.assertTrue(th.is_alive(), "/stop did not wait for keeper.lock")
+            self.assertTrue(self.allowed(*bash("docker restart web")))         # not revoked yet: /stop is still blocked
+        finally:
+            self.k.lock.release()
+        th.join(5)
+        self.assertEqual(result[0][0].key, "ans_stopped")
+        self.assertFalse(self.allowed(*bash("docker restart web")))
+
     def test_stop_with_nothing_active(self):
         self.assertEqual(self.command("/stop")[0].key, "ans_nothing_active")
 
