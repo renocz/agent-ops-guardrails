@@ -6,6 +6,28 @@ One version scheme: **a repository tag per release**. Components have no version
 
 Next: one week of the keeper in block mode, after a dry run of refusal, approval, expiry, replay and a Telegram outage.
 
+- **install-keeper.sh and keeper/README.md: say to restart open sessions, and list the new commands (12/10).**
+  A Claude Code session keeps the hooks it had when it started; the installer never said that a session open
+  during a (re)install needs restarting before it sees the keeper hook. Added to the installer's own "after
+  install" output and to the README, right after the install instructions. The README also gets a `/stop` /
+  `/status` / `/plans` / `/help` / `/summary` command reference, and the installer's own after-install output
+  now lists them too (no test pins that output's exact text).
+- **keeper: owner-only `/stop`, `/status`, `/plans` and `/help` text commands (12/10).** Until now "Stop
+  everything" only existed as a button on an approval card, and the buttons are removed as soon as any plan is
+  decided — so once past the first approval, there was no way left from the phone to revoke an active plan.
+  `Keeper.command()` now also answers `/stop` (revokes every active and pending plan, sharing the exact same
+  code as the card's Stop button rather than a second copy of it), `/status` (mode, active/pending plans with
+  id/actions/targets/time-left, proposals left this hour — structured fields only, never the agent's free-form
+  explanation or the raw command), `/plans [n]` (the last plan lifecycle events with id, local time and outcome)
+  and `/help`. Same owner-and-configured-chat gate as the existing `/summary`; not reachable from the socket. A
+  command can only remove rights or read state: approve, reject and mode switching stay button- or config-only,
+  never a typed word. Mutation-checked (the owner check skipped before matching `/stop` in a copy): the stranger
+  test then fails.
+- **keeper: the new commands show up in Telegram's "/" menu (12/10).** `register_commands()` calls
+  `setMyCommands` once at daemon startup, scoped to the configured chat only (`BotCommandScopeChat`) so a
+  stranger who finds the bot never sees it; skipped entirely without a configured chat id. A short timeout keeps
+  a slow or unreachable Telegram from delaying startup; any failure is logged as `commands-menu-failed` (the
+  error type only) and is never fatal to the daemon.
 - **keeper: end-to-end dry run of block mode (11/10, council of 11/10, owner review of PR #8).**
   `keeper/test_block_dryrun.py` exercises the real chain the `FakeBot`-based unit tests never touch: hook client
   subprocess -> socket -> `Keeper` -> the real `TelegramBot` HTTP code -> a fake, local-only Telegram Bot API
@@ -35,10 +57,11 @@ Next: one week of the keeper in block mode, after a dry run of refusal, approval
     mirrors `install-keeper.sh`'s own `uname -s` branch instead, so it passes on the owner's Mac as well as CI.
 - **docs: owner checklist for the block-mode dry run (11/10).** `docs/block-mode-dry-run.md`: a ~15-minute pass
   on the real machine, right after reinstalling without `--observe`, covering refusal, approval, expiry, replay,
-  a Telegram outage (turn networking off briefly) and stop — only ever with harmless commands (`touch`/`ls`
-  under `/tmp`, never a restart, a delete or a push) — plus the rollback from keeper/README.md and when to use
-  it. The daemon-down and `/summary` scenarios are machine-internal and already covered by
-  `test_block_dryrun.py` in CI, so the checklist points to that instead of repeating it.
+  a Telegram outage (turn networking off briefly), `/status` and `/stop`, and a cleanup at the end — only ever
+  with harmless commands (`touch ~/dry-run-marker`/`ls`, never a restart, a delete outside that one file, a
+  deploy or a push) — plus the rollback from keeper/README.md and when to use it. The daemon-down and `/summary`
+  scenarios are machine-internal and already covered by `test_block_dryrun.py` in CI, so the checklist points to
+  that instead of repeating it.
   - **Fixed on owner review of PR #8: step e promised a retry that does not exist.** It said the daemon "retries
     on its own" after reconnecting, and that the agent would report the plan as sent either way. Neither
     matches the code: a failed `send_plan()` is never retried, and the agent is correctly told Telegram could
@@ -49,6 +72,19 @@ Next: one week of the keeper in block mode, after a dry run of refusal, approval
     hour apart. Part 1 (a, b, d, plus step f merged into b's section since Stop needs no proposal of its own)
     spends exactly 3 proposals and ends with a bonus step that deliberately triggers a 4th to show the refusal
     text verbatim; part 2 (c, e) spends the other 3, after the window has rolled over.
+  - **Fixed on the owner's first real run of block mode (12/10): four things the checklist got wrong.** (1) Every
+    marker command used `/tmp`, which `go-gate`'s `SCRATCH` always classifies as a read — step a's refusal could
+    never actually happen. Switched to `~/dry-run-marker` throughout, with a sentence saying why. (2) `targets=
+    dry-run` does not cover `dry-run-marker` (K7: a whole token or path segment, never a substring) — steps now
+    use `targets=dry-run-marker`, and step d (which never actually runs either of its two proposals) uses `id`
+    instead of invented target names to tell its two cards apart. (3) Step f told the owner to press "Stop
+    everything" on the card **after** approving it, but the buttons are removed as soon as a plan is decided —
+    impossible to follow. Rewritten to use the new `/status` and `/stop` commands instead (the card's button
+    still works too, sharing the same code; mentioned as an alternative). (4) Added a first step 0: restart any
+    Claude Code session that was already open before the (re)install, since a session keeps the hooks it started
+    with. Also added: a note that `keeper-status` only answers when run alone, not chained with `;`/`&&`; and a
+    cleanup bullet at the end of the last step (reuses that step's own approval, no extra proposal, since every
+    step together only ever touches the one `~/dry-run-marker` file).
 - **keeper: the installed hook's environment is locked, and now tested (11/10).** `KEEPER_TEST_MODE` /
   `KEEPER_SOCKET_FOR_TESTS` in `keeper_client.py` are safe only because `install-keeper.sh` runs the hook and the
   `keeper-propose`/`keeper-status` wrappers with `/usr/bin/env -i … -I`, an empty environment a project's
