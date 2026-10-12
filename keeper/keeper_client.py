@@ -13,6 +13,9 @@ answers that command in the check itself (with the session id Claude Code gave t
 import importlib.util, json, os, socket, sys
 
 SOCKETS = ("/opt/agent-guardrails/run/keeper.sock", "/run/keeper/keeper.sock")       # macOS, Linux (install-keeper.sh)
+# Safe only because install-keeper.sh runs this file (and the keeper-propose/keeper-status wrappers) with
+# `env -i`: an agent-writable .claude/settings.json `env` key or shell profile cannot set these two variables to
+# point the hook at a fake socket (guarded by test_keeper.py's InstallerEnvLock).
 SOCKET = os.environ.get("KEEPER_SOCKET_FOR_TESTS") if os.environ.get("KEEPER_TEST_MODE") == "1" else None
 SOCKET = SOCKET or next((p for p in SOCKETS if os.path.exists(p)), SOCKETS[0])
 HERE = os.path.dirname(os.path.abspath(__file__))

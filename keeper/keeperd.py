@@ -626,6 +626,17 @@ class Keeper:
 # Telegram: the keeper bot. Only keeperd holds its token, so only keeperd reads its updates.
 # ---------------------------------------------------------------------------------------------------------------
 class TelegramBot:
+    # Overridable in-process only (council of 11/10's block-mode dry run): never a config key, env var or argument,
+    # so nothing the agent or a config file controls can redirect this. Production keeps the real values.
+    API_BASE = "https://api.telegram.org"
+    DEFAULT_TIMEOUT = 40
+    # send_plan() runs from serve()'s handler while a hook is still blocked reading the socket reply (its own
+    # timeout there is 10 s, see keeper_client.py's ask() and serve()'s connection.settimeout). A Telegram that
+    # hangs must give up and let the handler reply BEFORE that 10 s, or the client times out first, reports
+    # "daemon not reachable" (wrong: the daemon answered, just late), and the handler's reply then lands on a
+    # closed socket. Must stay well under that 10 s (owner review, 11/10).
+    HOOK_WAIT_TIMEOUT = 5
+
     def __init__(self, cfg):
         self.cfg = cfg
         self.lang = norm_lang(cfg.get("lang"))
@@ -633,14 +644,16 @@ class TelegramBot:
             self.token = f.read().strip()
         self.offset = 0
 
-    def api(self, method, payload, timeout=40):
-        req = urllib.request.Request(f"https://api.telegram.org/bot{self.token}/{method}",
+    def api(self, method, payload, timeout=None):
+        timeout = self.DEFAULT_TIMEOUT if timeout is None else timeout
+        req = urllib.request.Request(f"{self.API_BASE}/bot{self.token}/{method}",
                                      json.dumps(payload).encode(), {"Content-Type": "application/json"})
         return json.load(urllib.request.urlopen(req, timeout=timeout))
 
     def send_plan(self, sid, p):
         text, kb = render_plan_card(self.lang, p)
-        self.api("sendMessage", {"chat_id": self.cfg["chat_id"], "text": text, "reply_markup": kb})
+        self.api("sendMessage", {"chat_id": self.cfg["chat_id"], "text": text, "reply_markup": kb},
+                 timeout=self.HOOK_WAIT_TIMEOUT)
 
     def send(self, text):
         self.api("sendMessage", {"chat_id": self.cfg["chat_id"], "text": text[:4000]})
@@ -728,12 +741,17 @@ def serve(keeper, cfg, ready=None):
                 out = keeper.check(req.get("session"), str(req.get("tool", "")), req.get("input") or {},
                                    req.get("cwd"))
             note = out.pop("_notify", None)
-            self.reply(out)
+            # Dry run (11/10): send_plan() used to run AFTER the reply, so the agent was told "sent to the human"
+            # even when Telegram was down and nothing reached them. Attempted first; the reason is rewritten only
+            # on failure, so a working send still says exactly what it said before.
             if note:
                 try:
                     keeper.notify.send_plan(*note)
                 except Exception as e:
                     keeper.log({"event": "telegram-error", "error": type(e).__name__})
+                    out["reason"] = ("keeper: could not reach Telegram to send the plan for approval; the proposal "
+                                      "was recorded, retry once it answers again.")
+            self.reply(out)
 
         def reply(self, obj):
             self.wfile.write((json.dumps(obj) + "\n").encode())

@@ -26,6 +26,8 @@ jobs:
         run: cd go-gate && python -m unittest -v test_go_gate.py
       - name: keeper tests (approvals, forged approvals, socket, daemon down)
         run: cd keeper && python -m unittest -v test_keeper.py
+      - name: keeper block-mode dry run (real socket, real hook subprocess, fake local Telegram only)
+        run: cd keeper && python -m unittest -v test_block_dryrun.py
       - name: keeper installer (syntax, dry run, install into a temp prefix)
         run: |
           bash -n keeper/install-keeper.sh
