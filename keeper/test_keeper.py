@@ -3,7 +3,7 @@
 
 Run: python3 keeper/test_keeper.py   (no network, no install: a fake Telegram and a socket in a temp dir)
 """
-import contextlib, io, json, os, shlex, shutil, socket, stat, string, subprocess, sys, tempfile, threading, time, unittest
+import contextlib, io, json, os, platform, shlex, shutil, socket, stat, string, subprocess, sys, tempfile, threading, time, unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -606,6 +606,34 @@ class InstallerLang(unittest.TestCase):
         self.assertIn("-I", text)
         for other in ("keeper-propose", "keeper-status"):                         # the agent's commands stay runnable
             self.assertEqual(stat.S_IMODE(os.stat(os.path.join(os.path.dirname(wrapper), other)).st_mode), 0o755)
+
+
+@unittest.skipUnless(shutil.which("bash") and os.path.exists("/usr/bin/python3") and
+                     subprocess.run(["id", "nobody"], capture_output=True).returncode == 0, "needs bash, /usr/bin/python3, user nobody")
+class InstallerEnvLock(unittest.TestCase):
+    """KEEPER_TEST_MODE / KEEPER_SOCKET_FOR_TESTS in keeper_client.py are safe only because the hook and the
+    keeper-propose/keeper-status wrappers run with an EMPTY environment (`env -i`): otherwise a project
+    .claude/settings.json `env` key, or a shell profile, could set those variables and point the hook at a fake
+    socket. `-I` (isolated mode) on top of that stops the interpreter from also picking up PYTHON* variables."""
+
+    def test_hook_and_wrappers_run_with_an_empty_environment(self):
+        prefix = tempfile.mkdtemp(prefix="kenv", dir="/tmp")
+        self.addCleanup(shutil.rmtree, prefix, ignore_errors=True)
+        subprocess.run(["bash", os.path.join(HERE, "install-keeper.sh"), "--agent-user", "nobody", "--owner-id", "1",
+                        "--prefix", prefix], capture_output=True, text=True, timeout=60, check=True)
+        # Mirrors install-keeper.sh's own `uname -s` branch: MANAGED is a different path on macOS (owner review,
+        # 11/10 — the fixed path below only matched Linux, so this failed on the owner's own Mac).
+        managed_rel = ("Library/Application Support/ClaudeCode/managed-settings.json" if platform.system() == "Darwin"
+                       else "etc/claude-code/managed-settings.json")
+        managed = json.load(open(os.path.join(prefix, managed_rel)))
+        hook_cmd = managed["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+        self.assertTrue(hook_cmd.startswith("/usr/bin/env -i "), hook_cmd)
+        self.assertIn(" -I ", hook_cmd, hook_cmd)
+        bin_dir = os.path.join(prefix, "opt", "agent-guardrails", "bin")
+        for wrapper in ("keeper-propose", "keeper-status"):
+            text = open(os.path.join(bin_dir, wrapper)).read()
+            self.assertIn("exec /usr/bin/env -i ", text, wrapper)
+            self.assertIn(" -I ", text, wrapper)
 
 
 def fake_secrets():
