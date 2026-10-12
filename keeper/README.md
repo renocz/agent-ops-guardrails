@@ -43,11 +43,31 @@ Create the keeper bot with BotFather first. With `--apply`, the installer asks f
 input); the token is never passed as an argument. If managed settings already exist, the installer merges into them: it puts
 the keeper hook first, adds the deny rules, shows the diff and keeps a `.bak-keeper` copy.
 
-## Review the log before switching to block mode: `/summary`
+**After any (re)install, restart every Claude Code session that was already open.** A running session keeps the hooks
+it started with; it will not pick up the keeper hook (or an updated one) until restarted. A session you start after
+the install is fine.
+
+## Commands on the keeper bot
+
+Send these to the keeper bot from your own chat; only you (`owner_id`, in the configured chat) are answered — a command
+attempt (text starting with `/`) from anyone else is ignored and logged without its text, and none of this is reachable
+through the socket, so the agent can never see it. All five also show up in Telegram's "/" menu for this chat (never
+in a global menu a stranger who finds the bot could see).
+
+- **`/stop`** — revokes every active and pending plan right now, across every session, exactly like the card's own
+  "Stop everything" button (they share the same code). Answers "stopped" or "nothing active".
+- **`/status`** — mode (block/observe); for each session with an active plan, its id, actions, targets and the time
+  left; how many proposals are pending; proposals made in the last rolling hour against `max_proposals_per_hour`.
+  Read-only, and never the agent's free-form explanation or the raw command.
+- **`/plans [n]`** — the last `n` plan events (default 5, max 20): proposed, approved, rejected, expired, revoked,
+  each with its id, local time and outcome.
+- **`/help`** — lists these commands, one line each, in your configured language.
+- **`/summary [days]`** (alias `/resume`) — see below: the refusal/approval log, not the plans themselves.
+
+### Review the log before switching to block mode: `/summary`
 
 In observe mode nothing is blocked; every call that **would** have been refused is logged. That log belongs to the keeper
-user, so you cannot (and the agent must not) read it. Ask the bot instead: send it `/summary` (alias `/resume`) from your
-own chat.
+user, so you cannot (and the agent must not) read it. Ask the bot instead: send it `/summary` (alias `/resume`).
 
 - `/summary` covers the last 7 days; `/summary 1` the last day (1 to 30 allowed).
 - You get: would-deny / denied / allowed-under-an-approved-plan counts, grouped by tool and by category; the 10 most
@@ -57,9 +77,6 @@ own chat.
   and its category, arguments replaced by `…`: `docker restart … [deploy]`, `git push … [git]`. The log
   does not store the arguments of a refused command, so there is nothing secret to show. Lines logged by an older version have no shape; the summary
   counts them ("no recorded shape") instead of guessing.
-- Only you can ask: the sender must be `owner_id` and the chat must be the configured one. A command attempt (text starting
-  with `/`) from anyone else is ignored and logged without its text. Any other message to the bot is ignored.
-- It is not available through the socket, whoever asks. It cannot reach the agent.
 - On the machine, as root: `sudo keeper-summary [days]` prints the same text. Mode 700, not setuid, refuses non-root.
   **Do not run it inside an agent session**: the output would then be in front of the agent.
 
@@ -135,5 +152,8 @@ cover:
 - classifier tricks;
 - the `/summary` command: who may ask, that no socket op returns it, that no argument or secret reaches the text, the
   window, the split below the Telegram limit;
+- `/stop`, `/status`, `/plans` and `/help`: who may ask (same gate as `/summary`), that `/status`/`/plans` never leak
+  the agent's free-form text or the raw command, that `/stop` and the card's button revoke the same way, and that
+  approve/reject/mode are never reachable as a typed command; the "/" menu registration (chat-scoped, non-fatal);
 - the French and English messages (every key in both languages, the English card unchanged), the startup line by mode,
   and `keeper-summary`.
