@@ -73,6 +73,26 @@ MESSAGES = {
         "sum_errors": "Telegram errors: {n}",
         "sum_polls_cut": "  Idle polls cut off (retried, nothing lost): {n}",
         "sum_ignored": "Ignored: unknown socket peers {socket}, strangers on Telegram {strangers}, proposal floods {floods}",
+        "status_title": "📋 Keeper status (mode: {mode})",
+        "status_active_line": "• session {session}: plan {id} — actions: {actions}; targets: {targets}; {left} min left",
+        "status_no_active": "No plan is active right now.",
+        "status_pending": "Pending proposals: {n} (ids: {ids})",
+        "status_no_pending": "No pending proposal.",
+        "status_hourly": "Proposals in the last hour: {n}/{limit}",
+        "plans_title": "📜 Last plan events",
+        "plans_empty": "No plan event recorded yet.",
+        "plans_line": "{at} — {id}: {outcome}",
+        "plans_outcome_proposed": "proposed",
+        "plans_outcome_approved": "approved",
+        "plans_outcome_rejected": "rejected",
+        "plans_outcome_expired": "expired",
+        "plans_outcome_revoked": "revoked (stop)",
+        "help_title": "Commands:",
+        "help_stop": "/stop — revoke every active and pending plan right now",
+        "help_status": "/status — mode, active/pending plans, proposals left this hour",
+        "help_plans": "/plans [n] — last n plan events (default 5, max 20)",
+        "help_summary": "/summary [days] — log summary of would-deny/denied/allowed (alias /resume)",
+        "help_help": "/help — this list",
     },
     "fr": {
         "card_head": "🔐 Demande d'approbation",
@@ -116,6 +136,26 @@ MESSAGES = {
         "sum_errors": "Erreurs Telegram : {n}",
         "sum_polls_cut": "  Sondages inactifs coupés (relancés, rien de perdu) : {n}",
         "sum_ignored": "Ignorés : clients de socket inconnus {socket}, inconnus sur Telegram {strangers}, rafales de propositions {floods}",
+        "status_title": "📋 État du keeper (mode : {mode})",
+        "status_active_line": "• session {session} : plan {id} — actions : {actions} ; cibles : {targets} ; {left} min restantes",
+        "status_no_active": "Aucun plan actif pour le moment.",
+        "status_pending": "Propositions en attente : {n} (identifiants : {ids})",
+        "status_no_pending": "Aucune proposition en attente.",
+        "status_hourly": "Propositions dans la dernière heure : {n}/{limit}",
+        "plans_title": "📜 Derniers événements de plan",
+        "plans_empty": "Aucun événement de plan enregistré pour l'instant.",
+        "plans_line": "{at} — {id} : {outcome}",
+        "plans_outcome_proposed": "proposé",
+        "plans_outcome_approved": "approuvé",
+        "plans_outcome_rejected": "refusé",
+        "plans_outcome_expired": "expiré",
+        "plans_outcome_revoked": "révoqué (stop)",
+        "help_title": "Commandes :",
+        "help_stop": "/stop — révoque immédiatement tout plan actif et toute proposition en attente",
+        "help_status": "/status — mode, plans actifs/en attente, propositions restantes cette heure",
+        "help_plans": "/plans [n] — les n derniers événements de plan (5 par défaut, 20 au maximum)",
+        "help_summary": "/summary [jours] — résumé du journal des refus/autorisations (alias /resume)",
+        "help_help": "/help — cette liste",
     },
 }
 IGNORED = frozenset({"ans_not_owner", "ans_malformed", "ans_replay", "ans_unknown"})   # answers that are not a decision
@@ -201,6 +241,7 @@ def load_gate(agent_home=None):
 #   3. the whole text goes through mask_text before it is sent.
 # ---------------------------------------------------------------------------------------------------------------
 SUMMARY_DAYS_DEFAULT, SUMMARY_DAYS_MAX = 7, 30
+PLANS_DEFAULT, PLANS_MAX = 5, 20
 TOP_SHAPES, TOP_GROUPS = 10, 10
 TELEGRAM_CHUNK = 3900                 # Telegram refuses 4096+; keep a margin
 LOG_TAIL_MAX = 32 * 1024 * 1024       # read at most this much of the end of the log (it is append-only and unrotated)
@@ -366,6 +407,39 @@ def tally(path, since):
                     err = rec.get("error") if ev == "telegram-error" else "at-start"
                     st["tg_types"][err if isinstance(err, str) and IDENT_FORMAT.fullmatch(err) else "<other>"] += 1
     return st
+
+
+# Events that make up a plan's lifecycle, each carrying a "plan" id field (set in propose()/decide()); mapped to the
+# outcome word /plans shows. Reuses the exact same event names tally() already counts, so the two stay in sync.
+PLAN_EVENTS = {"proposed": "proposed", "approved": "approved", "rejected": "rejected",
+               "approval-of-expired-plan-ignored": "expired", "revoked-all": "revoked"}
+
+
+def plan_events(path, limit):
+    """The last `limit` plan lifecycle records from the log, each as (at, id, outcome). Same bounded tail read as
+    tally(); a missing log gives no events, other OSErrors propagate. `revoked-all` has no id (it is global)."""
+    out = []
+    try:
+        f = open(path, "rb")
+    except FileNotFoundError:
+        return out
+    with f:
+        size = f.seek(0, os.SEEK_END)
+        start = max(0, size - LOG_TAIL_MAX)
+        f.seek(start)
+        if start:
+            f.readline()
+        for raw in f:
+            try:
+                rec = json.loads(raw)
+            except ValueError:
+                continue
+            if not isinstance(rec, dict) or rec.get("event") not in PLAN_EVENTS:
+                continue
+            pid = rec.get("plan")
+            pid = pid if isinstance(pid, str) and IDENT_FORMAT.fullmatch(pid) else "-"
+            out.append((rec.get("at"), pid, PLAN_EVENTS[rec["event"]]))
+    return out[-limit:]
 
 
 def render_summary(lang, st, days, mode):
@@ -546,16 +620,34 @@ class Keeper:
             return False
         return not self.cfg.get("chat_id") or str(chat_id) == str(self.cfg["chat_id"])
 
+    # Owner-only text commands (council of 12/10, after the first on-machine run of block mode): only REMOVE rights
+    # (/stop) or READ state (/status, /plans, /help); approve/reject/mode stay button- or config-only, never a word
+    # typed in a chat the agent cannot see but could in principle guess at. Checked after the single is_owner() gate
+    # below, so every one of them is owner-and-configured-chat-only like /summary already was.
+    COMMANDS = ("stop", "status", "plans", "summary", "help")        # order shown in Telegram's "/" menu
+
     def command(self, from_id, chat_id, text):
-        """A text message sent to the bot. Only `/summary [days]` (alias `/resume`) from the owner is acted on; any
-        other text is ignored. Returns the messages to send back, or None. Not reachable from the socket."""
+        """A text message sent to the bot. Only a known command from the owner is acted on; any other text (or a
+        malformed/extra-argument form of a known one) is ignored. Returns the messages to send back, or None. Not
+        reachable from the socket — handle_message() is the only caller."""
         if not isinstance(text, str):
             return None
         if not self.is_owner(from_id, chat_id):
             if text.startswith("/"):                          # a command attempt; the text itself is never logged
                 self.log({"event": "command-from-stranger-ignored"})
             return None
-        m = re.fullmatch(r"/(?:summary|resume)(?:@\w+)?(?:\s+(\d{1,2}))?", text.strip(), re.I)
+        text = text.strip()
+        if re.fullmatch(r"/stop(?:@\w+)?", text, re.I):
+            return [self.msg("ans_stopped") if self._revoke_all() else self.msg("ans_nothing_active")]
+        if re.fullmatch(r"/status(?:@\w+)?", text, re.I):
+            return self.status_report()
+        m = re.fullmatch(r"/plans(?:@\w+)?(?:\s+(\d{1,2}))?", text, re.I)
+        if m:
+            n = min(max(int(m.group(1) or PLANS_DEFAULT), 1), PLANS_MAX)
+            return self.plans(n)
+        if re.fullmatch(r"/help(?:@\w+)?", text, re.I):
+            return [self.help_text()]
+        m = re.fullmatch(r"/(?:summary|resume)(?:@\w+)?(?:\s+(\d{1,2}))?", text, re.I)
         if not m:
             return None
         days = min(max(int(m.group(1) or SUMMARY_DAYS_DEFAULT), 1), SUMMARY_DAYS_MAX)
@@ -575,9 +667,63 @@ class Keeper:
             text = t(self.lang, "sum_unreadable")
         return split_message(mask_text(text))
 
+    def status_report(self):
+        """`/status`: a read-only snapshot, structured fields only — never the agent's free-form explanation text
+        or the command it ran. Nothing here mutates state (an expired-but-not-yet-popped active plan is simply
+        skipped, the same way it would stop covering a call in check())."""
+        lines = [self.msg("status_title", mode=self.cfg["mode"])]
+        active = []
+        for sid, s in sorted(self.state["sessions"].items()):
+            act = s.get("active")
+            if act and act["expires"] > self.now():
+                plan = act["plan"]
+                active.append(str(self.msg("status_active_line", session=sid, id=plan.get("id") or "-",
+                                            actions=", ".join(plan["actions"]),
+                                            targets=", ".join(plan["targets"]) or self.msg("card_any"),
+                                            left=max(0, int((act["expires"] - self.now()) / 60)))))
+        lines += active if active else [self.msg("status_no_active")]
+        pending = [s["pending"]["plan"].get("id") or "-" for _sid, s in sorted(self.state["sessions"].items())
+                   if s.get("pending")]
+        lines.append(self.msg("status_pending", n=len(pending), ids=", ".join(pending)) if pending
+                     else self.msg("status_no_pending"))
+        recent = len([t for t in self.state["proposals"] if t > self.now() - 3600])
+        lines.append(self.msg("status_hourly", n=recent, limit=self.cfg["max_proposals_per_hour"]))
+        return split_message(mask_text("\n".join(str(x) for x in lines)))
+
+    def plans(self, n=PLANS_DEFAULT):
+        """`/plans [n]`: the last n plan lifecycle events (proposed/approved/rejected/expired/revoked), with id,
+        local time and outcome — the same bounded tail read, masking and splitting as /summary."""
+        try:
+            events = plan_events(self.log_path, n)
+        except OSError:
+            return split_message(t(self.lang, "sum_unreadable"))
+        if not events:
+            text = t(self.lang, "plans_empty")
+        else:
+            text = "\n".join([t(self.lang, "plans_title")] +
+                              [t(self.lang, "plans_line", at=at or "-", id=pid,
+                                 outcome=t(self.lang, "plans_outcome_" + outcome)) for at, pid, outcome in events])
+        return split_message(mask_text(text))
+
+    def help_text(self):
+        """`/help`: every command, one line each, in the configured language."""
+        return "\n".join(str(x) for x in [self.msg("help_title")] +
+                          [self.msg(f"help_{name}") for name in self.COMMANDS])
+
     def msg(self, key, **kw):
         """A human message in the configured language, tagged with its key."""
         return Msg(t(self.lang, key, **kw), key)
+
+    def _revoke_all(self):
+        """Every active and pending plan of every session (council review 08/10: Stop is global, not per-card).
+        Shared by the Stop button (decide()) and the `/stop` text command — one revocation path, not two."""
+        had = False
+        for s in self.state["sessions"].values():
+            had = bool(s.pop("active", None)) or had
+            s.pop("pending", None)
+        self.save()
+        self.log({"event": "revoked-all"})
+        return had
 
     def decide(self, from_id, chat_id, data):
         """A button press. data = approve:<hash12>:<nonce> | reject:<hash12>:<nonce> | stop:<session>"""
@@ -585,14 +731,8 @@ class Keeper:
             self.log({"event": "decision-from-stranger-ignored"})
             return self.msg("ans_not_owner")
         parts = data.split(":")
-        if parts[0] == "stop":                                  # every plan of every session (council review 08/10)
-            had = False
-            for s in self.state["sessions"].values():
-                had = bool(s.pop("active", None)) or had
-                s.pop("pending", None)
-            self.save()
-            self.log({"event": "revoked-all"})
-            return self.msg("ans_stopped") if had else self.msg("ans_nothing_active")
+        if parts[0] == "stop":
+            return self.msg("ans_stopped") if self._revoke_all() else self.msg("ans_nothing_active")
         if len(parts) != 3 or parts[0] not in ("approve", "reject") or not re.fullmatch(r"[0-9a-f]{12}", parts[1]) \
                 or not re.fullmatch(r"[0-9a-f]{16}", parts[2]):
             return self.msg("ans_malformed")
@@ -607,11 +747,11 @@ class Keeper:
                 s.pop("pending", None)
                 if action == "reject":
                     self.save()
-                    self.log({"event": "rejected", "session": sid})
+                    self.log({"event": "rejected", "session": sid, "plan": p["plan"].get("id")})
                     return self.msg("ans_rejected")
                 if self.now() - p["proposed_at"] > self.cfg["pending_max_age_min"] * 60:
                     self.save()
-                    self.log({"event": "approval-of-expired-plan-ignored", "session": sid})
+                    self.log({"event": "approval-of-expired-plan-ignored", "session": sid, "plan": p["plan"].get("id")})
                     return self.msg("ans_expired")
                 s["active"] = {"plan": p["plan"], "hash": p["hash"], "approved_at": self.now(),
                                "expires": self.now() + p["plan"]["ttl"] * 60}
