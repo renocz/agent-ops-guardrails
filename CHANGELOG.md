@@ -6,6 +6,12 @@ One version scheme: **a repository tag per release**. Components have no version
 
 Next: one week of the keeper in block mode, after a dry run of refusal, approval, expiry, replay and a Telegram outage.
 
+- **install-keeper.sh and keeper/README.md: say to restart open sessions, and list the new commands (12/10).**
+  A Claude Code session keeps the hooks it had when it started; the installer never said that a session open
+  during a (re)install needs restarting before it sees the keeper hook. Added to the installer's own "after
+  install" output and to the README, right after the install instructions. The README also gets a `/stop` /
+  `/status` / `/plans` / `/help` / `/summary` command reference, and the installer's own after-install output
+  now lists them too (no test pins that output's exact text).
 - **keeper: owner-only `/stop`, `/status`, `/plans` and `/help` text commands (12/10).** Until now "Stop
   everything" only existed as a button on an approval card, and the buttons are removed as soon as any plan is
   decided — so once past the first approval, there was no way left from the phone to revoke an active plan.
