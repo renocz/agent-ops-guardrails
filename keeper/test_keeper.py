@@ -979,6 +979,115 @@ class LogSummary(Base):
         self.assertTrue(keeperd.SHAPE_FORMAT.fullmatch("docker … [deploy]"))
         self.assertTrue(keeperd.SHAPE_FORMAT.fullmatch("<…> … [edit]"))
 
+
+class OwnerCommands(Base):
+    """/stop, /status, /plans and /help (council of 12/10, after the owner's first on-machine run): each can only
+    REMOVE rights (/stop) or READ state (/status, /plans, /help) — approve/reject/mode stay button- or
+    config-only, never a word typed in a chat."""
+
+    def command(self, text, from_id=OWNER, chat_id=CHAT):
+        return self.k.command(from_id, chat_id, text)
+
+    def test_stop_with_an_active_plan(self):
+        self.approve("id=p1 ; targets=web ; actions=deploy ; ttl=30")
+        out = self.command("/stop")
+        self.assertEqual(out[0].key, "ans_stopped")
+        self.assertFalse(self.allowed(*bash("docker restart web")))            # the next hook call for a change is refused
+
+    def test_stop_with_nothing_active(self):
+        self.assertEqual(self.command("/stop")[0].key, "ans_nothing_active")
+
+    def test_stop_from_a_stranger_or_wrong_chat_is_ignored(self):
+        self.approve("id=p1 ; targets=web ; actions=deploy ; ttl=30")
+        self.assertIsNone(self.command("/stop", from_id=STRANGER))
+        self.assertIsNone(self.command("/stop", chat_id=555))
+        self.assertTrue(self.allowed(*bash("docker restart web")))             # neither attempt revoked it
+        self.assertEqual(self.log_events().count("command-from-stranger-ignored"), 2)
+
+    def test_stop_with_botname_suffix(self):
+        self.approve("id=p1 ; targets=web ; actions=deploy ; ttl=30")
+        self.assertEqual(self.command("/stop@keeper_bot")[0].key, "ans_stopped")
+
+    def test_malformed_stop_variants_are_ignored_not_executed(self):
+        """decide() matches /stop case-insensitively like /summary; trailing text (even a bare suffix) is rejected."""
+        self.approve("id=p1 ; targets=web ; actions=deploy ; ttl=30")
+        for text in ("/stopx", "/stop now"):
+            self.assertIsNone(self.command(text), text)
+        self.assertTrue(self.allowed(*bash("docker restart web")))             # still active: none of them stopped it
+        self.assertEqual(self.command("/STOP")[0].key, "ans_stopped")          # case-insensitive, same as /summary
+
+    def test_status_reflects_active_pending_and_the_hourly_counter(self):
+        self.approve("id=p1 ; targets=web,db ; actions=deploy ; ttl=30")
+        self.plan("id=p2 ; targets=api ; actions=edit", sid="s2", text="internal justification nobody should see")
+        text = "\n".join(self.command("/status"))
+        self.assertIn("p1", text)
+        self.assertIn("deploy", text)
+        self.assertIn("web, db", text)
+        self.assertIn("30 min left", text)
+        self.assertIn("Pending proposals: 1", text)
+        self.assertIn("p2", text)
+        self.assertIn("Proposals in the last hour: 2/3", text)
+        self.assertNotIn("internal justification", text)                       # no scope/explanation text, ever
+        self.assertNotIn("keeper-propose", text)                               # and no command text either
+
+    def test_status_with_nothing_active_or_pending(self):
+        text = "\n".join(self.command("/status"))
+        self.assertIn("No plan is active", text)
+        self.assertIn("No pending proposal", text)
+        self.assertIn("Proposals in the last hour: 0/3", text)
+
+    def test_status_is_read_only(self):
+        """A plan whose TTL ran out must still show as active until check() (not /status) retires it."""
+        self.approve("id=p1 ; targets=web ; actions=deploy ; ttl=1")
+        self.clock.t += 2 * 60
+        self.assertNotIn("p1", "\n".join(self.command("/status")))             # expired: not shown as active
+        self.assertIn("s1", self.k.state["sessions"])
+        self.assertIn("active", self.k.state["sessions"]["s1"])                # /status never popped it itself
+
+    def test_plans_defaults_caps_and_rejects_non_numeric(self):
+        self.k.cfg["max_proposals_per_hour"] = 10
+        for i in range(4):
+            self.plan(f"id=pp{i} ; actions=edit", sid=f"s{i}")
+        text = "\n".join(self.command("/plans"))                               # default: 5, but only 4 exist
+        self.assertEqual(text.count("proposed"), 4)
+        text3 = "\n".join(self.command("/plans 3"))
+        self.assertEqual(text3.count("proposed"), 3)
+        self.assertIsNotNone(self.command("/plans 99"))                        # capped to 20, not refused
+        self.assertIsNone(self.command("/plans abc"))                          # ignored, like a malformed /summary
+
+    def test_plans_shows_every_outcome_with_id_and_time(self):
+        self.approve("id=pa ; actions=edit")
+        ok, no = self.plan("id=pb ; actions=edit", sid="s2")
+        self.k.decide(OWNER, CHAT, no)
+        self.k.decide(OWNER, CHAT, "stop:all")
+        text = "\n".join(self.command("/plans 20"))
+        for word in ("proposed", "approved", "rejected", "revoked"):
+            self.assertIn(word, text)
+        self.assertIn("pa", text)
+        self.assertIn("pb", text)
+
+    def test_plans_empty(self):
+        self.assertIn("No plan event", "\n".join(self.command("/plans")))
+
+    def test_approve_reject_and_mode_are_not_commands(self):
+        """A command can only remove rights or read state; approval stays button-only (nonce + hash)."""
+        ok, _ = self.plan("id=p1 ; actions=deploy")
+        for text in ("/approve", f"/approve {ok}", "/mode observe", "/mode block", "/start", ok):
+            self.assertIsNone(self.command(text), text)
+        self.assertFalse(self.allowed(*bash("docker restart web")))
+
+    def test_help_lists_exactly_the_real_commands(self):
+        text = self.command("/help")[0]
+        for cmd in ("/stop", "/status", "/plans", "/summary", "/help"):
+            self.assertIn(cmd, text)
+        for word in ("/approve", "/mode", "/start", "/reject"):
+            self.assertNotIn(word, text)
+
+    def test_help_follows_the_configured_language(self):
+        k = keeperd.Keeper(dict(self.cfg, lang="fr", state_dir=os.path.join(self.dir, "fr")), self.bot, clock=self.clock)
+        self.assertIn("Commandes", k.command(OWNER, CHAT, "/help")[0])
+
+
 class TelegramCommands(Base):
     """The bot side: `message` updates are asked for, routed to keeper.command, and nothing else is acted on."""
 
