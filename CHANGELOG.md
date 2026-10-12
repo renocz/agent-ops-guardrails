@@ -35,10 +35,11 @@ Next: one week of the keeper in block mode, after a dry run of refusal, approval
     mirrors `install-keeper.sh`'s own `uname -s` branch instead, so it passes on the owner's Mac as well as CI.
 - **docs: owner checklist for the block-mode dry run (11/10).** `docs/block-mode-dry-run.md`: a ~15-minute pass
   on the real machine, right after reinstalling without `--observe`, covering refusal, approval, expiry, replay,
-  a Telegram outage (turn networking off briefly) and stop — only ever with harmless commands (`touch`/`ls`
-  under `/tmp`, never a restart, a delete or a push) — plus the rollback from keeper/README.md and when to use
-  it. The daemon-down and `/summary` scenarios are machine-internal and already covered by
-  `test_block_dryrun.py` in CI, so the checklist points to that instead of repeating it.
+  a Telegram outage (turn networking off briefly), `/status` and `/stop`, and a cleanup at the end — only ever
+  with harmless commands (`touch ~/dry-run-marker`/`ls`, never a restart, a delete outside that one file, a
+  deploy or a push) — plus the rollback from keeper/README.md and when to use it. The daemon-down and `/summary`
+  scenarios are machine-internal and already covered by `test_block_dryrun.py` in CI, so the checklist points to
+  that instead of repeating it.
   - **Fixed on owner review of PR #8: step e promised a retry that does not exist.** It said the daemon "retries
     on its own" after reconnecting, and that the agent would report the plan as sent either way. Neither
     matches the code: a failed `send_plan()` is never retried, and the agent is correctly told Telegram could
@@ -49,6 +50,19 @@ Next: one week of the keeper in block mode, after a dry run of refusal, approval
     hour apart. Part 1 (a, b, d, plus step f merged into b's section since Stop needs no proposal of its own)
     spends exactly 3 proposals and ends with a bonus step that deliberately triggers a 4th to show the refusal
     text verbatim; part 2 (c, e) spends the other 3, after the window has rolled over.
+  - **Fixed on the owner's first real run of block mode (12/10): four things the checklist got wrong.** (1) Every
+    marker command used `/tmp`, which `go-gate`'s `SCRATCH` always classifies as a read — step a's refusal could
+    never actually happen. Switched to `~/dry-run-marker` throughout, with a sentence saying why. (2) `targets=
+    dry-run` does not cover `dry-run-marker` (K7: a whole token or path segment, never a substring) — steps now
+    use `targets=dry-run-marker`, and step d (which never actually runs either of its two proposals) uses `id`
+    instead of invented target names to tell its two cards apart. (3) Step f told the owner to press "Stop
+    everything" on the card **after** approving it, but the buttons are removed as soon as a plan is decided —
+    impossible to follow. Rewritten to use the new `/status` and `/stop` commands instead (the card's button
+    still works too, sharing the same code; mentioned as an alternative). (4) Added a first step 0: restart any
+    Claude Code session that was already open before the (re)install, since a session keeps the hooks it started
+    with. Also added: a note that `keeper-status` only answers when run alone, not chained with `;`/`&&`; and a
+    cleanup bullet at the end of the last step (reuses that step's own approval, no extra proposal, since every
+    step together only ever touches the one `~/dry-run-marker` file).
 - **keeper: the installed hook's environment is locked, and now tested (11/10).** `KEEPER_TEST_MODE` /
   `KEEPER_SOCKET_FOR_TESTS` in `keeper_client.py` are safe only because `install-keeper.sh` runs the hook and the
   `keeper-propose`/`keeper-status` wrappers with `/usr/bin/env -i … -I`, an empty environment a project's
