@@ -6,6 +6,22 @@ One version scheme: **a repository tag per release**. Components have no version
 
 Next: one week of the keeper in block mode, after a dry run of refusal, approval, expiry, replay and a Telegram outage.
 
+- **keeper: owner-only `/stop`, `/status`, `/plans` and `/help` text commands (12/10).** Until now "Stop
+  everything" only existed as a button on an approval card, and the buttons are removed as soon as any plan is
+  decided — so once past the first approval, there was no way left from the phone to revoke an active plan.
+  `Keeper.command()` now also answers `/stop` (revokes every active and pending plan, sharing the exact same
+  code as the card's Stop button rather than a second copy of it), `/status` (mode, active/pending plans with
+  id/actions/targets/time-left, proposals left this hour — structured fields only, never the agent's free-form
+  explanation or the raw command), `/plans [n]` (the last plan lifecycle events with id, local time and outcome)
+  and `/help`. Same owner-and-configured-chat gate as the existing `/summary`; not reachable from the socket. A
+  command can only remove rights or read state: approve, reject and mode switching stay button- or config-only,
+  never a typed word. Mutation-checked (the owner check skipped before matching `/stop` in a copy): the stranger
+  test then fails.
+- **keeper: the new commands show up in Telegram's "/" menu (12/10).** `register_commands()` calls
+  `setMyCommands` once at daemon startup, scoped to the configured chat only (`BotCommandScopeChat`) so a
+  stranger who finds the bot never sees it; skipped entirely without a configured chat id. A short timeout keeps
+  a slow or unreachable Telegram from delaying startup; any failure is logged as `commands-menu-failed` (the
+  error type only) and is never fatal to the daemon.
 - **keeper: end-to-end dry run of block mode (11/10, council of 11/10, owner review of PR #8).**
   `keeper/test_block_dryrun.py` exercises the real chain the `FakeBot`-based unit tests never touch: hook client
   subprocess -> socket -> `Keeper` -> the real `TelegramBot` HTTP code -> a fake, local-only Telegram Bot API
