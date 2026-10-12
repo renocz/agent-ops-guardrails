@@ -410,6 +410,9 @@ class Startup(Base):
             def send(self, text):
                 sent.append(text)
 
+            def register_commands(self):
+                pass
+
             def poll(self, keeper):
                 pass
 
@@ -460,6 +463,9 @@ class Startup(Base):
             def send(self, text):
                 raise OSError("network down")
 
+            def register_commands(self):
+                raise OSError("network down")
+
             def poll(self, keeper):
                 pass
 
@@ -470,9 +476,15 @@ class Startup(Base):
             keeperd.main()
         finally:
             keeperd.TelegramBot, keeperd.serve, sys.argv = saved
-        self.assertEqual(served, [1])                                               # the daemon still serves
+        self.assertEqual(served, [1])                                               # the daemon still serves despite both
         with open(os.path.join(self.dir, "st-down", "log.jsonl")) as f:
-            self.assertIn("telegram-error-at-start", [json.loads(x)["event"] for x in f])
+            records = [json.loads(x) for x in f]
+        events = [r["event"] for r in records]
+        self.assertIn("telegram-error-at-start", events)
+        self.assertIn("commands-menu-failed", events)
+        menu_rec = next(r for r in records if r["event"] == "commands-menu-failed")
+        self.assertEqual(menu_rec["error"], "OSError")                              # the type only, never the message
+        self.assertEqual(set(menu_rec) - {"at"}, {"event", "error"})
 
 
 class SummaryCli(Base):
@@ -1191,6 +1203,35 @@ class TelegramCommands(Base):
         fr.send_plan(*self.bot.plans[-1])
         self.assertIn("Demande d'approbation", self.sent()[-1]["text"])
         self.assertEqual(self.sent()[-1]["reply_markup"]["inline_keyboard"][0][0]["text"], "✅ Approuver")
+
+    def test_register_commands_uses_a_chat_scoped_menu(self):
+        self.tg.register_commands()
+        self.assertEqual([m for m, _p in self.calls], ["setMyCommands"])
+        method, payload = self.calls[0]
+        self.assertEqual(payload["scope"], {"type": "chat", "chat_id": CHAT})
+        self.assertEqual([c["command"] for c in payload["commands"]], ["stop", "status", "plans", "summary", "help"])
+        for c in payload["commands"]:
+            self.assertTrue(3 <= len(c["description"]) <= 256, c)
+
+    def test_register_commands_follows_the_configured_language(self):
+        fr = keeperd.TelegramBot(dict(self.cfg, lang="fr"))
+        fr.api = lambda method, payload, timeout=40: self.calls.append((method, payload))
+        fr.register_commands()
+        self.assertIn("révoquer", self.calls[0][1]["commands"][0]["description"])
+
+    def test_no_chat_id_means_no_menu_call(self):
+        no_chat = keeperd.TelegramBot(dict(self.cfg, chat_id=None))
+        no_chat.api = lambda method, payload, timeout=40: self.calls.append((method, payload))
+        no_chat.register_commands()
+        self.assertEqual(self.calls, [])
+
+    def test_a_failing_menu_call_raises_normally(self):
+        """Non-fatal is main()'s job (it wraps the call); register_commands() itself must not swallow the error."""
+        def boom(method, payload, timeout=40):
+            raise OSError("network down")
+        self.tg.api = boom
+        with self.assertRaises(OSError):
+            self.tg.register_commands()
 
 
 class Socket(Base):

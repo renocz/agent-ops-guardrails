@@ -93,6 +93,11 @@ MESSAGES = {
         "help_plans": "/plans [n] — last n plan events (default 5, max 20)",
         "help_summary": "/summary [days] — log summary of would-deny/denied/allowed (alias /resume)",
         "help_help": "/help — this list",
+        "cmd_desc_stop": "revoke every active and pending plan",
+        "cmd_desc_status": "mode, active/pending plans, proposals left this hour",
+        "cmd_desc_plans": "last plan events (proposed/approved/rejected/expired/revoked)",
+        "cmd_desc_summary": "log summary over a number of days",
+        "cmd_desc_help": "list the available commands",
     },
     "fr": {
         "card_head": "🔐 Demande d'approbation",
@@ -156,6 +161,11 @@ MESSAGES = {
         "help_plans": "/plans [n] — les n derniers événements de plan (5 par défaut, 20 au maximum)",
         "help_summary": "/summary [jours] — résumé du journal des refus/autorisations (alias /resume)",
         "help_help": "/help — cette liste",
+        "cmd_desc_stop": "révoquer tout plan actif et en attente",
+        "cmd_desc_status": "mode, plans actifs/en attente, propositions restantes cette heure",
+        "cmd_desc_plans": "derniers événements de plan (proposé/approuvé/refusé/expiré/révoqué)",
+        "cmd_desc_summary": "résumé du journal sur un nombre de jours",
+        "cmd_desc_help": "lister les commandes disponibles",
     },
 }
 IGNORED = frozenset({"ans_not_owner", "ans_malformed", "ans_replay", "ans_unknown"})   # answers that are not a decision
@@ -776,6 +786,9 @@ class TelegramBot:
     # "daemon not reachable" (wrong: the daemon answered, just late), and the handler's reply then lands on a
     # closed socket. Must stay well under that 10 s (owner review, 11/10).
     HOOK_WAIT_TIMEOUT = 5
+    # register_commands() runs once at daemon startup, nowhere near a hook. Kept short anyway (12/10): a slow or
+    # unreachable Telegram must not delay the daemon's own serve() loop by more than a few seconds.
+    MENU_TIMEOUT = 5
 
     def __init__(self, cfg):
         self.cfg = cfg
@@ -797,6 +810,16 @@ class TelegramBot:
 
     def send(self, text):
         self.api("sendMessage", {"chat_id": self.cfg["chat_id"], "text": text[:4000]})
+
+    def register_commands(self):
+        """Telegram's "/" menu, scoped to the configured chat only (`BotCommandScopeChat`): a stranger who finds
+        the bot must never see these. Call site (main()) treats any failure as non-fatal and logs the error type
+        only; never called at all without a configured chat_id."""
+        if not self.cfg.get("chat_id"):
+            return
+        commands = [{"command": name, "description": t(self.lang, f"cmd_desc_{name}")} for name in Keeper.COMMANDS]
+        self.api("setMyCommands", {"commands": commands, "scope": {"type": "chat", "chat_id": self.cfg["chat_id"]}},
+                 timeout=self.MENU_TIMEOUT)
 
     def fetch_updates(self):
         """One long poll. `message` is asked for so the owner can send `/summary`; keeper.command() acts on nothing else."""
@@ -953,6 +976,10 @@ def main():
         bot.send(startup_message(keeper.lang, cfg["mode"]))
     except Exception:
         keeper.log({"event": "telegram-error-at-start"})
+    try:
+        bot.register_commands()
+    except Exception as e:                                  # never worth delaying or failing startup over
+        keeper.log({"event": "commands-menu-failed", "error": type(e).__name__})
     serve(keeper, cfg)
 
 
