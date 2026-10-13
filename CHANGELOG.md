@@ -6,6 +6,18 @@ One version scheme: **a repository tag per release**. Components have no version
 
 Next: one week of the keeper in block mode, after a dry run of refusal, approval, expiry, replay and a Telegram outage.
 
+- **keeper: long-poll hygiene — named timeouts, HTTP 409 Conflict handled distinctly (13/10).**
+  `getUpdates`' own 30s/40s (server/client) long-poll timeout is now `GETUPDATES_SERVER_TIMEOUT` /
+  `GETUPDATES_CLIENT_TIMEOUT`, named but left at their existing values: confirmed empirically that
+  `urllib.request.urlopen()` opens a fresh connection per call (no pooling to go stale between polls), and
+  nothing in `api()` or the standard library shows the client timeout keeping a half-open connection alive past
+  what Telegram's own `timeout` already bounds. A shorter pair could recover from a stuck poll sooner, at the
+  cost of more requests when idle, but that trade-off could not be shown to help here, so left as-is. `getUpdates`
+  answering **409 Conflict** (another poller on the same bot token — the usual silent cause of "the bot ignores
+  me") is now logged as `telegram-poll-conflict`, not folded into the generic `telegram-error` count, and backs
+  off longer (`POLL_CONFLICT_BACKOFF_SECONDS`, 30s) than a plain error (`POLL_ERROR_RETRY_SECONDS`, 5s, also
+  named, same value as before): retrying fast against a second poller just trades places with it instead of
+  letting it finish and go away.
 - **keeper: audited every `keeper.lock` hold for a network call inside it (13/10), chasing the 1-2 minute lag.**
   Reading the code: `send_plan()` already runs after the lock is released at both its call sites (since PR #8's
   send-before-reply fix), and `decide()`/`_revoke_all()` never call the network either — so there was nothing

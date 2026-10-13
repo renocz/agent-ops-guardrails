@@ -837,6 +837,20 @@ class TelegramBot:
     # register_commands() runs once at daemon startup, nowhere near a hook. Kept short anyway (12/10): a slow or
     # unreachable Telegram must not delay the daemon's own serve() loop by more than a few seconds.
     MENU_TIMEOUT = 5
+    # getUpdates' own long poll (13/10, chasing the reported lag). Named, but left at their long-standing values:
+    # urlopen() opens a fresh connection per call (confirmed: no pooling to go stale between polls, see the report),
+    # and nothing in reading api()/urllib shows the client timeout keeping a half-open connection alive past what
+    # Telegram's own `timeout` already bounds. A shorter pair (e.g. 10/15) would recover from a stuck poll sooner,
+    # at the cost of more requests when idle; left as-is since that trade-off could not be shown to help here.
+    GETUPDATES_SERVER_TIMEOUT = 30
+    GETUPDATES_CLIENT_TIMEOUT = 40
+    # poll()'s own retry pacing.
+    POLL_IDLE_RETRY_SECONDS = 1        # an idle long poll dropped: retry at once, no update was ever at risk
+    POLL_ERROR_RETRY_SECONDS = 5       # a real network hiccup: back off a little before trying again
+    # getUpdates answers 409 Conflict when another poller (a leftover process, a second instance) holds the same
+    # bot token's long poll — the usual silent cause of "the bot ignores me". Back off longer than a plain error:
+    # retrying fast just trades places with the other poller instead of letting it finish and go away.
+    POLL_CONFLICT_BACKOFF_SECONDS = 30
 
     def __init__(self, cfg):
         self.cfg = cfg
@@ -895,7 +909,9 @@ class TelegramBot:
 
     def fetch_updates(self):
         """One long poll. `message` is asked for so the owner can send `/summary`; keeper.command() acts on nothing else."""
-        r = self.api("getUpdates", {"offset": self.offset, "timeout": 30, "allowed_updates": ["callback_query", "message"]})
+        r = self.api("getUpdates", {"offset": self.offset, "timeout": self.GETUPDATES_SERVER_TIMEOUT,
+                                     "allowed_updates": ["callback_query", "message"]},
+                     timeout=self.GETUPDATES_CLIENT_TIMEOUT)
         return r.get("result", [])
 
     def _safe_api(self, method, payload):
@@ -967,10 +983,17 @@ class TelegramBot:
                     self.handle_update(keeper, u, got_at)
             except (TimeoutError, socket.timeout):                  # an idle long poll that dropped: retry at once
                 keeper.log({"event": "telegram-poll-timeout"})      # the offset only moves on success, so no update is lost
-                time.sleep(1)
+                time.sleep(self.POLL_IDLE_RETRY_SECONDS)
+            except urllib.error.HTTPError as e:
+                if e.code == 409:                                   # another poller on this same bot token (13/10):
+                    keeper.log({"event": "telegram-poll-conflict"})  # the usual silent cause of "the bot ignores me"
+                    time.sleep(self.POLL_CONFLICT_BACKOFF_SECONDS)
+                else:
+                    keeper.log({"event": "telegram-error", "error": type(e).__name__})
+                    time.sleep(self.POLL_ERROR_RETRY_SECONDS)
             except Exception as e:                                  # network hiccup: retry, never crash the daemon
                 keeper.log({"event": "telegram-error", "error": type(e).__name__})
-                time.sleep(5)
+                time.sleep(self.POLL_ERROR_RETRY_SECONDS)
 
 
 # ---------------------------------------------------------------------------------------------------------------
