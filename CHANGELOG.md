@@ -6,6 +6,17 @@ One version scheme: **a repository tag per release**. Components have no version
 
 Next: one week of the keeper in block mode, after a dry run of refusal, approval, expiry, replay and a Telegram outage.
 
+- **keeper: audited every `keeper.lock` hold for a network call inside it (13/10), chasing the 1-2 minute lag.**
+  Reading the code: `send_plan()` already runs after the lock is released at both its call sites (since PR #8's
+  send-before-reply fix), and `decide()`/`_revoke_all()` never call the network either — so there was nothing
+  to shrink there. `check()`'s own scope (which `propose()` also runs inside, it has no lock site of its own)
+  keeps the go-gate classifier call, and must: `classify()` keeps its working state as go-gate module globals
+  (`CHANGES`, `KNOWN_VARS`, `CWD`), shared by every concurrent hook request against the one loaded `self.gate`
+  object, so narrowing the lock to skip it would let two simultaneous proposals corrupt each other's
+  classification — fixing that would mean changing go-gate itself, out of scope here. A new test proves the
+  actual bound over the real socket, poll loop and (fake) Telegram: a hanging `send_plan()` never delays a
+  concurrent button press or `/stop` by more than a small margin. Mutation-checked (the network call moved back
+  inside the lock in a copy): the test then fails, waiting the full hang.
 - **keeper: a late click no longer looks like nothing happened (13/10), found while chasing the 1-2 minute lag.**
   `answerCallbackQuery` ran bare in `handle_update()`: a failure there (e.g. HTTP 400 "query is too old" on a
   click handled late) propagated out, skipping `editMessageReplyMarkup` and the confirmation message even though

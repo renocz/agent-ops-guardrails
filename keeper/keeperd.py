@@ -1004,9 +1004,17 @@ def serve(keeper, cfg, ready=None):
                 return self.reply({"decision": "deny", "reason": "keeper: unknown client"})
             if req.get("op") != "check" or not isinstance(req.get("input") or {}, dict):
                 return self.reply({"error": "unknown op"})
-            with keeper.lock_scope("check"):                            # propose() runs inside this same scope too:
+            # Lock audit (13/10, chasing the reported lag): check() runs the go-gate classifier, which is slower
+            # than a plain state mutation on a long command — but it must stay INSIDE this scope, not narrowed to
+            # just the save(): classify() keeps its working state (CHANGES, KNOWN_VARS, CWD) as go-gate module
+            # globals, not per-call locals, and those are shared by every concurrent hook request against this one
+            # `self.gate` object. Without the lock, two simultaneous proposals could corrupt each other's
+            # classification. Making that safe would mean changing go-gate itself, out of scope here. send_plan()
+            # below (the actual network call) already runs after this scope ends, not inside it; propose() has no
+            # lock site of its own, it runs inside this same one.
+            with keeper.lock_scope("check"):
                 out = keeper.check(req.get("session"), str(req.get("tool", "")), req.get("input") or {},
-                                   req.get("cwd"))                      # there is no separate lock site for it
+                                   req.get("cwd"))
             note = out.pop("_notify", None)
             # Dry run (11/10): send_plan() used to run AFTER the reply, so the agent was told "sent to the human"
             # even when Telegram was down and nothing reached them. Attempted first; the reason is rewritten only

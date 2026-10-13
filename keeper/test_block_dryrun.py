@@ -533,5 +533,28 @@ class TimingInstrumentation(DryRunBase):
         self.assertEqual(rec["outcome"], "http-502")
 
 
+class LockHoldTime(DryRunBase):
+    """13/10, chasing the reported lag: keeper.lock must protect only the state mutation, never a network call.
+    Confirmed by reading the code (both send_plan() call sites already run after the lock is released) — this is
+    the regression test for that, over the real socket, the real poll loop and the real (fake) Telegram."""
+
+    def test_a_hanging_send_plan_does_not_delay_a_button_press_or_stop(self):
+        self.approve("id=p1 ; targets=web ; actions=deploy ; ttl=20")
+        self.fake.state.fail_mode, self.fake.state.hang_seconds = "hang", 3.0
+        # A second proposal's send_plan() now hangs, from a background hook call — the lock it might hold is
+        # released before send_plan() ever runs (see serve()'s handler), so this must not block anything below.
+        th = threading.Thread(target=lambda: self.hook(*bash(self.propose_cmd("id=p2 ; actions=edit"))), daemon=True)
+        th.start()
+        self.assertTrue(self.wait_for(lambda: self.log_events().count("proposed") >= 2, timeout=2.0))
+        t0 = time.time()
+        self.assertEqual(self.k.decide(OWNER, CHAT, "stop:all").key, "ans_stopped")
+        self.assertLess(time.time() - t0, 1.0, "a button press (decide()) waited on the hanging send_plan")
+        t0 = time.time()
+        out = self.k.command(OWNER, CHAT, "/stop")
+        self.assertLess(time.time() - t0, 1.0, "/stop waited on the hanging send_plan")
+        self.assertEqual(out[0].key, "ans_nothing_active")
+        th.join(5)
+
+
 if __name__ == "__main__":
     unittest.main()
