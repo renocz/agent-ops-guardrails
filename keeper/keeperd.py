@@ -16,7 +16,8 @@ Sessions are not a security boundary: every session runs as the same agent user.
 
 Standard library only. Python 3.9+.
 """
-import collections, datetime, hashlib, importlib.util, json, os, re, secrets, shlex, socket, socketserver, struct, sys, threading, time, urllib.request
+import collections, contextlib, datetime, hashlib, importlib.util, json, os, re, secrets, shlex, socket, socketserver, struct, sys, \
+    threading, time, urllib.error, urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DEFAULTS = {"socket": "/var/run/keeper/keeper.sock", "state_dir": "/var/lib/keeper", "agent_uids": [],
@@ -370,6 +371,7 @@ def tally(path, since):
     and skips lines it cannot parse. A missing log gives empty counts; other OSErrors propagate."""
     st = {"events": 0, "would": 0, "denied": 0, "allowed": 0, "no_shape": 0, "proposed": 0, "approved": 0,
           "rejected": 0, "expired": 0, "tg_errors": 0, "tg_polls_cut": 0, "socket": 0, "strangers": 0, "floods": 0,
+          "slow": 0, "worst_lag_s": 0.0,                        # 13/10 timing work: kept simple on purpose
           "tools": collections.Counter(), "cats": collections.Counter(), "shapes": collections.Counter(),
           "tg_types": collections.Counter()}
     single = {"proposed": "proposed", "approved": "approved", "rejected": "rejected",
@@ -397,6 +399,18 @@ def tally(path, since):
             ev = rec.get("event")
             if ev == "telegram-poll-timeout":                  # an idle long poll cut off: not an error, not an event
                 st["tg_polls_cut"] += 1
+                continue
+            if ev == "telegram-update":                        # 13/10: where a delay sits, not a would-deny/denied event
+                lag = rec.get("lag_s")
+                handled = rec.get("handled_s")
+                if isinstance(lag, (int, float)):
+                    st["worst_lag_s"] = max(st["worst_lag_s"], lag)
+                if (isinstance(lag, (int, float)) and lag > UPDATE_SLOW_LOG_THRESHOLD) or \
+                        (isinstance(handled, (int, float)) and handled > UPDATE_SLOW_LOG_THRESHOLD):
+                    st["slow"] += 1
+                continue
+            if ev in ("telegram-api-slow", "keeper-lock-wait"):  # already only logged past their own threshold
+                st["slow"] += 1
                 continue
             if ev in ("would-deny", "denied", "allowed") or ev in single:
                 st["events"] += 1                              # unknown events (e.g. summary-sent) are not counted
@@ -487,6 +501,17 @@ def render_summary(lang, st, days, mode):
 
 
 # ---------------------------------------------------------------------------------------------------------------
+# Timing instrumentation (13/10, after the owner reported 1-2 minute lag on clicks and commands): logged with the
+# existing log(), no free text, kept small by only firing on the slow path. Measures where a delay could sit:
+# waiting for keeper.lock, a single Telegram api() call, and the end-to-end handling of one update.
+# ---------------------------------------------------------------------------------------------------------------
+LOCK_WAIT_LOG_THRESHOLD = 1.0          # log keeper-lock-wait only once the wait itself is user-visible
+API_SLOW_LOG_THRESHOLD = 2.0           # log telegram-api-slow only when an api() call is this slow (or failed)
+UPDATE_SLOW_LOG_THRESHOLD = 5.0        # tally()'s own "slow" counter: telegram-update is logged for every update
+                                        # (never conditional), so this is where "slow enough to count" is decided
+
+
+# ---------------------------------------------------------------------------------------------------------------
 # State: approvals live here and only here.
 # ---------------------------------------------------------------------------------------------------------------
 class Keeper:
@@ -496,6 +521,7 @@ class Keeper:
         self.gate = load_gate(cfg.get("agent_home"))
         self.gate.SAFE_GIT_REPOS[:] = cfg.get("safe_git_repos") or []      # K6: trusted repos for git read verbs
         self.lock = threading.Lock()
+        self._lock_holder = None                                           # a short label, set only while held (best effort)
         os.makedirs(cfg["state_dir"], mode=0o700, exist_ok=True)
         self.state_path = os.path.join(cfg["state_dir"], "state.json")
         self.log_path = os.path.join(cfg["state_dir"], "log.jsonl")
@@ -650,7 +676,7 @@ class Keeper:
         if re.fullmatch(r"/stop(?:@\w+)?", text, re.I):
             # Unlike /status and /plans below (reads, same no-lock precedent as /summary), this mutates self.state:
             # it must take the lock, exactly as decide()'s own stop branch does when the button is pressed instead.
-            with self.lock:
+            with self.lock_scope("stop"):
                 had = self._revoke_all()
             return [self.msg("ans_stopped") if had else self.msg("ans_nothing_active")]
         if re.fullmatch(r"/status(?:@\w+)?", text, re.I):
@@ -728,6 +754,24 @@ class Keeper:
         """A human message in the configured language, tagged with its key."""
         return Msg(t(self.lang, key, **kw), key)
 
+    @contextlib.contextmanager
+    def lock_scope(self, label):
+        """Acquire self.lock, logging the wait only when it is itself slow enough to matter (13/10 timing work).
+        `label` is who is now acquiring it (check/decide/stop below); `held_by` is a best-effort guess at who had
+        it before (set without its own lock, so it can be stale by a few instructions — good enough for a log
+        line, never relied on for correctness)."""
+        t0, held_by = time.time(), self._lock_holder
+        self.lock.acquire()
+        waited = time.time() - t0
+        if waited > LOCK_WAIT_LOG_THRESHOLD:
+            self.log({"event": "keeper-lock-wait", "waited_s": round(waited, 3), "by": label, "held_by": held_by or "-"})
+        self._lock_holder = label
+        try:
+            yield
+        finally:
+            self._lock_holder = None
+            self.lock.release()
+
     def _revoke_all(self):
         """Every active and pending plan of every session (council review 08/10: Stop is global, not per-card).
         Shared by the Stop button (decide()) and the `/stop` text command — one revocation path, not two."""
@@ -800,12 +844,36 @@ class TelegramBot:
         with open(cfg["bot_token_file"]) as f:
             self.token = f.read().strip()
         self.offset = 0
+        self.log_fn = None                                     # set to keeper.log by main(), once keeper exists
 
     def api(self, method, payload, timeout=None):
         timeout = self.DEFAULT_TIMEOUT if timeout is None else timeout
         req = urllib.request.Request(f"{self.API_BASE}/bot{self.token}/{method}",
                                      json.dumps(payload).encode(), {"Content-Type": "application/json"})
-        return json.load(urllib.request.urlopen(req, timeout=timeout))
+        t0 = time.time()
+        try:
+            result = json.load(urllib.request.urlopen(req, timeout=timeout))
+        except urllib.error.HTTPError as e:
+            self._log_api_timing(method, time.time() - t0, f"http-{e.code}")
+            raise
+        except (TimeoutError, socket.timeout):
+            self._log_api_timing(method, time.time() - t0, "timeout")
+            raise
+        except Exception as e:
+            self._log_api_timing(method, time.time() - t0, type(e).__name__)
+            raise
+        self._log_api_timing(method, time.time() - t0, "ok")
+        return result
+
+    def _log_api_timing(self, method, duration, outcome):
+        """telegram-api-slow (13/10 timing work): only when it took more than API_SLOW_LOG_THRESHOLD or failed, to
+        keep the log small. No behaviour change: api() still raises exactly what it always raised."""
+        if (outcome != "ok" or duration > API_SLOW_LOG_THRESHOLD) and self.log_fn:
+            try:
+                self.log_fn({"event": "telegram-api-slow", "method": method, "duration_s": round(duration, 3),
+                             "outcome": outcome})
+            except Exception:
+                pass
 
     def send_plan(self, sid, p):
         text, kb = render_plan_card(self.lang, p)
@@ -830,27 +898,38 @@ class TelegramBot:
         r = self.api("getUpdates", {"offset": self.offset, "timeout": 30, "allowed_updates": ["callback_query", "message"]})
         return r.get("result", [])
 
-    def handle_update(self, keeper, u):
+    def handle_update(self, keeper, u, got_at=None):
+        # telegram-update (13/10 timing work): lag_s is Telegram's own delay (message "date") when known, else how
+        # long this update sat in an already-fetched batch before its turn; handled_s is everything below, follow-up
+        # calls included, so a slow answerCallbackQuery/editMessageReplyMarkup/send shows up here too.
+        t_start = time.time()
         self.offset = u["update_id"] + 1
         cq = u.get("callback_query")
-        if not cq:
-            self.handle_message(keeper, u.get("message"))
-            return
-        with keeper.lock:
-            out = keeper.decide(cq["from"]["id"], (cq.get("message") or {}).get("chat", {}).get("id"),
-                                cq.get("data", ""))
-        self.api("answerCallbackQuery", {"callback_query_id": cq["id"], "text": out[:180]})
-        msg = cq.get("message") or {}
-        if msg and out.key not in IGNORED:
-            try:                                            # one decision per message: drop the buttons
-                self.api("editMessageReplyMarkup", {"chat_id": msg["chat"]["id"],
-                                                     "message_id": msg["message_id"], "reply_markup": {}})
-            except Exception:
-                pass
-            try:
-                self.send(out)
-            except Exception:
-                pass
+        msg_in = u.get("message") if not cq else None
+        lag = (t_start - msg_in["date"]) if (isinstance(msg_in, dict) and isinstance(msg_in.get("date"), (int, float))) \
+            else (t_start - got_at if got_at is not None else None)
+        try:
+            if not cq:
+                self.handle_message(keeper, u.get("message"))
+                return
+            with keeper.lock_scope("decide"):
+                out = keeper.decide(cq["from"]["id"], (cq.get("message") or {}).get("chat", {}).get("id"),
+                                    cq.get("data", ""))
+            self.api("answerCallbackQuery", {"callback_query_id": cq["id"], "text": out[:180]})
+            msg = cq.get("message") or {}
+            if msg and out.key not in IGNORED:
+                try:                                            # one decision per message: drop the buttons
+                    self.api("editMessageReplyMarkup", {"chat_id": msg["chat"]["id"],
+                                                         "message_id": msg["message_id"], "reply_markup": {}})
+                except Exception:
+                    pass
+                try:
+                    self.send(out)
+                except Exception:
+                    pass
+        finally:
+            keeper.log({"event": "telegram-update", "kind": "callback" if cq else "message",
+                        "lag_s": None if lag is None else round(lag, 3), "handled_s": round(time.time() - t_start, 3)})
 
     def handle_message(self, keeper, m):
         """A text message. keeper.command() answers only the owner's `/summary`; the reply goes to the configured chat."""
@@ -863,8 +942,10 @@ class TelegramBot:
     def poll(self, keeper):
         while True:
             try:
-                for u in self.fetch_updates():
-                    self.handle_update(keeper, u)
+                updates = self.fetch_updates()
+                got_at = time.time()                                # 13/10: "the poll returned", for callback lag
+                for u in updates:
+                    self.handle_update(keeper, u, got_at)
             except (TimeoutError, socket.timeout):                  # an idle long poll that dropped: retry at once
                 keeper.log({"event": "telegram-poll-timeout"})      # the offset only moves on success, so no update is lost
                 time.sleep(1)
@@ -904,9 +985,9 @@ def serve(keeper, cfg, ready=None):
                 return self.reply({"decision": "deny", "reason": "keeper: unknown client"})
             if req.get("op") != "check" or not isinstance(req.get("input") or {}, dict):
                 return self.reply({"error": "unknown op"})
-            with keeper.lock:
+            with keeper.lock_scope("check"):                            # propose() runs inside this same scope too:
                 out = keeper.check(req.get("session"), str(req.get("tool", "")), req.get("input") or {},
-                                   req.get("cwd"))
+                                   req.get("cwd"))                      # there is no separate lock site for it
             note = out.pop("_notify", None)
             # Dry run (11/10): send_plan() used to run AFTER the reply, so the agent was told "sent to the human"
             # even when Telegram was down and nothing reached them. Attempted first; the reason is rewritten only
@@ -975,6 +1056,7 @@ def main():
     cfg = load_config(sys.argv[1] if len(sys.argv) > 1 else None)
     bot = TelegramBot(cfg)
     keeper = Keeper(cfg, bot)
+    bot.log_fn = keeper.log                                     # 13/10: api()'s own slow/failed-call timing
     threading.Thread(target=bot.poll, args=(keeper,), daemon=True).start()
     try:
         bot.send(startup_message(keeper.lang, cfg["mode"]))

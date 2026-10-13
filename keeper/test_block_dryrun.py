@@ -141,6 +141,7 @@ class DryRunBase(unittest.TestCase):
         self.bot = keeperd.TelegramBot(self.cfg)
         self.bot.API_BASE = f"http://127.0.0.1:{self.fake.server_port}"       # instance-only: never touches the class
         self.k = keeperd.Keeper(self.cfg, self.bot, clock=clock)
+        self.bot.log_fn = self.k.log                                          # mirrors main()'s own wiring (13/10)
 
         # Outage retries (poll()'s time.sleep(1)/time.sleep(5)) must not cost real seconds. keeperd's `time`
         # module IS this file's `time` module (one object in sys.modules, not a copy), so this patch is global:
@@ -500,6 +501,36 @@ class HSummary(DryRunBase):
         self.deliver_message("/summary", from_id=STRANGER)
         time.sleep(0.2)
         self.assertFalse(self.fake.state.sent)
+
+
+class TimingInstrumentation(DryRunBase):
+    """13/10, after the owner reported 1-2 minute lag on clicks and commands: api()'s own timing, logged only past
+    its threshold or on failure, to keep the log small. No behaviour change: the real fake Telegram, on 127.0.0.1."""
+
+    def test_a_slow_api_call_logs_telegram_api_slow(self):
+        old = keeperd.API_SLOW_LOG_THRESHOLD
+        keeperd.API_SLOW_LOG_THRESHOLD = 0.05
+        try:
+            self.fake.state.fail_mode, self.fake.state.hang_seconds = "hang", 0.2
+            self.bot.send("hi")
+        finally:
+            keeperd.API_SLOW_LOG_THRESHOLD = old
+        self.assertTrue(self.wait_for(lambda: "telegram-api-slow" in self.log_events()))
+        rec = self.log_records("telegram-api-slow")[-1]
+        self.assertEqual(rec["method"], "sendMessage")
+        self.assertEqual(rec["outcome"], "ok")
+        self.assertGreater(rec["duration_s"], 0.1)
+
+    def test_a_fast_api_call_logs_nothing(self):
+        self.bot.send("hi")
+        self.assertNotIn("telegram-api-slow", self.log_events())
+
+    def test_a_failed_api_call_logs_its_outcome_even_if_fast(self):
+        self.fake.state.fail_mode = "502"
+        with self.assertRaises(Exception):
+            self.bot.send("hi")
+        rec = self.log_records("telegram-api-slow")[-1]
+        self.assertEqual(rec["outcome"], "http-502")
 
 
 if __name__ == "__main__":
