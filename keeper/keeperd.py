@@ -898,46 +898,65 @@ class TelegramBot:
         r = self.api("getUpdates", {"offset": self.offset, "timeout": 30, "allowed_updates": ["callback_query", "message"]})
         return r.get("result", [])
 
+    def _safe_api(self, method, payload):
+        """A Telegram follow-up call (the confirmation toast, dropping the buttons): must never hide the others,
+        never propagate out of handle_update() and cost poll() a 5s sleep over a purely cosmetic failure (13/10 —
+        this is what made a late click look like nothing happened: answerCallbackQuery can fail on its own, e.g.
+        HTTP 400 "query is too old", well after the decision was already applied). api() already logs the failure
+        itself (telegram-api-slow); nothing more to record here."""
+        try:
+            self.api(method, payload)
+        except Exception:
+            pass
+
+    def _safe_send(self, text):
+        try:
+            self.send(text)
+        except Exception:
+            pass
+
     def handle_update(self, keeper, u, got_at=None):
         # telegram-update (13/10 timing work): lag_s is Telegram's own delay (message "date") when known, else how
         # long this update sat in an already-fetched batch before its turn; handled_s is everything below, follow-up
         # calls included, so a slow answerCallbackQuery/editMessageReplyMarkup/send shows up here too.
         t_start = time.time()
-        self.offset = u["update_id"] + 1
         cq = u.get("callback_query")
         msg_in = u.get("message") if not cq else None
         lag = (t_start - msg_in["date"]) if (isinstance(msg_in, dict) and isinstance(msg_in.get("date"), (int, float))) \
             else (t_start - got_at if got_at is not None else None)
+        # Offset semantics (13/10, after the owner reported a lag the buttons never showed any sign of): an update
+        # must never be applied twice (decide()'s nonce already makes a replay harmless, and /stop is idempotent)
+        # and never lost. So the offset advances right after the state-mutating call below has mutated AND saved
+        # (never before it — a crash inside decide()/command() must retry the SAME update next poll, not skip it
+        # forever), and never only after the cosmetic follow-ups (a crash there must not re-apply an already-applied
+        # decision on the next poll either).
         try:
             if not cq:
                 self.handle_message(keeper, u.get("message"))
+                self.offset = u["update_id"] + 1
                 return
             with keeper.lock_scope("decide"):
-                out = keeper.decide(cq["from"]["id"], (cq.get("message") or {}).get("chat", {}).get("id"),
-                                    cq.get("data", ""))
-            self.api("answerCallbackQuery", {"callback_query_id": cq["id"], "text": out[:180]})
+                out = keeper.decide((cq.get("from") or {}).get("id"),
+                                    (cq.get("message") or {}).get("chat", {}).get("id"), cq.get("data", ""))
+            self.offset = u["update_id"] + 1
+            self._safe_api("answerCallbackQuery", {"callback_query_id": cq["id"], "text": out[:180]})
             msg = cq.get("message") or {}
-            if msg and out.key not in IGNORED:
-                try:                                            # one decision per message: drop the buttons
-                    self.api("editMessageReplyMarkup", {"chat_id": msg["chat"]["id"],
-                                                         "message_id": msg["message_id"], "reply_markup": {}})
-                except Exception:
-                    pass
-                try:
-                    self.send(out)
-                except Exception:
-                    pass
+            if msg and out.key not in IGNORED:                  # one decision per message: drop the buttons
+                self._safe_api("editMessageReplyMarkup", {"chat_id": msg["chat"]["id"],
+                                                           "message_id": msg["message_id"], "reply_markup": {}})
+                self._safe_send(out)
         finally:
             keeper.log({"event": "telegram-update", "kind": "callback" if cq else "message",
                         "lag_s": None if lag is None else round(lag, 3), "handled_s": round(time.time() - t_start, 3)})
 
     def handle_message(self, keeper, m):
-        """A text message. keeper.command() answers only the owner's `/summary`; the reply goes to the configured chat."""
+        """A text message. keeper.command() answers only the owner's known commands; the reply goes to the
+        configured chat. Does not own `self.offset`: handle_update() advances it right after this returns."""
         if not isinstance(m, dict):
             return
         replies = keeper.command((m.get("from") or {}).get("id"), (m.get("chat") or {}).get("id"), m.get("text"))
         for text in replies or []:
-            self.send(text)
+            self._safe_send(text)
 
     def poll(self, keeper):
         while True:
