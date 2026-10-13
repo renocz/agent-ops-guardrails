@@ -1295,6 +1295,62 @@ class TelegramCommands(Base):
         self.assertEqual(self.tg.offset, 0)                     # unchanged: nothing was mutated or saved yet
         self.assertEqual(self.calls, [])                        # no follow-up call either
 
+    def test_a_poison_update_is_dropped_after_three_tries_then_the_next_update_works(self):
+        """Owner review of PR #10 (13/10): an update that raises on EVERY attempt must not stall every later one
+        (an Approve, a /stop) behind it forever. A transient failure still gets its normal retries first."""
+        real_decide = self.k.decide
+        calls = []
+
+        def flaky_decide(*a, **kw):
+            calls.append(1)
+            raise RuntimeError("boom")
+        self.k.decide = flaky_decide
+        poison = {"update_id": 20, "callback_query": {"id": "cb-poison", "from": {"id": OWNER}, "data": "stop:all",
+                                                       "message": {"chat": {"id": CHAT}, "message_id": 5}}}
+        for _ in range(2):
+            with self.assertRaises(RuntimeError):
+                self.tg.handle_update(self.k, poison)
+            self.assertEqual(self.tg.offset, 0)                 # still stuck: not dropped before the 3rd try
+        self.tg.handle_update(self.k, poison)                   # 3rd failure: dropped instead of raised
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(self.tg.offset, 21)
+        with open(self.k.log_path) as f:
+            rec = [json.loads(x) for x in f if '"telegram-update-dropped"' in x][-1]
+        self.assertEqual(rec["update_id"], 20)
+        self.assertEqual(rec["error"], "RuntimeError")
+        self.assertEqual(set(rec) - {"at"}, {"event", "update_id", "error"})       # never the callback/message text
+
+        self.k.decide = real_decide
+        ok, _ = self.plan("id=p1 ; targets=web ; actions=deploy ; ttl=30")
+        upd = {"update_id": 21, "callback_query": {"id": "cb-ok", "from": {"id": OWNER}, "data": ok,
+                                                   "message": {"chat": {"id": CHAT}, "message_id": 6}}}
+        self.tg.handle_update(self.k, upd)                      # the update right after the poison one works fine
+        self.assertTrue(self.allowed(*bash("docker restart web")))
+        self.assertEqual(self.tg.offset, 22)
+
+    def test_a_transient_failure_then_success_applies_the_update_exactly_once(self):
+        ok, _ = self.plan("id=p1 ; targets=web ; actions=deploy ; ttl=30")
+        upd = {"update_id": 30, "callback_query": {"id": "cb1", "from": {"id": OWNER}, "data": ok,
+                                                   "message": {"chat": {"id": CHAT}, "message_id": 5}}}
+        real_decide, attempts = self.k.decide, []
+
+        def flaky_once(*a, **kw):
+            attempts.append(1)
+            if len(attempts) == 1:
+                raise RuntimeError("boom")
+            return real_decide(*a, **kw)
+        self.k.decide = flaky_once
+        with self.assertRaises(RuntimeError):
+            self.tg.handle_update(self.k, upd)                  # 1st try: fails, offset untouched
+        self.assertEqual(self.tg.offset, 0)
+        self.tg.handle_update(self.k, upd)                      # 2nd try: succeeds
+        self.assertEqual(len(attempts), 2)
+        self.assertEqual(self.tg.offset, 31)
+        self.assertTrue(self.allowed(*bash("docker restart web")))
+        # A redelivery of the SAME update_id (Telegram occasionally does this) must still not double-apply: that
+        # guarantee is decide()'s own nonce replay protection, not this retry counter.
+        self.assertEqual(self.k.decide(OWNER, CHAT, ok).key, "ans_replay")
+
     def test_the_card_goes_out_in_the_configured_language(self):
         fr = keeperd.TelegramBot(dict(self.cfg, lang="fr"))
         fr.api = lambda method, payload, timeout=40: self.calls.append((method, payload))
