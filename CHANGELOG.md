@@ -6,6 +6,15 @@ One version scheme: **a repository tag per release**. Components have no version
 
 Next: one week of the keeper in block mode, after a dry run of refusal, approval, expiry, replay and a Telegram outage.
 
+- **keeper: an update that always fails to handle is dropped, not retried forever (owner review of PR #10, 13/10).**
+  The previous commit made `self.offset` advance only after `decide()`/`command()` had mutated and saved, so a
+  crash retries the SAME update next poll instead of skipping it — right for a transient failure, but an update
+  that raises on EVERY attempt (a bug on a malformed field) would then retry forever, stalling every later
+  update (an Approve, a `/stop`) behind it until the daemon is restarted. A small per-`update_id` counter (bounded
+  by construction: a stuck update blocks everything behind it, so at most one entry is ever live) now retries up
+  to `MAX_UPDATE_RETRIES` (3) times — a real transient hiccup still gets its normal retries — then drops it,
+  advances the offset past it, and logs `telegram-update-dropped` (`update_id` and the exception type only, never
+  the message or callback text).
 - **keeper: long-poll hygiene — named timeouts, HTTP 409 Conflict handled distinctly (13/10).**
   `getUpdates`' own 30s/40s (server/client) long-poll timeout is now `GETUPDATES_SERVER_TIMEOUT` /
   `GETUPDATES_CLIENT_TIMEOUT`, named but left at their existing values: confirmed empirically that

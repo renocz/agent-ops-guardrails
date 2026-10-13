@@ -851,6 +851,12 @@ class TelegramBot:
     # bot token's long poll — the usual silent cause of "the bot ignores me". Back off longer than a plain error:
     # retrying fast just trades places with the other poller instead of letting it finish and go away.
     POLL_CONFLICT_BACKOFF_SECONDS = 30
+    # Owner review of PR #10 (13/10): item 2 made the offset advance only after a successful decide()/command(),
+    # so a crash retries the SAME update next poll instead of skipping it. That is right for a transient failure,
+    # but an update that raises on EVERY attempt (a bug on a malformed field) would then retry forever, stalling
+    # every later update — including an Approve or /stop — behind it until the daemon is restarted. A few retries
+    # still happen (a real transient hiccup gets its normal retry), then it is dropped.
+    MAX_UPDATE_RETRIES = 3
 
     def __init__(self, cfg):
         self.cfg = cfg
@@ -859,6 +865,10 @@ class TelegramBot:
             self.token = f.read().strip()
         self.offset = 0
         self.log_fn = None                                     # set to keeper.log by main(), once keeper exists
+        # update_id -> consecutive failure count (13/10). Bounded by construction, not by an explicit cap: a
+        # failing update blocks every later one from ever being attempted (same offset, same batch), so at most
+        # one entry is ever "live" in practice; cleared on success or once dropped, never left to accumulate.
+        self._fail_counts = {}
 
     def api(self, method, payload, timeout=None):
         timeout = self.DEFAULT_TIMEOUT if timeout is None else timeout
@@ -940,6 +950,7 @@ class TelegramBot:
         msg_in = u.get("message") if not cq else None
         lag = (t_start - msg_in["date"]) if (isinstance(msg_in, dict) and isinstance(msg_in.get("date"), (int, float))) \
             else (t_start - got_at if got_at is not None else None)
+        uid = u["update_id"]
         # Offset semantics (13/10, after the owner reported a lag the buttons never showed any sign of): an update
         # must never be applied twice (decide()'s nonce already makes a replay harmless, and /stop is idempotent)
         # and never lost. So the offset advances right after the state-mutating call below has mutated AND saved
@@ -947,20 +958,35 @@ class TelegramBot:
         # forever), and never only after the cosmetic follow-ups (a crash there must not re-apply an already-applied
         # decision on the next poll either).
         try:
-            if not cq:
-                self.handle_message(keeper, u.get("message"))
-                self.offset = u["update_id"] + 1
-                return
-            with keeper.lock_scope("decide"):
-                out = keeper.decide((cq.get("from") or {}).get("id"),
-                                    (cq.get("message") or {}).get("chat", {}).get("id"), cq.get("data", ""))
-            self.offset = u["update_id"] + 1
-            self._safe_api("answerCallbackQuery", {"callback_query_id": cq["id"], "text": out[:180]})
-            msg = cq.get("message") or {}
-            if msg and out.key not in IGNORED:                  # one decision per message: drop the buttons
-                self._safe_api("editMessageReplyMarkup", {"chat_id": msg["chat"]["id"],
-                                                           "message_id": msg["message_id"], "reply_markup": {}})
-                self._safe_send(out)
+            try:
+                if not cq:
+                    self.handle_message(keeper, u.get("message"))
+                    self.offset = uid + 1
+                    self._fail_counts.pop(uid, None)
+                    return
+                with keeper.lock_scope("decide"):
+                    out = keeper.decide((cq.get("from") or {}).get("id"),
+                                        (cq.get("message") or {}).get("chat", {}).get("id"), cq.get("data", ""))
+                self.offset = uid + 1
+                self._fail_counts.pop(uid, None)
+                self._safe_api("answerCallbackQuery", {"callback_query_id": cq["id"], "text": out[:180]})
+                msg = cq.get("message") or {}
+                if msg and out.key not in IGNORED:              # one decision per message: drop the buttons
+                    self._safe_api("editMessageReplyMarkup", {"chat_id": msg["chat"]["id"],
+                                                               "message_id": msg["message_id"], "reply_markup": {}})
+                    self._safe_send(out)
+            except Exception as e:
+                # A poison update (owner review of PR #10, 13/10): this one raises on every attempt, not just a
+                # transient hiccup. Retry a few times — the offset still hasn't moved, exactly as a real transient
+                # failure is retried today — then give up on it specifically and move the offset past it, so it
+                # cannot stall every later update (an Approve, a /stop) behind it forever. Never the message text.
+                fails = self._fail_counts.get(uid, 0) + 1
+                if fails < self.MAX_UPDATE_RETRIES:
+                    self._fail_counts[uid] = fails
+                    raise
+                self._fail_counts.pop(uid, None)
+                self.offset = uid + 1
+                keeper.log({"event": "telegram-update-dropped", "update_id": uid, "error": type(e).__name__})
         finally:
             keeper.log({"event": "telegram-update", "kind": "callback" if cq else "message",
                         "lag_s": None if lag is None else round(lag, 3), "handled_s": round(time.time() - t_start, 3)})
