@@ -6,6 +6,59 @@ One version scheme: **a repository tag per release**. Components have no version
 
 Next: one week of the keeper in block mode, after a dry run of refusal, approval, expiry, replay and a Telegram outage.
 
+- **keeper: an update that always fails to handle is dropped, not retried forever (owner review of PR #10, 13/10).**
+  The previous commit made `self.offset` advance only after `decide()`/`command()` had mutated and saved, so a
+  crash retries the SAME update next poll instead of skipping it — right for a transient failure, but an update
+  that raises on EVERY attempt (a bug on a malformed field) would then retry forever, stalling every later
+  update (an Approve, a `/stop`) behind it until the daemon is restarted. A small per-`update_id` counter (bounded
+  by construction: a stuck update blocks everything behind it, so at most one entry is ever live) now retries up
+  to `MAX_UPDATE_RETRIES` (3) times — a real transient hiccup still gets its normal retries — then drops it,
+  advances the offset past it, and logs `telegram-update-dropped` (`update_id` and the exception type only, never
+  the message or callback text).
+- **keeper: long-poll hygiene — named timeouts, HTTP 409 Conflict handled distinctly (13/10).**
+  `getUpdates`' own 30s/40s (server/client) long-poll timeout is now `GETUPDATES_SERVER_TIMEOUT` /
+  `GETUPDATES_CLIENT_TIMEOUT`, named but left at their existing values: confirmed empirically that
+  `urllib.request.urlopen()` opens a fresh connection per call (no pooling to go stale between polls), and
+  nothing in `api()` or the standard library shows the client timeout keeping a half-open connection alive past
+  what Telegram's own `timeout` already bounds. A shorter pair could recover from a stuck poll sooner, at the
+  cost of more requests when idle, but that trade-off could not be shown to help here, so left as-is. `getUpdates`
+  answering **409 Conflict** (another poller on the same bot token — the usual silent cause of "the bot ignores
+  me") is now logged as `telegram-poll-conflict`, not folded into the generic `telegram-error` count, and backs
+  off longer (`POLL_CONFLICT_BACKOFF_SECONDS`, 30s) than a plain error (`POLL_ERROR_RETRY_SECONDS`, 5s, also
+  named, same value as before): retrying fast against a second poller just trades places with it instead of
+  letting it finish and go away.
+- **keeper: audited every `keeper.lock` hold for a network call inside it (13/10), chasing the 1-2 minute lag.**
+  Reading the code: `send_plan()` already runs after the lock is released at both its call sites (since PR #8's
+  send-before-reply fix), and `decide()`/`_revoke_all()` never call the network either — so there was nothing
+  to shrink there. `check()`'s own scope (which `propose()` also runs inside, it has no lock site of its own)
+  keeps the go-gate classifier call, and must: `classify()` keeps its working state as go-gate module globals
+  (`CHANGES`, `KNOWN_VARS`, `CWD`), shared by every concurrent hook request against the one loaded `self.gate`
+  object, so narrowing the lock to skip it would let two simultaneous proposals corrupt each other's
+  classification — fixing that would mean changing go-gate itself, out of scope here. A new test proves the
+  actual bound over the real socket, poll loop and (fake) Telegram: a hanging `send_plan()` never delays a
+  concurrent button press or `/stop` by more than a small margin. Mutation-checked (the network call moved back
+  inside the lock in a copy): the test then fails, waiting the full hang.
+- **keeper: a late click no longer looks like nothing happened (13/10), found while chasing the 1-2 minute lag.**
+  `answerCallbackQuery` ran bare in `handle_update()`: a failure there (e.g. HTTP 400 "query is too old" on a
+  click handled late) propagated out, skipping `editMessageReplyMarkup` and the confirmation message even though
+  the decision was already applied — exactly the "buttons stayed, nothing visible happened" the owner reported —
+  and cost `poll()` a 5s sleep before the next long poll, on every such click. The three follow-up calls
+  (answer/edit markup/confirmation) are now each independent and non-fatal. `self.offset` moved from the first
+  line of `handle_update()` to right after the state-mutating call (`decide()`/`command()`) has mutated and
+  saved: never before (a crash there must retry the same update, not skip it forever) and never only after the
+  cosmetic follow-ups (so a crash there can't re-apply an already-applied decision either) — the nonce already
+  makes a replay harmless, and `/stop` is idempotent, so this can't double-apply anything. `cq["from"]["id"]`
+  read defensively (`.get()`), so a malformed update is treated as a stranger instead of crashing before the
+  offset could even advance.
+- **keeper: timing instrumentation for the 1-2 minute lag the owner reported on clicks and commands (13/10).**
+  No behaviour change: `log()`, no free text, kept small by firing only on the slow path. `telegram-update` for
+  every update handled (`lag_s`: Telegram's own delay when known, else how long it sat in an already-fetched
+  batch; `handled_s`: everything handle_update() does for it, follow-up calls included). `telegram-api-slow` per
+  `api()` call, only past 2 s or on failure (method, duration, outcome: ok / timeout / an HTTP status / the
+  exception type). `keeper-lock-wait` when waiting for `keeper.lock` itself took over 1 s, with a best-effort
+  label for who is acquiring it and who held it before (`check` — which covers `propose()` too, there is no
+  separate lock site for it — `decide`, `stop`). `tally()` gets two simple additions, `/summary`'s own text
+  unchanged: a `slow` counter and the worst `lag_s` seen in the window.
 - **install-keeper.sh and keeper/README.md: say to restart open sessions, and list the new commands (12/10).**
   A Claude Code session keeps the hooks it had when it started; the installer never said that a session open
   during a (re)install needs restarting before it sees the keeper hook. Added to the installer's own "after
