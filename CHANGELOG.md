@@ -6,6 +6,18 @@ One version scheme: **a repository tag per release**. Components have no version
 
 Next: one week of the keeper in block mode, after a dry run of refusal, approval, expiry, replay and a Telegram outage.
 
+- **keeper: a late click no longer looks like nothing happened (13/10), found while chasing the 1-2 minute lag.**
+  `answerCallbackQuery` ran bare in `handle_update()`: a failure there (e.g. HTTP 400 "query is too old" on a
+  click handled late) propagated out, skipping `editMessageReplyMarkup` and the confirmation message even though
+  the decision was already applied — exactly the "buttons stayed, nothing visible happened" the owner reported —
+  and cost `poll()` a 5s sleep before the next long poll, on every such click. The three follow-up calls
+  (answer/edit markup/confirmation) are now each independent and non-fatal. `self.offset` moved from the first
+  line of `handle_update()` to right after the state-mutating call (`decide()`/`command()`) has mutated and
+  saved: never before (a crash there must retry the same update, not skip it forever) and never only after the
+  cosmetic follow-ups (so a crash there can't re-apply an already-applied decision either) — the nonce already
+  makes a replay harmless, and `/stop` is idempotent, so this can't double-apply anything. `cq["from"]["id"]`
+  read defensively (`.get()`), so a malformed update is treated as a stranger instead of crashing before the
+  offset could even advance.
 - **keeper: timing instrumentation for the 1-2 minute lag the owner reported on clicks and commands (13/10).**
   No behaviour change: `log()`, no free text, kept small by firing only on the slow path. `telegram-update` for
   every update handled (`lag_s`: Telegram's own delay when known, else how long it sat in an already-fetched

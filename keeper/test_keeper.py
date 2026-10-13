@@ -3,7 +3,8 @@
 
 Run: python3 keeper/test_keeper.py   (no network, no install: a fake Telegram and a socket in a temp dir)
 """
-import contextlib, io, json, os, platform, shlex, shutil, socket, stat, string, subprocess, sys, tempfile, threading, time, unittest
+import contextlib, io, json, os, platform, shlex, shutil, socket, stat, string, subprocess, sys, tempfile, threading, time, unittest, \
+    urllib.error
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -1245,6 +1246,27 @@ class TelegramCommands(Base):
         self.assertEqual(self.calls[0][1]["text"], "approved for 30 min")
         self.assertTrue(self.allowed(*bash("docker restart web")))
 
+    def test_a_late_answer_does_not_hide_the_decision_or_the_confirmation(self):
+        """13/10: answerCallbackQuery can fail on its own (e.g. HTTP 400 "query is too old" on a late click) well
+        after decide() already applied the decision. That failure must stay local: the buttons still get removed
+        and the confirmation still gets sent, and the offset still advances (the decision is already saved)."""
+        ok, _ = self.plan("id=p1 ; targets=web ; actions=deploy ; ttl=30")
+
+        def api(method, payload, timeout=40):
+            self.calls.append((method, payload))
+            if method == "answerCallbackQuery":
+                raise urllib.error.HTTPError("https://api.telegram.org/x", 400, "query is too old", {}, None)
+            return {"result": []}
+        self.tg.api = api
+        upd = {"update_id": 11, "callback_query": {"id": "cb1", "from": {"id": OWNER}, "data": ok,
+                                                   "message": {"chat": {"id": CHAT}, "message_id": 5}}}
+        self.tg.handle_update(self.k, upd)                      # must not raise
+        methods = [m for m, _p in self.calls]
+        self.assertEqual(methods, ["answerCallbackQuery", "editMessageReplyMarkup", "sendMessage"])
+        self.assertEqual(self.calls[-1][1]["text"], "approved for 30 min")       # the confirmation still went out
+        self.assertTrue(self.allowed(*bash("docker restart web")))              # the decision is applied either way
+        self.assertEqual(self.tg.offset, 12)                                    # never stuck retrying this update
+
     def test_a_stranger_button_press_is_answered_but_changes_nothing(self):
         ok, _ = self.plan("id=p1 ; actions=deploy")
         upd = {"update_id": 12, "callback_query": {"id": "cb2", "from": {"id": STRANGER}, "data": ok,
@@ -1252,6 +1274,26 @@ class TelegramCommands(Base):
         self.tg.handle_update(self.k, upd)
         self.assertEqual([m for m, _p in self.calls], ["answerCallbackQuery"])     # no follow-up, buttons stay
         self.assertFalse(self.allowed(*bash("docker restart web")))
+
+    def test_a_callback_with_no_from_is_treated_as_a_stranger_not_a_crash(self):
+        """A malformed update (Telegram's own contract broken somehow) must not crash the poll loop nor get stuck
+        retrying forever: is_owner()-style checks already treat a missing id as "not the owner"."""
+        upd = {"update_id": 13, "callback_query": {"id": "cb3", "data": "stop:all",
+                                                   "message": {"chat": {"id": CHAT}, "message_id": 5}}}
+        self.tg.handle_update(self.k, upd)                      # must not raise (no "from" key at all)
+        self.assertEqual(self.tg.offset, 14)
+        self.assertEqual(self.log_events().count("decision-from-stranger-ignored"), 1)
+
+    def test_a_crash_inside_decide_never_advances_the_offset(self):
+        """The offset must advance only after the state-mutating call has mutated AND saved — never before, so a
+        genuine crash in decide() retries the SAME update next poll instead of silently skipping it forever."""
+        self.k.decide = lambda *a, **kw: 1 / 0
+        upd = {"update_id": 14, "callback_query": {"id": "cb4", "from": {"id": OWNER}, "data": "stop:all",
+                                                   "message": {"chat": {"id": CHAT}, "message_id": 5}}}
+        with self.assertRaises(ZeroDivisionError):
+            self.tg.handle_update(self.k, upd)
+        self.assertEqual(self.tg.offset, 0)                     # unchanged: nothing was mutated or saved yet
+        self.assertEqual(self.calls, [])                        # no follow-up call either
 
     def test_the_card_goes_out_in_the_configured_language(self):
         fr = keeperd.TelegramBot(dict(self.cfg, lang="fr"))
