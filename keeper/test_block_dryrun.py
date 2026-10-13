@@ -51,7 +51,7 @@ class FakeTelegramState:
         self.sent = []                         # (chat_id, text) from sendMessage
         self.answered = []                     # (callback_query_id, text) from answerCallbackQuery
         self.edited = []                        # (chat_id, message_id) from editMessageReplyMarkup
-        self.fail_mode = None                  # None | "502" | "refuse" | "hang"
+        self.fail_mode = None                  # None | "502" | "409" (getUpdates only) | "refuse" | "hang"
         self.hang_seconds = 2.0                # only used when fail_mode == "hang"
         self.requests = []                     # every method called, in order (for ordering assertions)
 
@@ -76,6 +76,10 @@ class FakeTelegramHandler(http.server.BaseHTTPRequestHandler):
         method = self.path.rsplit("/", 1)[-1]
         if st.fail_mode == "502":
             self.send_response(502)
+            self.end_headers()
+            return
+        if st.fail_mode == "409" and method == "getUpdates":   # another poller on this token (13/10)
+            self.send_response(409)
             self.end_headers()
             return
         if st.fail_mode == "hang":
@@ -415,7 +419,7 @@ class ETelegramOutage(DryRunBase):
     def test_poll_timeout_is_logged_apart_from_errors(self):
         """A hang during the background poll's own getUpdates (not a propose) is telegram-poll-timeout, not
         telegram-error: cut polls lose no update (the offset only moves on success) and are not a real error."""
-        self.bot.DEFAULT_TIMEOUT = 0.3
+        self.bot.GETUPDATES_CLIENT_TIMEOUT = 0.3
         self.fake.state.fail_mode, self.fake.state.hang_seconds = "hang", 1.5
         self.assertTrue(self.wait_for(lambda: "telegram-poll-timeout" in self.log_events()))
         self.assertNotIn("telegram-error", self.log_events())
@@ -479,7 +483,7 @@ class HSummary(DryRunBase):
     def test_summary_shows_denies_and_separates_cut_polls_from_errors(self):
         self.assertEqual(self.hook(*bash("docker restart web"))[0], "deny")       # a plain would-be-denied change
 
-        self.bot.DEFAULT_TIMEOUT = 0.3
+        self.bot.GETUPDATES_CLIENT_TIMEOUT = 0.3
         self.fake.state.fail_mode, self.fake.state.hang_seconds = "hang", 1.0
         self.assertTrue(self.wait_for(lambda: "telegram-poll-timeout" in self.log_events()))
         self.fake.state.fail_mode = "502"
@@ -554,6 +558,25 @@ class LockHoldTime(DryRunBase):
         self.assertLess(time.time() - t0, 1.0, "/stop waited on the hanging send_plan")
         self.assertEqual(out[0].key, "ans_nothing_active")
         th.join(5)
+
+
+class LongPollHygiene(DryRunBase):
+    """13/10: getUpdates answering 409 Conflict (another poller on the same bot token — the usual silent cause of
+    "the bot ignores me") must be distinct from a generic Telegram error, with its own longer backoff."""
+
+    def test_409_is_logged_distinctly_not_folded_into_telegram_error(self):
+        self.assertGreater(keeperd.TelegramBot.POLL_CONFLICT_BACKOFF_SECONDS,
+                           keeperd.TelegramBot.POLL_ERROR_RETRY_SECONDS)
+        self.fake.state.fail_mode = "409"
+        self.assertTrue(self.wait_for(lambda: "telegram-poll-conflict" in self.log_events()))
+        self.assertNotIn("telegram-error", self.log_events())
+
+    def test_the_daemon_recovers_once_the_conflict_clears(self):
+        self.fake.state.fail_mode = "409"
+        self.assertTrue(self.wait_for(lambda: "telegram-poll-conflict" in self.log_events()))
+        self.fake.state.fail_mode = None
+        self.deliver_message("/summary")
+        self.assertTrue(self.wait_for(lambda: self.fake.state.sent, timeout=5.0))
 
 
 if __name__ == "__main__":
