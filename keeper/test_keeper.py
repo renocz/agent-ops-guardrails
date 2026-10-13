@@ -1118,6 +1118,45 @@ class OwnerCommands(Base):
         self.assertIn("Commandes", k.command(OWNER, CHAT, "/help")[0])
 
 
+class LockTiming(Base):
+    """13/10, after the owner reported 1-2 minute lag on clicks and commands: keeper-lock-wait is logged only when
+    the wait itself is slow enough to matter, with a best-effort guess at who held the lock."""
+
+    def test_a_slow_wait_is_logged_with_the_two_labels(self):
+        old = keeperd.LOCK_WAIT_LOG_THRESHOLD
+        keeperd.LOCK_WAIT_LOG_THRESHOLD = 0.05
+        try:
+            self.k.lock.acquire()
+            self.k._lock_holder = "holder"
+
+            def waiter():
+                with self.k.lock_scope("waiter"):
+                    pass
+            th = threading.Thread(target=waiter, daemon=True)
+            th.start()
+            time.sleep(0.15)                                   # keep it long enough to cross the lowered threshold
+            self.k.lock.release()
+            th.join(5)
+        finally:
+            keeperd.LOCK_WAIT_LOG_THRESHOLD = old
+        with open(self.k.log_path) as f:
+            rec = next(json.loads(x) for x in f if '"keeper-lock-wait"' in x)
+        self.assertEqual(rec["by"], "waiter")
+        self.assertEqual(rec["held_by"], "holder")
+        self.assertGreater(rec["waited_s"], 0.05)
+
+    def test_a_fast_acquire_logs_nothing(self):
+        with self.k.lock_scope("solo"):
+            pass
+        self.assertFalse(os.path.exists(self.k.log_path))                      # nothing was ever logged
+
+    def test_stop_still_releases_the_lock_after_use(self):
+        """lock_scope() must release even though _revoke_all() itself never touches the lock."""
+        self.k.command(OWNER, CHAT, "/stop")
+        self.assertTrue(self.k.lock.acquire(timeout=1))
+        self.k.lock.release()
+
+
 class TelegramCommands(Base):
     """The bot side: `message` updates are asked for, routed to keeper.command, and nothing else is acted on."""
 
@@ -1163,7 +1202,7 @@ class TelegramCommands(Base):
         with open(self.k.log_path) as f:
             events = [json.loads(x) for x in f if x.strip()]
         self.assertEqual([e["event"] for e in events if e["event"].startswith("telegram")],
-                         ["telegram-poll-timeout", "telegram-error"])
+                         ["telegram-poll-timeout", "telegram-update", "telegram-error"])
         self.assertEqual(self.tg.offset, 8)                    # the update after the timeout was handled, not skipped
         self.assertEqual(len(self.sent()), 1)
 

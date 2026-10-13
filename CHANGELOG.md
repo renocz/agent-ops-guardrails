@@ -6,6 +6,15 @@ One version scheme: **a repository tag per release**. Components have no version
 
 Next: one week of the keeper in block mode, after a dry run of refusal, approval, expiry, replay and a Telegram outage.
 
+- **keeper: timing instrumentation for the 1-2 minute lag the owner reported on clicks and commands (13/10).**
+  No behaviour change: `log()`, no free text, kept small by firing only on the slow path. `telegram-update` for
+  every update handled (`lag_s`: Telegram's own delay when known, else how long it sat in an already-fetched
+  batch; `handled_s`: everything handle_update() does for it, follow-up calls included). `telegram-api-slow` per
+  `api()` call, only past 2 s or on failure (method, duration, outcome: ok / timeout / an HTTP status / the
+  exception type). `keeper-lock-wait` when waiting for `keeper.lock` itself took over 1 s, with a best-effort
+  label for who is acquiring it and who held it before (`check` — which covers `propose()` too, there is no
+  separate lock site for it — `decide`, `stop`). `tally()` gets two simple additions, `/summary`'s own text
+  unchanged: a `slow` counter and the worst `lag_s` seen in the window.
 - **install-keeper.sh and keeper/README.md: say to restart open sessions, and list the new commands (12/10).**
   A Claude Code session keeps the hooks it had when it started; the installer never said that a session open
   during a (re)install needs restarting before it sees the keeper hook. Added to the installer's own "after
