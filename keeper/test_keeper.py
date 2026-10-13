@@ -3,7 +3,8 @@
 
 Run: python3 keeper/test_keeper.py   (no network, no install: a fake Telegram and a socket in a temp dir)
 """
-import contextlib, io, json, os, platform, shlex, shutil, socket, stat, string, subprocess, sys, tempfile, threading, time, unittest
+import contextlib, io, json, os, platform, shlex, shutil, socket, stat, string, subprocess, sys, tempfile, threading, time, unittest, \
+    urllib.error
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -1118,6 +1119,45 @@ class OwnerCommands(Base):
         self.assertIn("Commandes", k.command(OWNER, CHAT, "/help")[0])
 
 
+class LockTiming(Base):
+    """13/10, after the owner reported 1-2 minute lag on clicks and commands: keeper-lock-wait is logged only when
+    the wait itself is slow enough to matter, with a best-effort guess at who held the lock."""
+
+    def test_a_slow_wait_is_logged_with_the_two_labels(self):
+        old = keeperd.LOCK_WAIT_LOG_THRESHOLD
+        keeperd.LOCK_WAIT_LOG_THRESHOLD = 0.05
+        try:
+            self.k.lock.acquire()
+            self.k._lock_holder = "holder"
+
+            def waiter():
+                with self.k.lock_scope("waiter"):
+                    pass
+            th = threading.Thread(target=waiter, daemon=True)
+            th.start()
+            time.sleep(0.15)                                   # keep it long enough to cross the lowered threshold
+            self.k.lock.release()
+            th.join(5)
+        finally:
+            keeperd.LOCK_WAIT_LOG_THRESHOLD = old
+        with open(self.k.log_path) as f:
+            rec = next(json.loads(x) for x in f if '"keeper-lock-wait"' in x)
+        self.assertEqual(rec["by"], "waiter")
+        self.assertEqual(rec["held_by"], "holder")
+        self.assertGreater(rec["waited_s"], 0.05)
+
+    def test_a_fast_acquire_logs_nothing(self):
+        with self.k.lock_scope("solo"):
+            pass
+        self.assertFalse(os.path.exists(self.k.log_path))                      # nothing was ever logged
+
+    def test_stop_still_releases_the_lock_after_use(self):
+        """lock_scope() must release even though _revoke_all() itself never touches the lock."""
+        self.k.command(OWNER, CHAT, "/stop")
+        self.assertTrue(self.k.lock.acquire(timeout=1))
+        self.k.lock.release()
+
+
 class TelegramCommands(Base):
     """The bot side: `message` updates are asked for, routed to keeper.command, and nothing else is acted on."""
 
@@ -1163,7 +1203,7 @@ class TelegramCommands(Base):
         with open(self.k.log_path) as f:
             events = [json.loads(x) for x in f if x.strip()]
         self.assertEqual([e["event"] for e in events if e["event"].startswith("telegram")],
-                         ["telegram-poll-timeout", "telegram-error"])
+                         ["telegram-poll-timeout", "telegram-update", "telegram-error"])
         self.assertEqual(self.tg.offset, 8)                    # the update after the timeout was handled, not skipped
         self.assertEqual(len(self.sent()), 1)
 
@@ -1206,6 +1246,27 @@ class TelegramCommands(Base):
         self.assertEqual(self.calls[0][1]["text"], "approved for 30 min")
         self.assertTrue(self.allowed(*bash("docker restart web")))
 
+    def test_a_late_answer_does_not_hide_the_decision_or_the_confirmation(self):
+        """13/10: answerCallbackQuery can fail on its own (e.g. HTTP 400 "query is too old" on a late click) well
+        after decide() already applied the decision. That failure must stay local: the buttons still get removed
+        and the confirmation still gets sent, and the offset still advances (the decision is already saved)."""
+        ok, _ = self.plan("id=p1 ; targets=web ; actions=deploy ; ttl=30")
+
+        def api(method, payload, timeout=40):
+            self.calls.append((method, payload))
+            if method == "answerCallbackQuery":
+                raise urllib.error.HTTPError("https://api.telegram.org/x", 400, "query is too old", {}, None)
+            return {"result": []}
+        self.tg.api = api
+        upd = {"update_id": 11, "callback_query": {"id": "cb1", "from": {"id": OWNER}, "data": ok,
+                                                   "message": {"chat": {"id": CHAT}, "message_id": 5}}}
+        self.tg.handle_update(self.k, upd)                      # must not raise
+        methods = [m for m, _p in self.calls]
+        self.assertEqual(methods, ["answerCallbackQuery", "editMessageReplyMarkup", "sendMessage"])
+        self.assertEqual(self.calls[-1][1]["text"], "approved for 30 min")       # the confirmation still went out
+        self.assertTrue(self.allowed(*bash("docker restart web")))              # the decision is applied either way
+        self.assertEqual(self.tg.offset, 12)                                    # never stuck retrying this update
+
     def test_a_stranger_button_press_is_answered_but_changes_nothing(self):
         ok, _ = self.plan("id=p1 ; actions=deploy")
         upd = {"update_id": 12, "callback_query": {"id": "cb2", "from": {"id": STRANGER}, "data": ok,
@@ -1213,6 +1274,82 @@ class TelegramCommands(Base):
         self.tg.handle_update(self.k, upd)
         self.assertEqual([m for m, _p in self.calls], ["answerCallbackQuery"])     # no follow-up, buttons stay
         self.assertFalse(self.allowed(*bash("docker restart web")))
+
+    def test_a_callback_with_no_from_is_treated_as_a_stranger_not_a_crash(self):
+        """A malformed update (Telegram's own contract broken somehow) must not crash the poll loop nor get stuck
+        retrying forever: is_owner()-style checks already treat a missing id as "not the owner"."""
+        upd = {"update_id": 13, "callback_query": {"id": "cb3", "data": "stop:all",
+                                                   "message": {"chat": {"id": CHAT}, "message_id": 5}}}
+        self.tg.handle_update(self.k, upd)                      # must not raise (no "from" key at all)
+        self.assertEqual(self.tg.offset, 14)
+        self.assertEqual(self.log_events().count("decision-from-stranger-ignored"), 1)
+
+    def test_a_crash_inside_decide_never_advances_the_offset(self):
+        """The offset must advance only after the state-mutating call has mutated AND saved — never before, so a
+        genuine crash in decide() retries the SAME update next poll instead of silently skipping it forever."""
+        self.k.decide = lambda *a, **kw: 1 / 0
+        upd = {"update_id": 14, "callback_query": {"id": "cb4", "from": {"id": OWNER}, "data": "stop:all",
+                                                   "message": {"chat": {"id": CHAT}, "message_id": 5}}}
+        with self.assertRaises(ZeroDivisionError):
+            self.tg.handle_update(self.k, upd)
+        self.assertEqual(self.tg.offset, 0)                     # unchanged: nothing was mutated or saved yet
+        self.assertEqual(self.calls, [])                        # no follow-up call either
+
+    def test_a_poison_update_is_dropped_after_three_tries_then_the_next_update_works(self):
+        """Owner review of PR #10 (13/10): an update that raises on EVERY attempt must not stall every later one
+        (an Approve, a /stop) behind it forever. A transient failure still gets its normal retries first."""
+        real_decide = self.k.decide
+        calls = []
+
+        def flaky_decide(*a, **kw):
+            calls.append(1)
+            raise RuntimeError("boom")
+        self.k.decide = flaky_decide
+        poison = {"update_id": 20, "callback_query": {"id": "cb-poison", "from": {"id": OWNER}, "data": "stop:all",
+                                                       "message": {"chat": {"id": CHAT}, "message_id": 5}}}
+        for _ in range(2):
+            with self.assertRaises(RuntimeError):
+                self.tg.handle_update(self.k, poison)
+            self.assertEqual(self.tg.offset, 0)                 # still stuck: not dropped before the 3rd try
+        self.tg.handle_update(self.k, poison)                   # 3rd failure: dropped instead of raised
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(self.tg.offset, 21)
+        with open(self.k.log_path) as f:
+            rec = [json.loads(x) for x in f if '"telegram-update-dropped"' in x][-1]
+        self.assertEqual(rec["update_id"], 20)
+        self.assertEqual(rec["error"], "RuntimeError")
+        self.assertEqual(set(rec) - {"at"}, {"event", "update_id", "error"})       # never the callback/message text
+
+        self.k.decide = real_decide
+        ok, _ = self.plan("id=p1 ; targets=web ; actions=deploy ; ttl=30")
+        upd = {"update_id": 21, "callback_query": {"id": "cb-ok", "from": {"id": OWNER}, "data": ok,
+                                                   "message": {"chat": {"id": CHAT}, "message_id": 6}}}
+        self.tg.handle_update(self.k, upd)                      # the update right after the poison one works fine
+        self.assertTrue(self.allowed(*bash("docker restart web")))
+        self.assertEqual(self.tg.offset, 22)
+
+    def test_a_transient_failure_then_success_applies_the_update_exactly_once(self):
+        ok, _ = self.plan("id=p1 ; targets=web ; actions=deploy ; ttl=30")
+        upd = {"update_id": 30, "callback_query": {"id": "cb1", "from": {"id": OWNER}, "data": ok,
+                                                   "message": {"chat": {"id": CHAT}, "message_id": 5}}}
+        real_decide, attempts = self.k.decide, []
+
+        def flaky_once(*a, **kw):
+            attempts.append(1)
+            if len(attempts) == 1:
+                raise RuntimeError("boom")
+            return real_decide(*a, **kw)
+        self.k.decide = flaky_once
+        with self.assertRaises(RuntimeError):
+            self.tg.handle_update(self.k, upd)                  # 1st try: fails, offset untouched
+        self.assertEqual(self.tg.offset, 0)
+        self.tg.handle_update(self.k, upd)                      # 2nd try: succeeds
+        self.assertEqual(len(attempts), 2)
+        self.assertEqual(self.tg.offset, 31)
+        self.assertTrue(self.allowed(*bash("docker restart web")))
+        # A redelivery of the SAME update_id (Telegram occasionally does this) must still not double-apply: that
+        # guarantee is decide()'s own nonce replay protection, not this retry counter.
+        self.assertEqual(self.k.decide(OWNER, CHAT, ok).key, "ans_replay")
 
     def test_the_card_goes_out_in_the_configured_language(self):
         fr = keeperd.TelegramBot(dict(self.cfg, lang="fr"))
