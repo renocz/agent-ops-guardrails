@@ -1,31 +1,50 @@
-"""Oracle + corpus for F4 of the 11/10 review (14/10): in 7 days of observation the owner's log recorded 13
-commands classified opaque/unbalanced (so they would need a plan in block mode) that were, as far as their shape
-goes, ordinary remote commands an agent runs all day -- nested quoting through ssh/pct exec/bash -c, French text
-with apostrophes, here-documents. The log keeps only the command's head, never its arguments, so the exact
-strings are gone; this file reproduces the CLASS of shapes instead of guessing one specific cause.
+"""Oracle + corpus for F4 of the 11/10 review (14/10, corrected 15/10 after owner review): in 7 days of
+observation the owner's log recorded 13 commands classified opaque/unbalanced (so they would need a plan in
+block mode) that were, as far as their shape goes, ordinary remote commands an agent runs all day -- nested
+quoting through ssh/pct exec/bash -c, French text with apostrophes, here-documents. The log keeps only the
+command's head, never its arguments, so the exact strings are gone; this file reproduces the CLASS of shapes
+instead of guessing one specific cause.
 
-The oracle: `bash -n -c "<cmd>"` (syntax check only, never executes) against `gate_says_unbalanced()`, which is
-what the log actually recorded -- classify() landing on ("opaque", "unbalanced") -- checked through the real
-recursive pipeline (ssh/pct exec/bash -c unwrap a quoted inner command, then re-scan it), not scan() alone on the
-raw top-level string. That distinction matters: the inner-command reconstruction is exactly where a balanced
-command can become incorrectly unbalanced (see CHANGELOG.md and the PR description for the confirmed cause), so
-comparing only the top-level string would miss the real bug class entirely.
+The first version of this oracle ran `bash -n` on the LOCAL command line and compared that against classify()'s
+recursive answer. That is the wrong comparison for ssh, pct/qm exec, docker exec and bash -c: each of these hands
+an INNER string to another real shell (a login shell on the remote host for ssh; the -c argument of a literal
+nested sh/bash for the others), and that inner string is not always "the local line, re-quoted." ssh in
+particular never re-quotes: OpenSSH joins the remaining command-line words with a single space and sends that
+one string over the wire, unescaped, for the remote shell to parse again. So `ssh host echo "it's" done` -- valid
+locally -- actually sends the remote shell `echo it's done`, an unterminated quote that fails on the remote host
+without running anything. The local line being valid says nothing about that. The right oracle question is always
+"does bash -n accept the string the deepest real shell in the chain will actually parse", not "does bash -n
+accept the line as typed".
+
+`real_shell_hops()` below rebuilds that chain the way each tool really builds it (ssh: space-join, no escaping;
+pct/qm exec and docker exec: the literal argv element handed to a nested shell's -c, only when one is actually
+there -- these tools exec their argument list directly, no shell re-parse, unless the command itself IS a shell
+invoked with -c; bash/sh/zsh/dash -c: the literal -c argument, same reasoning, whether top-level or nested).
+Every hop must parse (`bash -n`) for the command to actually run anywhere along the chain; `real_valid()` is the
+AND of all of them. This duplicates a little of go_gate.py's own argument-walking on purpose: an oracle that
+reused the code under test could not catch a mismatch between what that code assumes and what the real tools do.
 
 No behaviour change in this file: it only measures. A throwaway script (not committed) used build_corpus() and
-gate_says_unbalanced() to produce the disagreement table in the PR description.
+real_valid()/gate_says_unbalanced() to produce the disagreement table in the PR description.
 """
-import os, shutil, subprocess, sys, unittest
+import os, shlex, shutil, subprocess, sys, unittest
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import go_gate as g
 
 HAS_BASH = shutil.which("bash") is not None
 
+SHELLS = ("sh", "bash", "zsh", "dash")
+SSH_OPTS_TAKING_A_VALUE = ("-i", "-p", "-o", "-l", "-J", "-F", "-L", "-R", "-D", "-W", "-b", "-c", "-E",
+                           "-m", "-O", "-Q", "-S", "-w", "-B", "-e")
+
 
 def bash_n_valid(cmd):
     """True/False per `bash -n` (syntax check only: it is asked to look at the command, never to run it). None if
     bash itself could not be asked (missing, or an unexpected subprocess error) -- callers must skip a None, never
     treat it as a verdict either way."""
+    if cmd is None:
+        return None
     if not HAS_BASH:
         return None
     try:
@@ -33,6 +52,70 @@ def bash_n_valid(cmd):
     except (OSError, subprocess.TimeoutExpired):
         return None
     return r.returncode == 0
+
+
+def real_shell_hops(cmd, depth=0):
+    """[cmd, inner, inner-of-inner, ...]: every string a REAL shell actually parses along the way this exact
+    command would really run, built the way the real tool builds it, not the way go-gate's own classifier does.
+    `cmd` itself is always hop 0 (something -- the caller's own shell -- already parses it to arrive here). A
+    construct that hands its argument straight to a real shell adds one more hop, recursively, for what THAT
+    shell receives; a construct that execs directly (no shell on the far end) adds none."""
+    hops = [cmd]
+    if depth >= 6:
+        return hops
+    try:
+        toks = shlex.split(cmd)
+    except ValueError:
+        return hops                                            # unparsable locally; bash -n on cmd will say so too
+    if not toks:
+        return hops
+    c, args = os.path.basename(toks[0]), toks[1:]
+    if c == "ssh":
+        i = 0
+        while i < len(args) and args[i].startswith("-"):
+            i += 2 if args[i] in SSH_OPTS_TAKING_A_VALUE else 1
+        rest = args[i + 1:]                                     # args[i] is the host
+        if rest:
+            # OpenSSH's own behaviour: the remaining words are joined with a single space and sent over the wire
+            # as ONE string, unescaped -- never re-quoted -- for the remote login shell to parse as a fresh script.
+            hops += real_shell_hops(" ".join(rest), depth + 1)
+        return hops
+    if c in ("pct", "qm") and args and args[0] == "exec" and "--" in args:
+        inner = args[args.index("--") + 1:]
+        if len(inner) == 3 and inner[0] in SHELLS and inner[1] == "-c":
+            # pct/qm exec hands its argument list to a real exec, not a shell: each word is delivered as its own
+            # argv element, verbatim, with NO re-joining or re-quoting anywhere. A shell only re-enters the
+            # picture when the executed program IS itself a shell asked for `-c SCRIPT`, in which case SCRIPT
+            # (already a single, already-dequoted argv element) is exactly what that shell receives.
+            hops += real_shell_hops(inner[2], depth + 1)
+        return hops
+    if c == "docker" and "exec" in args:
+        j = 1
+        while j < len(args) and args[j].startswith("-"):
+            j += 2 if args[j] in ("-u", "-w", "-e", "--user", "--workdir", "--env") else 1
+        inner = args[j + 1:]                                    # args[j] is the container name
+        if len(inner) == 3 and inner[0] in SHELLS and inner[1] == "-c":
+            # Same reasoning as pct/qm exec: docker exec also execs its argument list directly.
+            hops += real_shell_hops(inner[2], depth + 1)
+        return hops
+    if c in SHELLS and "-c" in args:
+        ci = args.index("-c")
+        if ci + 2 == len(args):                                 # exactly one script argument follows -c
+            # Whether this `<shell> -c SCRIPT` is the top-level command or was itself just delivered by one of the
+            # cases above, SCRIPT is a literal argv element already -- no re-quoting needed before this next hop.
+            hops += real_shell_hops(args[ci + 1], depth + 1)
+        return hops
+    return hops
+
+
+def real_valid(cmd):
+    """True iff every real shell hop this command would actually trigger parses cleanly -- i.e. the command
+    really runs, at least syntactically, all the way down. None if bash could not be asked. False as soon as one
+    hop fails: that is exactly where the real chain would also break, before anything after it ever runs."""
+    verdicts = [bash_n_valid(h) for h in real_shell_hops(cmd)]
+    if any(v is None for v in verdicts):
+        return None
+    return all(verdicts)
 
 
 def gate_says_unbalanced(cmd):
@@ -243,6 +326,49 @@ def build_corpus():
     return corpus
 
 
+@unittest.skipUnless(HAS_BASH, "needs bash for the oracle")
+class RealShellHops(unittest.TestCase):
+    """Direct checks on the oracle's own model of reality, independent of the corpus and of go-gate."""
+
+    def test_ssh_space_joins_without_requoting(self):
+        # ssh never re-quotes: the remote shell receives the words joined by a single space, so a quote that was
+        # closed locally around one word is just gone by the time the remote shell parses the joined string.
+        self.assertEqual(real_shell_hops("ssh host echo \"it's\" done"),
+                          ["ssh host echo \"it's\" done", "echo it's done"])
+        self.assertFalse(real_valid("ssh host echo \"it's\" done"))
+
+    def test_ssh_single_quoted_remote_command_is_one_hop_deeper(self):
+        self.assertEqual(real_shell_hops("ssh host 'ls -la /etc'"),
+                          ["ssh host 'ls -la /etc'", "ls -la /etc"])
+        self.assertTrue(real_valid("ssh host 'ls -la /etc'"))
+
+    def test_pct_exec_direct_command_has_no_shell_hop(self):
+        # no shell on the far end: pct exec execs the argv directly, so there is only the local hop to check.
+        self.assertEqual(real_shell_hops("pct exec 100 -- ls -la /etc"), ["pct exec 100 -- ls -la /etc"])
+
+    def test_pct_exec_sh_dash_c_delivers_the_script_argv_element_verbatim(self):
+        # pct exec hands over a real argv, so the script reaches sh -c exactly as it was already dequoted locally
+        # -- no re-join, no re-quote needed for this hop to be faithful.
+        self.assertEqual(real_shell_hops('pct exec 100 -- sh -c "rm -rf /x"'),
+                          ['pct exec 100 -- sh -c "rm -rf /x"', "rm -rf /x"])
+
+    def test_three_level_nesting_each_hop_checked(self):
+        cmd = 'ssh host1 \'pct exec 100 -- sh -c "rm -rf /x"\''
+        self.assertEqual(real_shell_hops(cmd),
+                          [cmd, 'pct exec 100 -- sh -c "rm -rf /x"', "rm -rf /x"])
+        self.assertTrue(real_valid(cmd))
+
+    def test_docker_exec_mirrors_pct_exec(self):
+        self.assertEqual(real_shell_hops('docker exec web sh -c "systemctl restart nginx"'),
+                          ['docker exec web sh -c "systemctl restart nginx"', "systemctl restart nginx"])
+
+    def test_bash_dash_c_top_level_is_its_own_hop(self):
+        self.assertEqual(real_shell_hops("bash -c 'rm -rf /x'"), ["bash -c 'rm -rf /x'", "rm -rf /x"])
+
+    def test_unparsable_locally_is_a_single_hop(self):
+        self.assertEqual(real_shell_hops('echo "unterminated'), ['echo "unterminated'])
+
+
 class OracleCorpus(unittest.TestCase):
     def setUp(self):
         self._safe, self._cwd = list(g.SAFE_GIT_REPOS), g.CWD
@@ -274,10 +400,30 @@ class OracleCorpus(unittest.TestCase):
         corpus = build_corpus()
         for _cat, name, cmd in corpus:
             with self.subTest(name=name, cmd=cmd):
-                valid = bash_n_valid(cmd)
+                real_shell_hops(cmd)                                     # must not raise or hang
+                valid = real_valid(cmd)
                 if valid is None:
                     continue                                            # bash itself could not be asked; skip, don't guess
                 gate_says_unbalanced(cmd)                                # must not raise
+
+    @unittest.skipUnless(HAS_BASH, "needs bash for the oracle")
+    def test_disagreements_are_only_the_known_ansi_c_gap(self):
+        """Once `real_valid()` asks the right question (does every real shell hop actually parse, not just the
+        local line), the corpus's only remaining false positives (real_valid() true, gate says unbalanced) are the
+        2 ansi-c $'...' cases secret-guard's scan() has no notion of (see CHANGELOG.md). ssh/pct exec/docker exec/
+        bash -c carrying a genuinely broken inner command are all correctly opaque -- never a disagreement. A
+        regression here (a new or missing disagreement) means either the oracle's modelling of a real shell hop
+        drifted from the tools it models, or go-gate's own recursive unwrapping changed in a way that needs the
+        same kind of scrutiny this file exists to apply."""
+        corpus = build_corpus()
+        false_positives = []
+        for _cat, name, cmd in corpus:
+            valid = real_valid(cmd)
+            if valid is True and gate_says_unbalanced(cmd):
+                false_positives.append((name, cmd))
+        self.assertEqual(len(false_positives), 2, false_positives)
+        for name, cmd in false_positives:
+            self.assertIn("$'", cmd, f"unexpected false positive outside the known ansi-c gap: {name!r} {cmd!r}")
 
 
 if __name__ == "__main__":
