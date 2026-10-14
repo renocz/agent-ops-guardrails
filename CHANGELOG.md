@@ -34,6 +34,13 @@ Next: one week of the keeper in block mode, after a dry run of refusal, approval
   tracks only `'`/`"` as quote characters and has no notion of `$'...'`'s own backslash-escaping, so a correct fix
   lives in secret-guard's `scan()`, out of bounds for this change; duplicating its quote-tracking logic in
   go-gate instead would be a second, drifting copy of the same state machine for a narrow, uncommon shape.
+- **go-gate: 20 disguise tests for the nested-quote path -- ssh/pct exec/docker exec/sh -c unwrapping a quoted
+  inner command and re-scanning it (F4 follow-up, 14/10).** This is exactly where an agent legitimately runs
+  commands all day, and exactly where a destructive command could hide behind a layer of quoting instead of an
+  encoding trick -- `ssh h 'pct exec 100 -- sh -c "rm -rf /x"'`, base64 piped into sh inside quotes, `$(...)`
+  building the verb, a heredoc body run by `bash -s`, a quote closing early so the tail runs locally, three
+  levels of `bash -c` wrapping `ssh` wrapping `pct exec`'s `sh -c`, `eval`/`printf` building the command string.
+  All 20 come back `change` or `opaque`, never `read`. No bypass found.
 - **keeper: an update that always fails to handle is dropped, not retried forever (owner review of PR #10, 13/10).**
   The previous commit made `self.offset` advance only after `decide()`/`command()` had mutated and saved, so a
   crash retries the SAME update next poll instead of skipping it — right for a transient failure, but an update
