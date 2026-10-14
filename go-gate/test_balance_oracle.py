@@ -54,21 +54,72 @@ def bash_n_valid(cmd):
     return r.returncode == 0
 
 
-def real_shell_hops(cmd, depth=0):
-    """[cmd, inner, inner-of-inner, ...]: every string a REAL shell actually parses along the way this exact
-    command would really run, built the way the real tool builds it, not the way go-gate's own classifier does.
-    `cmd` itself is always hop 0 (something -- the caller's own shell -- already parses it to arrive here). A
-    construct that hands its argument straight to a real shell adds one more hop, recursively, for what THAT
-    shell receives; a construct that execs directly (no shell on the far end) adds none."""
-    hops = [cmd]
-    if depth >= 6:
-        return hops
+def split_top_level_statements(cmd):
+    """Split on unquoted ';', '&&', '||' and newline, outside $()/``/()/{} nesting -- a deliberately simplified
+    statement splitter (not a full shell grammar), just enough to find the separate commands in a 2-3 stage chain
+    like the owner's own `bash ; pct exec ; ssh ... ; sleep` log entry. Needed so a later statement's own quoting
+    (or its own ssh/pct-exec/bash-c wrapping) is judged on its own, not folded into the first command's argv by a
+    plain shlex.split() of the whole line (shlex has no notion of ';' as an operator at all)."""
+    stmts, buf, i, n, quote, depth = [], [], 0, len(cmd), None, 0
+    while i < n:
+        ch = cmd[i]
+        if quote:
+            buf.append(ch)
+            if ch == "\\" and quote == '"' and i + 1 < n:
+                buf.append(cmd[i + 1])
+                i += 2
+                continue
+            if ch == quote:
+                quote = None
+            i += 1
+            continue
+        if ch == "\\" and i + 1 < n:
+            buf.append(ch)
+            buf.append(cmd[i + 1])
+            i += 2
+            continue
+        if ch in ("'", '"'):
+            quote = ch
+            buf.append(ch)
+            i += 1
+            continue
+        if ch in "({":
+            depth += 1
+            buf.append(ch)
+            i += 1
+            continue
+        if ch in ")}":
+            depth = max(0, depth - 1)
+            buf.append(ch)
+            i += 1
+            continue
+        if depth == 0:
+            if ch == ";" or ch == "\n":
+                stmts.append("".join(buf))
+                buf = []
+                i += 1
+                continue
+            if cmd[i:i + 2] in ("&&", "||"):
+                stmts.append("".join(buf))
+                buf = []
+                i += 2
+                continue
+        buf.append(ch)
+        i += 1
+    stmts.append("".join(buf))
+    return [s.strip() for s in stmts if s.strip()]
+
+
+def _wrapped_hops(stmt, depth):
+    """Extra hops (beyond stmt itself) a single statement triggers by handing an inner string to a real shell,
+    built the way the real tool builds it -- the per-construct half of real_shell_hops(), kept separate so the
+    statement-splitting above can apply it to each stage of a 2-3 stage chain independently."""
     try:
-        toks = shlex.split(cmd)
+        toks = shlex.split(stmt)
     except ValueError:
-        return hops                                            # unparsable locally; bash -n on cmd will say so too
+        return []                                               # unparsable; bash -n on the whole line will say so
     if not toks:
-        return hops
+        return []
     c, args = os.path.basename(toks[0]), toks[1:]
     if c == "ssh":
         i = 0
@@ -78,8 +129,8 @@ def real_shell_hops(cmd, depth=0):
         if rest:
             # OpenSSH's own behaviour: the remaining words are joined with a single space and sent over the wire
             # as ONE string, unescaped -- never re-quoted -- for the remote login shell to parse as a fresh script.
-            hops += real_shell_hops(" ".join(rest), depth + 1)
-        return hops
+            return real_shell_hops(" ".join(rest), depth + 1)
+        return []
     if c in ("pct", "qm") and args and args[0] == "exec" and "--" in args:
         inner = args[args.index("--") + 1:]
         if len(inner) == 3 and inner[0] in SHELLS and inner[1] == "-c":
@@ -87,8 +138,8 @@ def real_shell_hops(cmd, depth=0):
             # argv element, verbatim, with NO re-joining or re-quoting anywhere. A shell only re-enters the
             # picture when the executed program IS itself a shell asked for `-c SCRIPT`, in which case SCRIPT
             # (already a single, already-dequoted argv element) is exactly what that shell receives.
-            hops += real_shell_hops(inner[2], depth + 1)
-        return hops
+            return real_shell_hops(inner[2], depth + 1)
+        return []
     if c == "docker" and "exec" in args:
         j = 1
         while j < len(args) and args[j].startswith("-"):
@@ -96,15 +147,30 @@ def real_shell_hops(cmd, depth=0):
         inner = args[j + 1:]                                    # args[j] is the container name
         if len(inner) == 3 and inner[0] in SHELLS and inner[1] == "-c":
             # Same reasoning as pct/qm exec: docker exec also execs its argument list directly.
-            hops += real_shell_hops(inner[2], depth + 1)
-        return hops
+            return real_shell_hops(inner[2], depth + 1)
+        return []
     if c in SHELLS and "-c" in args:
         ci = args.index("-c")
         if ci + 2 == len(args):                                 # exactly one script argument follows -c
             # Whether this `<shell> -c SCRIPT` is the top-level command or was itself just delivered by one of the
             # cases above, SCRIPT is a literal argv element already -- no re-quoting needed before this next hop.
-            hops += real_shell_hops(args[ci + 1], depth + 1)
+            return real_shell_hops(args[ci + 1], depth + 1)
+        return []
+    return []
+
+
+def real_shell_hops(cmd, depth=0):
+    """[cmd, inner, inner-of-inner, ...]: every string a REAL shell actually parses along the way this exact
+    command would really run, built the way the real tool builds it, not the way go-gate's own classifier does.
+    `cmd` itself is always hop 0 (something -- the caller's own shell -- already parses it to arrive here, and it
+    may be a 2-3 stage chain: ';'/'&&'/'||' each introduce a SEPARATE command, each judged on its own). A
+    construct that hands its argument straight to a real shell adds one more hop, recursively, for what THAT
+    shell receives; a construct that execs directly (no shell on the far end) adds none."""
+    hops = [cmd]
+    if depth >= 6:
         return hops
+    for stmt in split_top_level_statements(cmd):
+        hops += _wrapped_hops(stmt, depth)
     return hops
 
 
@@ -230,6 +296,40 @@ def _cat_ssh_variants():
     return out
 
 
+def _cat_direct_argv_sh_dash_c():
+    """F4 item-3 investigation (15/10): candidate cause of the owner's log entries headed `pct exec ; ssh` and
+    `bash`. `pct`/`qm exec` and `docker exec` hand their argument list to a real exec, not a shell -- so when that
+    command IS a shell asked for `-c SCRIPT`, SCRIPT reaches the nested shell as a literal argv element, exactly
+    as it was already dequoted by the LOCAL shell, with NO further protection. A double-quoted phrase that is
+    perfectly safe locally (`sh -c "echo c'est fini"`) delivers `echo c'est fini` to the nested shell -- a BARE,
+    unescaped apostrophe, which is a real syntax error there (confirmed by actually running it, not just reading
+    bash -n: `subprocess.run(["sh","-c","echo c'est fini"])` fails with "Unterminated quoted string"). `bash -c`
+    at the top level is the same trap without any wrapper at all. Every case below is genuinely broken when the
+    phrase has an odd number of apostrophes (confirmed both by bash -n on the reconstructed inner script and by
+    real execution) and go-gate is correct to call it opaque/unbalanced; an even count happens to still parse (if
+    with mangled output -- the apostrophes vanish, as real execution confirms), and go-gate is correct to NOT flag
+    those. This is not a bug: it is believed to be the real, or a major, cause of the log's `pct exec`/`bash`
+    entries -- the agent writing the command made the mistake, not the classifier."""
+    out = []
+    odd, even = FRENCH[0], FRENCH[1]                         # 3 apostrophes (genuinely broken) / 4 (still parses)
+    for parity, phrase in (("odd", odd), ("even", even)):
+        for payload in READ_PAYLOADS[:3] + CHANGE_PAYLOADS[:3]:
+            script = f"echo {phrase}; {payload}"
+            out.append((f"pct exec -- sh -c, {parity} apostrophe count: {payload[:20]}",
+                        f'pct exec 100 -- sh -c "{script}"'))
+            out.append((f"qm exec -- sh -c, {parity} apostrophe count: {payload[:20]}",
+                        f'qm exec 100 -- sh -c "{script}"'))
+            out.append((f"docker exec sh -c, {parity} apostrophe count: {payload[:20]}",
+                        f'docker exec web sh -c "{script}"'))
+            out.append((f"bash -c, {parity} apostrophe count, top level: {payload[:20]}",
+                        f'bash -c "{script}"'))
+            out.append((f"bash ; pct exec -- sh -c, {parity} apostrophe count (matches the log's 'bash' head): "
+                        f"{payload[:20]}", f'bash; pct exec 100 -- sh -c "{script}"'))
+            out.append((f"ssh -> pct exec -- sh -c, {parity} apostrophe count (matches 'pct exec ; ssh'): "
+                        f"{payload[:20]}", f"ssh {HOSTS[0]} 'pct exec 100 -- sh -c \"{script}\"'"))
+    return out
+
+
 def _cat_sh_dash_c_quote_escaping():
     out = []
     for payload in READ_PAYLOADS + CHANGE_PAYLOADS:
@@ -312,6 +412,7 @@ def build_corpus():
         ("command substitution / backticks", _cat_command_substitution_and_backticks),
         ("heredocs", _cat_heredocs),
         ("ssh variants", _cat_ssh_variants),
+        ("direct argv to nested sh -c (pct/qm/docker exec, bash -c)", _cat_direct_argv_sh_dash_c),
         ("sh -c with '\\'' escaping", _cat_sh_dash_c_quote_escaping),
         ("french echo/printf", _cat_french_echo_printf),
         ("# in quotes vs comment", _cat_hash_in_quotes_vs_comment),
@@ -382,7 +483,7 @@ class OracleCorpus(unittest.TestCase):
     def test_corpus_is_large_and_covers_every_category(self):
         corpus = build_corpus()
         self.assertGreaterEqual(len(corpus), 300, len(corpus))
-        self.assertGreaterEqual(len({cat for cat, _name, _cmd in corpus}), 11)
+        self.assertGreaterEqual(len({cat for cat, _name, _cmd in corpus}), 12)
 
     @unittest.skipUnless(HAS_BASH, "needs bash for the oracle")
     def test_fail_closed_never_lets_a_syntactically_broken_command_through_as_a_read(self):
@@ -424,6 +525,39 @@ class OracleCorpus(unittest.TestCase):
         self.assertEqual(len(false_positives), 2, false_positives)
         for name, cmd in false_positives:
             self.assertIn("$'", cmd, f"unexpected false positive outside the known ansi-c gap: {name!r} {cmd!r}")
+
+    @unittest.skipUnless(HAS_BASH, "needs bash for the oracle")
+    def test_direct_argv_sh_dash_c_family_never_reads_when_really_invalid(self):
+        """The dedicated regression for the family found while investigating the owner's log (item 3, 15/10): a
+        genuinely broken `pct`/`qm`/`docker exec ... sh -c "..."` or `bash -c "..."` (odd apostrophe count) must
+        never classify as read, whatever its detail string says (a `bash;` prefix in front of it can change which
+        opaque reason surfaces first -- see CHANGELOG.md -- but the KIND must still never be read). This is the
+        safety-critical direction only: a bare leading `bash;` stage is itself always opaque on its own terms
+        (an interactive shell could do anything), so a VALID (even apostrophe count) command in this family can
+        still legitimately come back opaque overall -- that is more conservative, never less, so it is not
+        asserted against here."""
+        for name, cmd in _cat_direct_argv_sh_dash_c():
+            with self.subTest(name=name, cmd=cmd):
+                valid = real_valid(cmd)
+                if valid is None:
+                    continue
+                if valid is False:
+                    self.assertNotEqual(gate_kind(cmd), "read", f"{name!r} {cmd!r}")
+
+
+class SplitTopLevelStatements(unittest.TestCase):
+    def test_splits_on_semicolon_and_double_ampersand_and_double_pipe(self):
+        self.assertEqual(split_top_level_statements("a; b && c || d"), ["a", "b", "c", "d"])
+
+    def test_does_not_split_inside_quotes(self):
+        self.assertEqual(split_top_level_statements("echo 'a; b && c'"), ["echo 'a; b && c'"])
+        self.assertEqual(split_top_level_statements('echo "a; b && c"'), ['echo "a; b && c"'])
+
+    def test_does_not_split_inside_command_substitution(self):
+        self.assertEqual(split_top_level_statements("echo $(a; b)"), ["echo $(a; b)"])
+
+    def test_single_statement_is_unchanged(self):
+        self.assertEqual(split_top_level_statements("ssh host 'ls -la /etc'"), ["ssh host 'ls -la /etc'"])
 
 
 if __name__ == "__main__":

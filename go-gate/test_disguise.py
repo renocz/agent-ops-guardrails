@@ -191,6 +191,12 @@ NESTED_QUOTE_DISGUISE = [
      "ssh host1 rm -rf \"it's\" /srv/data"),
     ("ssh -> eval($(printf ...)) builds the destructive command", 'ssh host1 \'eval "$(printf "rm -rf /x")"\''),
     ("pct exec -> sh -c, xargs pipes a found path into rm", 'pct exec 100 -- sh -c "echo /x | xargs rm -rf"'),
+    # F4 item-3 investigation (15/10): rm hiding behind a genuinely-broken apostrophe in a direct-argv sh -c (the
+    # command never actually runs -- this must still never read as safe).
+    ("pct exec -- sh -c, rm hiding behind a broken apostrophe", 'pct exec 100 -- sh -c "echo c\'est fini; rm -rf /x"'),
+    ("qm exec -- sh -c, rm hiding behind a broken apostrophe", 'qm exec 100 -- sh -c "echo c\'est fini; rm -rf /x"'),
+    ("docker exec sh -c, rm hiding behind a broken apostrophe", 'docker exec web sh -c "echo c\'est fini; rm -rf /x"'),
+    ("bash -c, rm hiding behind a broken apostrophe, top level", 'bash -c "echo c\'est fini; rm -rf /x"'),
 ]
 
 # A read-command name as a literal write target is also a path trick, kept separate because it is a redirection,
