@@ -11,15 +11,23 @@ Next: one week of the keeper in block mode, after a dry run of refusal, approval
   `pct exec ; ssh …`, 2 `bash`, 1 chained `bash ; pct exec ; ssh … sleep`) — so `go-gate/test_balance_oracle.py`
   reproduces the CLASS of shapes instead of guessing one specific string: nested quoting through ssh/pct exec/
   bash -c, French apostrophes, here-documents, `$'...'`, command substitution, `#`/operators inside quotes, line
-  continuations. 355 generated commands, each checked against `bash -n` (syntax only, never executed) and
-  against `classify()`'s real recursive pipeline (not `scan()` alone on the raw string — the actual bug lives two
-  levels deep, in a reconstructed inner command, so checking only the top level would have missed it). Result: 26
-  of the 355 are false positives (bash accepts them, the gate calls them unbalanced) — 24 are `ssh` carrying an
-  unquoted remote command with an apostrophe in it, 2 are `$'...'` (ANSI-C quoting) with an escaped internal
-  quote. 9 more are genuinely unbalanced on both sides (fail-closed, correct, no action). See PR description for
-  the full table and the root cause of each group.
+  continuations. 355 generated commands, each checked against `classify()`'s real recursive pipeline (not
+  `scan()` alone on the raw string — the actual bug lives two levels deep, in a reconstructed inner command, so
+  checking only the top level would have missed it).
 - **go-gate: reverted the ssh re-quoting change from the previous entry (owner review, 14/10).** The re-quoting
   did not model what the remote shell receives. ssh's handling is back to exactly what it was on `main`.
+- **go-gate: corrected the oracle's other side of the comparison (owner review, 15/10) — `bash -n` must run on
+  what the deepest REAL shell in the chain actually parses, not on the local command line.** ssh, pct/qm exec,
+  docker exec and bash -c each hand an inner string to another real shell (a login shell on the remote host for
+  ssh; the `-c` argument of a literal nested shell for the others); that inner string is not always "the local
+  line, re-quoted" — ssh in particular never re-quotes at all (see the revert above). `real_shell_hops()` in
+  `go-gate/test_balance_oracle.py` rebuilds that chain the way each tool really builds it, and `real_valid()`
+  requires every hop to parse. Recomputing the disagreement table this way: only 2 of 355 commands are real false
+  positives (the already-known `$'...'` ANSI-C gap), down from the first version's 26 — the other 24 were
+  ssh-shaped commands that are genuinely unparsable once they reach the real remote shell, where `opaque` was
+  always the correct, safe answer. 33 of 355 are now correctly counted as genuinely unbalanced (up from 9, since
+  the corrected comparison catches more of them), 0 are left incorrectly un-flagged. See PR description for the
+  full table.
 - **go-gate: 20 disguise tests for the nested-quote path -- ssh/pct exec/docker exec/sh -c unwrapping a quoted
   inner command and re-scanning it (F4 follow-up, 14/10).** This is exactly where an agent legitimately runs
   commands all day, and exactly where a destructive command could hide behind a layer of quoting instead of an
