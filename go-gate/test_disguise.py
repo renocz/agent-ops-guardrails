@@ -187,7 +187,7 @@ NESTED_QUOTE_DISGUISE = [
     ("printf builds the command string fed to sh -c", 'sh -c "$(printf \'rm -rf /x\')"'),
     ("docker exec, base64 payload into bash, inside a double-quoted remote command",
      'ssh host1 "docker exec web sh -c \'echo cm0gLXJmIC9zcnY= | base64 -d | bash\'"'),
-    ("ssh's unquoted remote command: rm hiding behind an apostrophe word (F4's own fix, kept as a disguise case)",
+    ("ssh's unquoted remote command: rm hiding behind a literal apostrophe word",
      "ssh host1 rm -rf \"it's\" /srv/data"),
     ("ssh -> eval($(printf ...)) builds the destructive command", 'ssh host1 \'eval "$(printf "rm -rf /x")"\''),
     ("pct exec -> sh -c, xargs pipes a found path into rm", 'pct exec 100 -- sh -c "echo /x | xargs rm -rf"'),
