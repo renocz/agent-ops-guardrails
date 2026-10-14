@@ -6,6 +6,18 @@ One version scheme: **a repository tag per release**. Components have no version
 
 Next: one week of the keeper in block mode, after a dry run of refusal, approval, expiry, replay and a Telegram outage.
 
+- **go-gate: oracle + corpus for F4, the 13 `opaque/unbalanced` commands from a week of block-mode observation
+  (14/10), no behaviour change.** The owner's log kept only each command's head, never its arguments (5 `ssh`, 5
+  `pct exec ; ssh …`, 2 `bash`, 1 chained `bash ; pct exec ; ssh … sleep`) — so `go-gate/test_balance_oracle.py`
+  reproduces the CLASS of shapes instead of guessing one specific string: nested quoting through ssh/pct exec/
+  bash -c, French apostrophes, here-documents, `$'...'`, command substitution, `#`/operators inside quotes, line
+  continuations. 355 generated commands, each checked against `bash -n` (syntax only, never executed) and
+  against `classify()`'s real recursive pipeline (not `scan()` alone on the raw string — the actual bug lives two
+  levels deep, in a reconstructed inner command, so checking only the top level would have missed it). Result: 26
+  of the 355 are false positives (bash accepts them, the gate calls them unbalanced) — 24 are `ssh` carrying an
+  unquoted remote command with an apostrophe in it, 2 are `$'...'` (ANSI-C quoting) with an escaped internal
+  quote. 9 more are genuinely unbalanced on both sides (fail-closed, correct, no action). See PR description for
+  the full table and the root cause of each group.
 - **keeper: an update that always fails to handle is dropped, not retried forever (owner review of PR #10, 13/10).**
   The previous commit made `self.offset` advance only after `decide()`/`command()` had mutated and saved, so a
   crash retries the SAME update next poll instead of skipping it — right for a transient failure, but an update
