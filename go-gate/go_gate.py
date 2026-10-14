@@ -514,7 +514,11 @@ def _classify_stage(stage, depth, bodies=()):
         rest = args[i + 1:]
         if not rest:
             return "change", "interactive ssh"
-        return classify_bash(" ".join(rest) if len(rest) > 1 else rest[0], depth + 1)
+        # F4: the remote command can reach ssh as several separate shell words (no single quoting around it), e.g.
+        # `ssh host echo "it's" done` -- shlex.split() of the OUTER line already dequoted "it's" into a bare `it's`,
+        # so a naive " ".join(rest) hands classify_bash a lone unescaped apostrophe and it reads as unbalanced, even
+        # though the command is valid. Re-quote each word, like pct/qm exec and docker exec already do below.
+        return classify_bash(" ".join(shlex.quote(a) for a in rest) if len(rest) > 1 else rest[0], depth + 1)
     if c == "pct" or c == "qm":
         sub = args[0] if args else ""
         if sub == "exec" and "--" in args:

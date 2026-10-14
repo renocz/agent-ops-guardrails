@@ -216,6 +216,21 @@ BASH = [
     ("paste <(sort a) <(sort b)", "read"),
     ("less +!/tmp/evil file", "opaque"),
     ("less +G file", "read"),
+    # F4 (14/10): ssh's unquoted multi-word remote command is re-quoted (shlex.quote() per word) before the
+    # recursive classify_bash() call, like pct/qm exec and docker exec already did. Before the fix, a naive
+    # " ".join(rest) handed classify_bash a lone unescaped apostrophe left over from shlex.split() dequoting the
+    # outer line, and that read as unbalanced even though the command is valid -- this was the dominant cause (24
+    # of 26) of the owner's opaque/unbalanced false positives (see go-gate/test_balance_oracle.py).
+    ("ssh web1 echo \"it's done\" done", "read"),
+    ("ssh web1 echo \"c'est l'heure d'y aller\" done", "read"),
+    ("ssh -i ~/.ssh/id_ed25519 web1 echo \"it's\" done", "read"),
+    # the fix must not turn a change hidden the same way into a read
+    ("ssh web1 rm -rf \"it's\" /srv/data", "change"),
+    ("ssh web1 systemctl restart \"it's\" nginx", "change"),
+    ("ssh web1 sed -i \"s/a/b/\" \"it's\" /etc/hosts", "change"),
+    ("ssh web1 tee \"it's\" /etc/hosts", "change"),
+    # fail-closed is preserved: a genuinely unterminated quote in the unquoted remote words stays opaque
+    ("ssh web1 echo \"unterminated", "opaque"),
 ]
 
 

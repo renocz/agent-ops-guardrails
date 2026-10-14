@@ -18,6 +18,22 @@ Next: one week of the keeper in block mode, after a dry run of refusal, approval
   unquoted remote command with an apostrophe in it, 2 are `$'...'` (ANSI-C quoting) with an escaped internal
   quote. 9 more are genuinely unbalanced on both sides (fail-closed, correct, no action). See PR description for
   the full table and the root cause of each group.
+- **go-gate: fix the dominant F4 false positive -- ssh's unquoted remote command is re-quoted before the
+  recursive balance check, like its siblings already do (14/10).** `ssh host echo "it's" done` (no quotes around
+  the remote command) was classified `opaque/unbalanced`: `shlex.split()` of the outer line dequotes `"it's"`
+  into a bare `it's`, and ssh's handling then rejoined the remaining words with a naive `" ".join(rest)`, handing
+  `classify_bash()` a lone unescaped apostrophe that reads as an unclosed quote. `pct`/`qm exec` and `docker exec`
+  already re-quote each word with `shlex.quote()` before this same recursive call; ssh was the one case that
+  didn't. This was 24 of the 26 false positives found by the new oracle (`go-gate/test_balance_oracle.py`), and
+  matches the owner's log: 10 of the 13 recorded `opaque/unbalanced` commands started with `ssh` directly or
+  through `pct exec ; ssh`. Fail-closed is unaffected: a genuinely unterminated quote in the unquoted remote
+  words still comes back `opaque`, and a destructive command (`rm`, `tee`, `sed -i`, `systemctl restart`) hidden
+  the same way still classifies as `change`, never `read` (new tests cover both). Left unfixed, documented only
+  here and in the PR description, not encoded as a test per the public-repository rule: the remaining 2 false
+  positives are `$'...'` (ANSI-C quoting) with an escaped internal quote (`echo $'quote\'inside'`) -- `scan()`
+  tracks only `'`/`"` as quote characters and has no notion of `$'...'`'s own backslash-escaping, so a correct fix
+  lives in secret-guard's `scan()`, out of bounds for this change; duplicating its quote-tracking logic in
+  go-gate instead would be a second, drifting copy of the same state machine for a narrow, uncommon shape.
 - **keeper: an update that always fails to handle is dropped, not retried forever (owner review of PR #10, 13/10).**
   The previous commit made `self.offset` advance only after `decide()`/`command()` had mutated and saved, so a
   crash retries the SAME update next poll instead of skipping it — right for a transient failure, but an update
