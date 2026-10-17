@@ -11,6 +11,10 @@ request), under a lock so only one run is ever active:
   2. refuse if a snapshot younger than `cooldown_minutes` already exists (its name is returned instead);
   3. otherwise create one, named `<prefix>-YYYYMMDD-HHMMSS`.
 
+If the backend itself raises (a real zfs/lvm command failing, a bad config), the result is `status=ERROR` with
+the exception's class name as the reason -- never its message or the command's output, which could carry a
+path or a value -- so the agent-side client is told immediately instead of waiting out its own timeout.
+
 Writes the result to `<id>.state` next to the request's `<id>.request`, then removes the request file. This
 file has NO rollback or destroy code path at all -- grep it and lib/backends.py for "destroy"/"remove"/
 "rollback" and the only hits are this sentence and the retention-purge script, which is separate on purpose.
@@ -117,7 +121,15 @@ def process_pending(cfg, backend):
     pending = sorted(glob.glob(os.path.join(cfg["requests_dir"], "*.request")))
     for req_path in pending:
         request_id = os.path.basename(req_path)[: -len(".request")]
-        status, reason, name = decide_and_create(backend, cfg)
+        try:
+            status, reason, name = decide_and_create(backend, cfg)
+        except Exception as e:
+            # A backend call raised (a real zfs/lvm failure, a bad config) -- fail loudly, not silently: the
+            # agent-side client is polling for this exact state file, so writing one now is what turns "wait
+            # until the timeout" into "told immediately". Never the exception's own message or the command's
+            # output here, which could carry a path or a value from the backend's own stderr -- only the
+            # exception's class name, same spirit as the log's own command "shapes" elsewhere in this project.
+            status, reason, name = "ERROR", type(e).__name__, ""
         write_state(cfg["states_dir"], request_id, status, reason, name)
         try:
             os.remove(req_path)

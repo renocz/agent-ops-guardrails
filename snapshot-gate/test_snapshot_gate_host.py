@@ -154,5 +154,55 @@ class MalformedRequestContent(Harness):
         self.assertIn(self.state("r2")["reason"], ("a snapshot younger than 10 minutes already exists",))
 
 
+class _RaisingBackend:
+    """A stub whose usage_percent() raises, standing in for a real zfs/lvm command failing (not installed,
+    pool faulted, wrong permissions, ...)."""
+
+    def __init__(self, exc):
+        self._exc = exc
+
+    def usage_percent(self):
+        raise self._exc
+
+    def list_snapshot_names(self):
+        raise AssertionError("must not be reached: usage_percent() already raised")
+
+    def create_snapshot(self, qualified_name):
+        raise AssertionError("must not be reached: usage_percent() already raised")
+
+
+class BackendRaises(Harness):
+    """Item 3: a raising backend must fail loudly (status=ERROR, written immediately) rather than hang the
+    agent-side client until its own timeout, and must never leak the exception's message or any command
+    output into the state file -- only its class name."""
+
+    def test_a_raising_backend_writes_an_error_state_with_only_the_exception_class_name(self):
+        self.request("r1")
+        backend = _RaisingBackend(RuntimeError("zfs: pool 'pool0' is faulted, see /var/log/zpool for details"))
+        sg_host.process_pending(self.cfg, backend)
+        state = self.state("r1")
+        self.assertEqual(state["status"], "ERROR")
+        self.assertEqual(state["reason"], "RuntimeError")
+        self.assertNotIn("pool0", state["reason"])
+        self.assertNotIn("faulted", state["reason"])
+        self.assertEqual(state["name"], "")
+
+    def test_the_request_file_is_still_removed_and_the_run_is_still_logged(self):
+        self.request("r1")
+        backend = _RaisingBackend(OSError("zfs: command not found"))
+        sg_host.process_pending(self.cfg, backend)
+        self.assertFalse(os.path.exists(os.path.join(self.requests_dir, "r1.request")))
+        self.assertIn("status=ERROR", read(self.cfg["log_file"]))
+        self.assertIn("OSError", read(self.cfg["log_file"]))
+
+    def test_a_later_pending_request_is_still_processed_after_an_earlier_one_errors(self):
+        self.request("r1")
+        self.request("r2")
+        backend = _RaisingBackend(RuntimeError("boom"))
+        sg_host.process_pending(self.cfg, backend)
+        self.assertEqual(self.state("r1")["status"], "ERROR")
+        self.assertEqual(self.state("r2")["status"], "ERROR")              # same stub, but both got answered
+
+
 if __name__ == "__main__":
     unittest.main()
