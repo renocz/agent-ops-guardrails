@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Example launchd job (macOS), using WatchPaths instead of a path unit. NEVER installed automatically; copy
+     into /Library/LaunchDaemons/, fill in the placeholders (the label, the paths), then
+     `launchctl bootstrap system /Library/LaunchDaemons/com.example.snapshot-gate.plist`. -->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>com.example.snapshot-gate</string>
+  <key>UserName</key><string>snapshot-gate</string>
+  <key>GroupName</key><string>snapshot-gate</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/bin/python3</string>
+    <string>-I</string>
+    <string>/opt/agent-guardrails/lib/snapshot-gate-host.py</string>
+    <string>/etc/snapshot-gate/config.json</string>
+  </array>
+  <key>WatchPaths</key>
+  <array>
+    <string>/var/lib/snapshot-gate/requests</string>
+  </array>
+  <key>StandardErrorPath</key><string>/var/lib/snapshot-gate/stderr.log</string>
+</dict></plist>
