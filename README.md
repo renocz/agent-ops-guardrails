@@ -33,7 +33,7 @@ flowchart LR
 - approvals come from button presses on a second Telegram bot that only it can read;
 - the hook is root-owned and registered in managed settings.
 
-It runs on my laptop in observe mode since 08/10/2026. Output filtering (secret-guard) still runs in the agent's process.
+It ran on my laptop in observe mode from 08/10/2026, then switched to block mode on 12/10/2026 after an end-to-end dry run (checklist in [docs/block-mode-dry-run.md](docs/block-mode-dry-run.md)); every change the agent makes on that machine now goes through an approval card on the second Telegram bot. A trial of block mode is under way; v1.0 comes after it. Output filtering (secret-guard) still runs in the agent's process.
 
 Two claims, and only the first is strong: the **approval cannot be forged** by the agent (separate user, button on a bot it cannot read, root-owned hook); but **what counts as a change is decided by a heuristic classifier**, not a proof. A review on 08/10 found a class of "read" commands that actually execute or write through an option or a config file, now fixed and tested (K1-K9 in the [design's Known limits](docs/design-keeper.md#known-limits-be-precise-about-what-is-proven)). Do not read "unforgeable approval" as "the agent cannot act without approval": the gate is as good as the classifier, and `actions=script` is unbounded by design.
 
