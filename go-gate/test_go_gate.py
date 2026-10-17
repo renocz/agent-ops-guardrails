@@ -216,6 +216,16 @@ BASH = [
     ("paste <(sort a) <(sort b)", "read"),
     ("less +!/tmp/evil file", "opaque"),
     ("less +G file", "read"),
+    # F4 item-3 investigation (15/10): pct/qm/docker exec hand their argv straight to a real exec, not a shell --
+    # when that command IS a shell asked for -c SCRIPT, SCRIPT reaches it exactly as already dequoted locally, with
+    # no further protection. A double-quoted phrase with an odd number of apostrophes is genuinely broken this way
+    # (confirmed by running it, not just reading bash -n -- see go-gate/test_balance_oracle.py); go-gate correctly
+    # calls it opaque rather than read. An even count happens to still parse and must be judged normally.
+    ("pct exec 100 -- sh -c \"echo c'est fini\"", "opaque"),
+    ("qm exec 100 -- sh -c \"echo c'est fini\"", "opaque"),
+    ("docker exec web sh -c \"echo c'est fini\"", "opaque"),
+    ("bash -c \"echo c'est fini\"", "opaque"),
+    ("pct exec 100 -- sh -c \"echo aujourd'hui c'est l'anniversaire de l'école\"", "read"),
 ]
 
 

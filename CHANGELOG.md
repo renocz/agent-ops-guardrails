@@ -6,6 +6,51 @@ One version scheme: **a repository tag per release**. Components have no version
 
 Next: one week of the keeper in block mode, after a dry run of refusal, approval, expiry, replay and a Telegram outage.
 
+- **go-gate: oracle + corpus for F4, the 13 `opaque/unbalanced` commands from a week of block-mode observation
+  (14/10), no behaviour change.** The owner's log kept only each command's head, never its arguments (5 `ssh`, 5
+  `pct exec ; ssh …`, 2 `bash`, 1 chained `bash ; pct exec ; ssh … sleep`) — so `go-gate/test_balance_oracle.py`
+  reproduces the CLASS of shapes instead of guessing one specific string: nested quoting through ssh/pct exec/
+  bash -c, French apostrophes, here-documents, `$'...'`, command substitution, `#`/operators inside quotes, line
+  continuations. 355 generated commands, each checked against `classify()`'s real recursive pipeline (not
+  `scan()` alone on the raw string — the actual bug lives two levels deep, in a reconstructed inner command, so
+  checking only the top level would have missed it).
+- **go-gate: reverted the ssh re-quoting change from the previous entry (owner review, 14/10).** The re-quoting
+  did not model what the remote shell receives. ssh's handling is back to exactly what it was on `main`.
+- **go-gate: corrected the oracle's other side of the comparison (owner review, 15/10) — `bash -n` must run on
+  what the deepest REAL shell in the chain actually parses, not on the local command line.** ssh, pct/qm exec,
+  docker exec and bash -c each hand an inner string to another real shell (a login shell on the remote host for
+  ssh; the `-c` argument of a literal nested shell for the others); that inner string is not always "the local
+  line, re-quoted" — ssh in particular never re-quotes at all (see the revert above). `real_shell_hops()` in
+  `go-gate/test_balance_oracle.py` rebuilds that chain the way each tool really builds it, and `real_valid()`
+  requires every hop to parse. Recomputing the disagreement table this way: only 2 of 355 commands are real false
+  positives (the already-known `$'...'` ANSI-C gap), down from the first version's 26 — the other 24 were
+  ssh-shaped commands that are genuinely unparsable once they reach the real remote shell, where `opaque` was
+  always the correct, safe answer. 33 of 355 are now correctly counted as genuinely unbalanced (up from 9, since
+  the corrected comparison catches more of them), 0 are left incorrectly un-flagged. See PR description for the
+  full table.
+- **go-gate: 24 disguise tests for the nested-quote path -- ssh/pct exec/docker exec/sh -c unwrapping a quoted
+  inner command and re-scanning it (F4 follow-up, 14-15/10).** This is exactly where an agent legitimately runs
+  commands all day, and exactly where a destructive command could hide behind a layer of quoting instead of an
+  encoding trick -- `ssh h 'pct exec 100 -- sh -c "rm -rf /x"'`, base64 piped into sh inside quotes, `$(...)`
+  building the verb, a heredoc body run by `bash -s`, a quote closing early so the tail runs locally, three
+  levels of `bash -c` wrapping `ssh` wrapping `pct exec`'s `sh -c`, `eval`/`printf` building the command string,
+  `rm` hiding behind a genuinely-broken apostrophe in a direct-argv `sh -c` (see below). All 24 come back
+  `change` or `opaque`, never `read`. No bypass found.
+- **go-gate: investigated the real cause of the 13 log occurrences instead of guessing further (15/10) --
+  found a second, independent genuine trap in the same family, still correctly fail-closed; no further fix
+  needed.** `pct`/`qm`/`docker exec` hand their argument list to a real exec, not a shell -- so when that command
+  IS a shell asked for `-c SCRIPT`, SCRIPT reaches the nested shell exactly as the LOCAL shell already dequoted
+  it, with no further protection; `bash -c` at the top level is the same trap with no wrapper at all. A
+  double-quoted phrase that looks perfectly safe locally (`pct exec 100 -- sh -c "echo c'est fini"`) delivers
+  `echo c'est fini` to the nested shell -- a bare, unescaped apostrophe, a real syntax error there (confirmed by
+  actually running it: `subprocess.run(["sh","-c","echo c'est fini"])` fails with "Unterminated quoted string").
+  `test_balance_oracle.py`'s oracle gained `split_top_level_statements()` (a deliberately simplified statement
+  splitter, needed because a plain `shlex.split()` of a whole `;`/`&&`/`||`-chained line has no notion of those
+  as operators) so a 2-3 stage chain like the log's own `bash ; pct exec ; ssh … ; sleep` is judged stage by
+  stage, and a new corpus category exercising this family directly. Every case agrees with go-gate: a genuinely
+  broken phrase (odd apostrophe count) is correctly `opaque`, an accidentally-still-parsing one (even count) is
+  judged normally. Combined with the ssh finding above, this is believed to explain most or all of the 13 log
+  entries: the agent composing the command made the quoting mistake, not the classifier.
 - **keeper: an update that always fails to handle is dropped, not retried forever (owner review of PR #10, 13/10).**
   The previous commit made `self.offset` advance only after `decide()`/`command()` had mutated and saved, so a
   crash retries the SAME update next poll instead of skipping it — right for a transient failure, but an update

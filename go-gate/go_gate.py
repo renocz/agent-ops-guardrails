@@ -514,6 +514,12 @@ def _classify_stage(stage, depth, bodies=()):
         rest = args[i + 1:]
         if not rest:
             return "change", "interactive ssh"
+        # Reverted: pct/qm exec and docker exec below deliver the inner command through a real argv (no shell
+        # re-parse in between), so re-quoting those words with shlex.quote() before this recursive call is a
+        # faithful round trip through go-gate's own parser. ssh is different: OpenSSH joins the remaining words
+        # with a single space and sends that one string over the wire, unescaped, for the REMOTE shell to parse
+        # again -- it never re-quotes. Re-quoting here would have classify_bash judge a string the remote shell
+        # never sees, which can hide a metacharacter that is live on the remote end.
         return classify_bash(" ".join(rest) if len(rest) > 1 else rest[0], depth + 1)
     if c == "pct" or c == "qm":
         sub = args[0] if args else ""
