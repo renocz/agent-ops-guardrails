@@ -1,0 +1,14 @@
+# Example only, not a hardened distribution. A forced-command key is for the case an API role cannot be
+# scoped narrowly enough on its own -- it restricts an SSH key to running exactly one command, and refuses
+# everything else a normal SSH session could do (port forwarding, agent forwarding, a pty, X11, SFTP unless
+# you explicitly allow it). Verify the restriction actually holds with denial-probe.sh's "open a tunnel"
+# probe before trusting it.
+#
+# In the oncall-agent's own ~/.ssh/authorized_keys on whatever host this key connects to:
+
+command="/opt/agent-guardrails/bin/request-snapshot.sh /var/lib/snapshot-gate/requests /var/lib/snapshot-gate/states",restrict ssh-ed25519 AAAA...REPLACE-WITH-THE-REAL-PUBLIC-KEY... oncall-agent@{{FORCED_COMMAND_HOST}}
+
+# `restrict` (OpenSSH >= 7.2) is shorthand for no-port-forwarding,no-X11-forwarding,no-agent-forwarding,
+# no-pty,no-user-rc -- spell those out individually on an older OpenSSH that doesn't support `restrict`.
+# The command= value above is this repo's own convention (see snapshot-gate/install-snapshot-gate.sh); point
+# it at whatever single command your own setup actually needs this key to run.

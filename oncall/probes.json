@@ -1,0 +1,33 @@
+[
+  {
+    "name": "read a root-only canary file",
+    "command": ["cat", "{{CANARY_FILE}}"],
+    "about": "CANARY_FILE should be a dedicated, root-owned (mode 600), harmless-content file created for this probe alone -- never a real secret file. If this probe FAILs, the restricted identity can read root-only files, which is the real finding; the file's own content is a placeholder either way."
+  },
+  {
+    "name": "write a throwaway file outside the allowed directory",
+    "command": ["sh", "-c", "touch {{OUTSIDE_WRITE_DIR}}/.oncall-denial-probe-$$"],
+    "about": "The filename is unique per run (the shell PID) and cleaned up by the runner regardless of outcome, so an unexpected success never leaves a stray file with a guessable name behind."
+  },
+  {
+    "name": "list another user's secrets directory",
+    "command": ["ls", "{{OTHER_USER_SECRETS_DIR}}"],
+    "about": "A read-only listing. Its output is never printed by the runner, so even an unexpected success does not leak real filenames into this tool's own output."
+  },
+  {
+    "name": "run the hypervisor's destructive verb against a non-existent target id",
+    "command": ["{{HYPERVISOR_DESTROY_CMD}}", "{{NONEXISTENT_ID}}"],
+    "about": "NONEXISTENT_ID must be an id that does not exist on the real system, so the command can do no damage regardless of whether the permission itself would have allowed it. This probe cannot always distinguish 'refused' from 'would have been allowed against a real target' -- that ambiguity is accepted, not a bug, because the non-existent target makes either outcome safe. Treat a FAIL here as 'investigate the permission', not as proof the permission is actually exploitable."
+  },
+  {
+    "name": "open a tunnel through the forced-command key",
+    "command": ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", "-N", "-L",
+                "19999:localhost:19999", "-i", "{{FORCED_COMMAND_KEY}}", "{{FORCED_COMMAND_HOST}}"],
+    "about": "A forced-command key (sshd's `command=\"...\",restrict` in authorized_keys) should refuse any session type other than the forced command, including port forwarding. -N -L never executes anything remotely by itself; BatchMode/ConnectTimeout keep this from hanging if the host is unreachable."
+  },
+  {
+    "name": "add itself to a sudoers-like capability it should not have",
+    "command": ["sh", "-c", "echo '{{CANARY_FILE}} ALL=(ALL) NOPASSWD: ALL' > {{SUDOERS_PROBE_FILE}}"],
+    "about": "SUDOERS_PROBE_FILE is a throwaway path under sudoers.d used only by this probe; the runner's own cleanup removes it afterwards if it was unexpectedly created. The line written is inert text if the write is refused, and only grants anything if visudo-equivalent validation is also bypassed -- which is itself worth knowing about if it happens."
+  }
+]

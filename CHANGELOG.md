@@ -6,6 +6,24 @@ One version scheme: **a repository tag per release**. Components have no version
 
 Next: one week of the keeper in block mode, after a dry run of refusal, approval, expiry, replay and a Telegram outage.
 
+- **oncall: least privilege for the agent that works alone, with denial probes that stay harmless if they're
+  wrong (17/10).** Moves [method.md §3](docs/method.md#3-an-on-call-agent-that-cannot-undo) (the identity side)
+  and [§4](docs/method.md#4-denial-tests-must-be-harmless) from "described" to code. `denial-probe.sh` runs a
+  list of operations AS the restricted identity and reports PASS (refused) / FAIL (accepted) per line, never
+  the probed command's own output — even an unexpectedly-successful "list another user's secrets" probe must
+  not then print real filenames. The operations are a plain `probes.json` data file (6 shipped: read a
+  root-only canary, write outside the allowed directory, list another user's secrets, a hypervisor destructive
+  verb against a non-existent id, open a tunnel through a forced-command key, add itself to a sudoers-like
+  capability), with `{{PLACEHOLDER}}` tokens so nothing real ships by default. `lib/harmless_check.py` enforces
+  method.md §4 mechanically on the data file itself: once a dangerous verb (`rm`, `destroy`, `restart`, …)
+  appears as a bare word anywhere in a probe's command — including hidden inside one `sh -c "..."` string —
+  every word after it must be a flag or a placeholder, never a literal path/hostname/id. 21 tests (the runner
+  against fake stub commands only, never a real path or hypervisor call; placeholder substitution, both whole-
+  token and embedded; the harmlessness check on crafted probes and on the shipped file). Mutation-checked: a
+  harmful probe (`pct destroy 100`, no placeholder) injected into a copy of the real list is caught. Templates
+  (Proxmox-style role, sshd forced-command snippet, sudoers fragment for the create-only snapshot door) are
+  explicitly examples to adapt, not a hardened distribution. One documented, accepted limit: the non-existent-id
+  probe can't always distinguish "refused" from "would have been allowed against a real target."
 - **change-sop: the change procedure as an installable Claude Code skill, generic and tested (17/10).** Moves
   [method.md §1](docs/method.md#1-the-change-procedure) from "described" to code: `SKILL.md` (analyse → plan →
   explicit GO → dry-run → execute one thing at a time → verify with evidence → document, plus a "keep everything
