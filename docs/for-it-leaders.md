@@ -25,8 +25,11 @@ standing.
    to do, on what, and for how long. A card with that plan — in plain terms, rights spelled out — arrives on
    the human's phone. They approve or reject with one tap. An approved plan expires on its own after a set
    time, and a single "stop everything" button or command ends every approval immediately, from anywhere.
-3. **Secrets are masked everywhere the agent prints something.** Passwords, API keys and tokens are stripped
-   out of command output before the agent ever sees them, not just before a human would.
+3. **Secrets are masked — a safety net, not a barrier.** A hook refuses a command that might print a secret
+   unless its whole output goes through a masking filter, and masks known patterns (keys, tokens, passwords)
+   wherever the agent prints something. It runs inside the agent's own process, so — unlike the approval step
+   above, which is the strong layer — it catches a cooperative agent's accidents, not a determined, manipulated
+   one working around it.
 
 ```mermaid
 flowchart LR
@@ -52,7 +55,7 @@ this **fail-closed**: uncertainty defaults to "ask a human," never to "let it th
 |---|---|
 | **Caught in practice** | A week of watching the agent's real activity in dry-run mode (nothing was actually blocked yet) flagged 1,186 commands that would have needed approval as changes. Reviewing that log found a handful of false alarms, which were fixed before any real blocking started. |
 | **Tested, not just designed** | Nearly 300 automated tests across the project's components, run on every change. Each release has generally gone through a review by four AI models from different vendors before being tagged, specifically looking for security and design flaws. A dedicated test suite throws disguised and obfuscated commands at the classifier (quoting tricks, encoding, look-alike characters) to check it isn't fooled by the kind of thing a manipulated agent — or a prompt-injection attack — might try. |
-| **In daily use** | The secret-masking layer and the multi-model review already run on the owner's real, if small-scale, infrastructure. The approval mechanism (the "plan card on your phone") has been dry-run tested end to end and run manually on the real machine; a full week of it handling real changes, continuously, is the next step before it is called production-ready. |
+| **In daily use** | The secret-masking layer and the multi-model review already run on the owner's real, if small-scale, infrastructure. The approval mechanism (the "plan card on your phone") has run in block mode on the owner's own laptop since 12/10/2026, after an end-to-end dry run; a trial of several days of varied real work is under way, with v1.0 coming after it. Real use already found things the dry run and the automated tests had not: the "Stop everything" button disappears once a plan is decided, so a standing `/stop` command was added; some approval clicks arrived a minute or two late, which needed its own fix; and the hourly proposal limit, set at 3 to be cautious, was raised to 8 once real work needed more. Each of these is a point in favour of piloting in observe mode first — a young system meets real use with gaps, and that is where you want to find them. |
 
 **Honest limits, stated plainly:**
 
