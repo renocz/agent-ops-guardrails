@@ -157,6 +157,48 @@ PATH_TRICKS = [
     ("a read command's own name used as a write path", "cat > /usr/local/bin/cat"),
 ]
 
+# ---------------------------------------------------------------------------------------------------------------
+# F4 follow-up (14/10): the nested-quote path is exactly where an agent legitimately runs commands all day --
+# ssh, pct/qm exec, docker exec, sh -c, each unwrapping a quoted inner command and re-scanning it -- and exactly
+# where a destructive command could hide behind a layer of quoting instead of behind an encoding trick. Every
+# case here must come back change or opaque, never read.
+# ---------------------------------------------------------------------------------------------------------------
+NESTED_QUOTE_DISGUISE = [
+    ("ssh -> pct exec -> sh -c, rm -rf", 'ssh host1 \'pct exec 100 -- sh -c "rm -rf /x"\''),
+    ("ssh -> pct exec -> sh -c, tee to a file", 'ssh host1 \'pct exec 100 -- sh -c "echo x | tee /etc/hosts"\''),
+    ("ssh -> docker exec -> sh -c, systemctl restart", 'ssh host1 \'docker exec web sh -c "systemctl restart nginx"\''),
+    ("base64 payload piped to sh, inside ssh's single-quoted remote command",
+     "ssh host1 'echo cm0gLXJmIC9zcnY= | base64 -d | sh'"),
+    ("base64 payload piped to bash, inside pct exec's sh -c",
+     'pct exec 100 -- sh -c "echo cm0gLXJmIC9zcnY= | base64 -d | bash"'),
+    ("$(...) builds the verb, in ssh's single-quoted remote command", "ssh host1 '$(echo r)$(echo m) -rf /srv'"),
+    ("$(...) builds the verb, inside pct exec's sh -c", 'pct exec 100 -- sh -c "\\$(echo rm) -rf /x"'),
+    ("heredoc body executed by bash -s", "bash -s <<'EOF'\nrm -rf /srv\nEOF"),
+    ("heredoc body executed by bash -s, over ssh", "ssh host1 \"bash -s\" <<'EOF'\nrm -rf /srv\nEOF"),
+    ("a quote closes early: the read-looking remote command is quoted, the destructive tail runs locally",
+     "ssh host1 'ls' ; rm -rf /srv"),
+    ("a quote closes early: the tail after it reaches pct exec locally",
+     "ssh host1 'ls'; pct exec 100 -- sh -c 'rm -rf /x'"),
+    ("three levels: bash -c wrapping ssh wrapping pct exec's sh -c",
+     'bash -c \'ssh host1 "pct exec 100 -- sh -c \\"rm -rf /x\\""\''),
+    ("qm exec (a VM, not a container) nested with tee", 'qm exec 100 -- sh -c "echo x | tee /etc/hosts"'),
+    ("sh -c with the '\\''  escaping idiom hiding rm", "sh -c 'rm -rf '\\''/srv/data'\\'''"),
+    ("eval hides rm behind its own nested quoting", 'eval \'sh -c "rm -rf /x"\''),
+    ("printf builds the command string fed to sh -c", 'sh -c "$(printf \'rm -rf /x\')"'),
+    ("docker exec, base64 payload into bash, inside a double-quoted remote command",
+     'ssh host1 "docker exec web sh -c \'echo cm0gLXJmIC9zcnY= | base64 -d | bash\'"'),
+    ("ssh's unquoted remote command: rm hiding behind a literal apostrophe word",
+     "ssh host1 rm -rf \"it's\" /srv/data"),
+    ("ssh -> eval($(printf ...)) builds the destructive command", 'ssh host1 \'eval "$(printf "rm -rf /x")"\''),
+    ("pct exec -> sh -c, xargs pipes a found path into rm", 'pct exec 100 -- sh -c "echo /x | xargs rm -rf"'),
+    # F4 item-3 investigation (15/10): rm hiding behind a genuinely-broken apostrophe in a direct-argv sh -c (the
+    # command never actually runs -- this must still never read as safe).
+    ("pct exec -- sh -c, rm hiding behind a broken apostrophe", 'pct exec 100 -- sh -c "echo c\'est fini; rm -rf /x"'),
+    ("qm exec -- sh -c, rm hiding behind a broken apostrophe", 'qm exec 100 -- sh -c "echo c\'est fini; rm -rf /x"'),
+    ("docker exec sh -c, rm hiding behind a broken apostrophe", 'docker exec web sh -c "echo c\'est fini; rm -rf /x"'),
+    ("bash -c, rm hiding behind a broken apostrophe, top level", 'bash -c "echo c\'est fini; rm -rf /x"'),
+]
+
 # A read-command name as a literal write target is also a path trick, kept separate because it is a redirection,
 # not a way of spelling the command itself.
 URL_ENCODING = [
@@ -283,6 +325,10 @@ class Disguise(unittest.TestCase):
 
     def test_path_tricks(self):
         self._assert_not_read(PATH_TRICKS)
+
+    def test_nested_quote_path_disguises(self):
+        """F4 follow-up: destructive commands hidden behind ssh/pct exec/docker exec/sh -c's own quote nesting."""
+        self._assert_not_read(NESTED_QUOTE_DISGUISE)
 
     def test_percent_encoded_action_urls(self):
         """Fixed bypass: is_action_url() now percent-decodes before matching."""
