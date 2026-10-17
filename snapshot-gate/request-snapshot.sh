@@ -5,7 +5,9 @@
 #   request-snapshot.sh REQUESTS_DIR STATES_DIR [TIMEOUT_SECONDS]
 #
 # Exit 0 only when the host answered OK; prints status/reason/name (one per line) either way. Exit 2 on a
-# timeout or bad usage, exit 1 when the host explicitly refused.
+# timeout or bad usage, exit 1 when the host explicitly refused (status=REFUSED) or hit an error applying the
+# request (status=ERROR) -- both are "not OK", and both are reported here the instant the state file appears,
+# never left to time out.
 set -eu
 
 if [ $# -lt 2 ]; then
