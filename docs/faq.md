@@ -163,8 +163,10 @@ Not any more. It used to on my setup, and the council objected: the alert is ext
 ### Why not just give the agent less power?
 Both are needed. Least privilege limits the damage, and the guardrails catch mistakes inside what is allowed. My on-call agent has deliberately fewer rights than the main one. See [method.md §3](method.md#3-an-on-call-agent-that-cannot-undo).
 
-### Where is the code for the change procedure and the snapshot gate?
-The GO part of the change procedure is now enforced by [go-gate](../go-gate/) (experimental). The rest of the procedure and the snapshot gate are described in [method.md](method.md) for now. The code is coming. Each piece goes through the same steps before it is published: tests, secret and identity scans, a council review, and a human GO.
+### Where is the code for the change procedure, the snapshot gate and the on-call restrictions?
+All three are now code, generic (no homelab-specific names, paths or incidents — parameterized for any "agent in a restricted environment + a more privileged host"), and tested: [change-sop/](../change-sop/) (the procedure itself as an installable Claude Code skill, plus a change-record template and numbering tool), [snapshot-gate/](../snapshot-gate/) (the agent requests, a root-owned host script creates — no rollback or destroy code path reachable from what the agent can run), and [oncall/](../oncall/) (least-privilege templates plus denial probes that stay harmless if they turn out wrong). The GO part of the change procedure is separately enforced by [go-gate](../go-gate/) (experimental) and, stronger, the [keeper](../keeper/).
+
+All three are marked experimental: tested against a dry-run backend (snapshot-gate) or fake stub commands (oncall), including a mutation check on each one's security-relevant rule, but not yet run against a real ZFS/LVM host or a real restricted identity, and not yet run by anyone outside this repo. Each piece goes through the same steps before it is trusted further: tests, secret and identity scans, a council review, and a human GO.
 
 ### Can I contribute?
 Issues and suggestions are welcome, especially bypasses of secret-guard and false alarms in council. This is a personal project, so replies may be slow.

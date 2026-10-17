@@ -6,6 +6,12 @@ One version scheme: **a repository tag per release**. Components have no version
 
 Next: one week of the keeper in block mode, after a dry run of refusal, approval, expiry, replay and a Telegram outage.
 
+- **Wired up change-sop/snapshot-gate/oncall (17/10).** README's failure-mode table: the three rows move from
+  "📄 described" to "🧪 code, experimental", linked to their own directories; three new "Start here" entries.
+  docs/faq.md's "Where is the code for..." answer now points at all three instead of saying "the code is
+  coming." CI (`.github/workflows/tests.yml`) gained a step per kit: unit tests, plus a syntax/dry-run/`--prefix`
+  check for snapshot-gate's installer and a syntax + harmlessness-check run for oncall's `denial-probe.sh` — none
+  of it touching the existing go-gate/keeper/secret-guard/council jobs.
 - **oncall: least privilege for the agent that works alone, with denial probes that stay harmless if they're
   wrong (17/10).** Moves [method.md §3](docs/method.md#3-an-on-call-agent-that-cannot-undo) (the identity side)
   and [§4](docs/method.md#4-denial-tests-must-be-harmless) from "described" to code. `denial-probe.sh` runs a

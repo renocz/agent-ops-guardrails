@@ -44,9 +44,9 @@ Two claims, and only the first is strong: the **approval cannot be forged** by t
 | A secret ends up in a transcript anyway (no pattern list is complete) | [**leak-check/**](leak-check/): a root job looks for the *real* secret values (env, compose, app configs, URLs, private keys) in what the agent produced, on the server and, after a daily copy, on the laptop. Each run starts with a canary. A hit is a leak, not a guess. | ✅ code |
 | Acts without being asked, or beyond what was approved | [**go-gate/**](go-gate/): a hook that allows changes only inside a plan the human approved with a GO (scope + expiry). Reads stay free. Observe mode by default. | 🧪 code, experimental |
 | Forges, replays or removes that approval itself | [**keeper/**](keeper/): a daemon under its own user holds the approvals, and the human approves with a button on a separate bot. The hook is root-owned and fails closed. Requires an agent that is not root. | 🧪 code, experimental |
-| Skips checks | **Change procedure**: analyse → plan → explicit GO → dry-run → execute → verify with evidence → document. | 📄 [described](docs/method.md#1-the-change-procedure) |
-| Breaks something during an upgrade | **Snapshot gate**: the agent *requests* a snapshot; the host takes it. The agent can never roll back or delete. | 📄 [described](docs/method.md#3-an-on-call-agent-that-cannot-undo) |
-| Has too much power when working alone | **On-call restrictions**: a least-privilege role, and denial tests that are harmless if they unexpectedly succeed. | 📄 [described](docs/method.md#4-denial-tests-must-be-harmless) |
+| Skips checks | [**change-sop/**](change-sop/): analyse → plan → explicit GO → dry-run → execute → verify with evidence → document, as an installable Claude Code skill, plus a change-record template and tool. | 🧪 code, experimental |
+| Breaks something during an upgrade | [**snapshot-gate/**](snapshot-gate/): the agent *requests* a snapshot; the host takes it. The agent can never roll back or delete — there is no code path for that anywhere it can run. | 🧪 code, experimental |
+| Has too much power when working alone | [**oncall/**](oncall/): a least-privilege role, and denial tests that stay harmless if they unexpectedly succeed. | 🧪 code, experimental |
 
 ## Start here
 
@@ -58,6 +58,9 @@ Two claims, and only the first is strong: the **approval cannot be forged** by t
 - **Measure real leaks, not pattern scores:** [leak-check/README.md](leak-check/README.md). It found 7 real leaks the pattern hook had missed. Its inventory covers 53% of what gitleaks flags, measured and broken down.
 - **Make the GO mechanical (experimental):** [go-gate/README.md](go-gate/README.md). Start with `simulate.py` on your own history, then a week in observe mode.
 - **Make the approval unforgeable (experimental):** [keeper/README.md](keeper/README.md), with the [design and threat model](docs/design-keeper.md). Its installer only does a dry run unless you pass `--apply`.
+- **Follow the change procedure (experimental):** [change-sop/README.md](change-sop/README.md). A Claude Code skill plus a change-record tool; nothing to install as root.
+- **Split snapshot create from rollback/destroy (experimental):** [snapshot-gate/README.md](snapshot-gate/README.md). The agent can only ever ask; its installer only does a dry run unless you pass `--apply`.
+- **Give the on-call agent less power, and test it (experimental):** [oncall/README.md](oncall/README.md). Denial probes that stay harmless if they turn out wrong.
 - **The whole method and the incidents behind it:** [docs/method.md](docs/method.md).
 
 ## Results, honestly
