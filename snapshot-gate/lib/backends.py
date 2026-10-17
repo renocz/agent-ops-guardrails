@@ -56,21 +56,26 @@ class Lvm:
         return ((size - free) / size * 100) if size else 0.0
 
     def list_snapshot_names(self):
-        # Qualified as "vg/lv_name" so naming.qualified_pattern() can apply the same exact-match discipline as
-        # the ZFS backend, keyed on the configured origin volume rather than a bare LV name that could collide
-        # across volume groups.
+        # Qualified as "vg/lv@snapshot-name" -- origin (this backend's own vg/lv) + "@" + the LV's own name --
+        # exactly the same "dataset@name" shape ZFS uses, so naming.qualified_pattern() applies the same
+        # exact-match discipline to both backends. An LV name itself can never contain "@" (LVM rejects it),
+        # which is exactly why the snapshot's real LV name and its qualified identifier must be kept distinct:
+        # see create_snapshot() below.
         out = subprocess.run(["lvs", "--noheadings", "-o", "lv_name,origin", self.vg],
                               capture_output=True, text=True, check=True, timeout=10).stdout
         names = []
         for line in out.splitlines():
             parts = line.split()
             if len(parts) == 2 and parts[1] == self.lv:
-                names.append(f"{self.vg}/{parts[0]}")
+                names.append(f"{self.vg}/{self.lv}@{parts[0]}")
         return names
 
     def create_snapshot(self, qualified_name):
-        vg, lv_name = qualified_name.split("/", 1)
-        subprocess.run(["lvcreate", "-s", "-n", lv_name, f"{vg}/{self.lv}"], check=True, timeout=30)
+        # qualified_name is "<vg>/<lv>@<snapshot-name>" (origin + "@" + the LV name to actually create). Split
+        # on "@", never on "/": the origin side already is the "vg/lv" lvcreate itself expects, and the
+        # snapshot-name side is what becomes the new LV's own name -- never glued together with "@" in it.
+        origin, _, snap_name = qualified_name.partition("@")
+        subprocess.run(["lvcreate", "-s", "-n", snap_name, origin], check=True, timeout=30)
 
 
 class Dir:
