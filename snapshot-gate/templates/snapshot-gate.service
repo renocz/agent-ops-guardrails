@@ -1,0 +1,15 @@
+# Example systemd service unit (Linux), triggered by snapshot-gate.path. Runs once per trigger and exits --
+# this is not a long-running daemon. NEVER installed automatically; fill in the placeholders yourself.
+[Unit]
+Description=snapshot-gate-host: process pending snapshot requests (agent-ops-guardrails)
+
+[Service]
+Type=oneshot
+# /opt/agent-guardrails is this repo's own installer convention (see keeper/install-keeper.sh); adjust to
+# wherever you actually installed this kit.
+ExecStart=/usr/bin/python3 -I /opt/agent-guardrails/lib/snapshot-gate-host.py /etc/snapshot-gate/config.json
+User=snapshot-gate
+Group=snapshot-gate
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/var/lib/snapshot-gate

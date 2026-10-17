@@ -1,0 +1,12 @@
+{
+  "backend": "zfs",
+  "dataset": "pool0/agent-data",
+  "prefix": "agent-gate",
+  "usage_threshold_percent": 85,
+  "cooldown_minutes": 10,
+  "retention_days": 7,
+  "requests_dir": "/var/lib/snapshot-gate/requests",
+  "states_dir": "/var/lib/snapshot-gate/states",
+  "lock_file": "/var/lib/snapshot-gate/run.lock",
+  "log_file": "/var/lib/snapshot-gate/snapshot-gate.log"
+}

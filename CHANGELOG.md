@@ -16,6 +16,22 @@ Next: one week of the keeper in block mode, after a dry run of refusal, approval
   regeneration, refusal on an id already in use whether chosen explicitly or raced into). README covers install
   (copy files, nothing to run as root) and how it combines with go-gate/keeper (the SOP says "ask for GO", they
   make it mechanical/unforgeable), with a worked example on a made-up `example-web` service.
+- **snapshot-gate: the agent requests, the host takes; the agent can never roll back or delete (17/10).** Moves
+  [method.md §3](docs/method.md#3-an-on-call-agent-that-cannot-undo) from "described" to code. The agent writes
+  an empty, never-read request file; `snapshot-gate-host.py` (triggered by a path unit/`WatchPaths` job,
+  templates provided, never installed automatically) refuses above a usage threshold or within a cooldown of an
+  existing matching snapshot (its name is returned instead), otherwise creates one named
+  `<prefix>-YYYYMMDD-HHMMSS` — no rollback or destroy code path anywhere in this file or `lib/backends.py`.
+  `retention-purge.py` is the only file that deletes anything, and only a name that fullmatches
+  `<dataset>@<prefix>-YYYYMMDD-HHMMSS` **exactly** (the dataset portion is matched in full, not as a string
+  prefix, so a recursive listing that picks up a child dataset, or a dataset merely starting the same way,
+  never gets purged) and is older than the retention period, parsed from its own embedded timestamp. Three
+  backends behind one interface (ZFS, LVM, and `Dir` — a directory of empty files, the dry-run/test backend).
+  19 tests, plus a real end-to-end run of the shell client (`request-snapshot.sh`) against the Python host over
+  actual files, both the accepted and refused paths. Mutation-checked: widening the dataset match from an exact
+  string to a `.*`-prefixed one (simulating a careless "starts with" check) makes 3 tests fail, catching both
+  the recursion case and the prefix-collision case. README covers the threat (an agent with hypervisor
+  snapshot rights can roll back or delete everything at once), what this does not protect against, and install.
 - **go-gate: oracle + corpus for F4, the 13 `opaque/unbalanced` commands from a week of block-mode observation
   (14/10), no behaviour change.** The owner's log kept only each command's head, never its arguments (5 `ssh`, 5
   `pct exec ; ssh …`, 2 `bash`, 1 chained `bash ; pct exec ; ssh … sleep`) — so `go-gate/test_balance_oracle.py`
