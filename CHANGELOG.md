@@ -6,6 +6,11 @@ One version scheme: **a repository tag per release**. Components have no version
 
 Next: one week of the keeper in block mode, after a dry run of refusal, approval, expiry, replay and a Telegram outage.
 
+- **docs: a plain-language page for IT leaders, English and French (17/10).** `docs/for-it-leaders.md` and
+  `docs/fr/pour-les-dirigeants-it.md`: a five-minute, non-technical read for a CIO/IT manager — the 30-second
+  pitch, a three-layer explanation with a mermaid diagram, an evidence table (every number traced to this
+  changelog or `docs/results.md`), honest limits stated plainly, what the pattern changes for an IT department,
+  a short FAQ, and how to pilot it. Linked from the README's "Start here".
 - **go-gate: oracle + corpus for F4, the 13 `opaque/unbalanced` commands from a week of block-mode observation
   (14/10), no behaviour change.** The owner's log kept only each command's head, never its arguments (5 `ssh`, 5
   `pct exec ; ssh …`, 2 `bash`, 1 chained `bash ; pct exec ; ssh … sleep`) — so `go-gate/test_balance_oracle.py`
