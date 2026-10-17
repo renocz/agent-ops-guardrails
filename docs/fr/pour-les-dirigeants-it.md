@@ -1,0 +1,133 @@
+# agent-ops-guardrails, pour les dirigeants IT
+
+Une page en langage simple pour un DSI ou un responsable IT qui se demande si un agent IA ayant un accès réel
+aux serveurs a besoin de ce type de garde-fous. Cinq minutes, aucune compétence technique requise. Pour la
+vision technique complète, voir [le README](../../README.md) et [la méthode](../method.md) (en anglais) ; la
+version destinée aux ingénieurs est [la FAQ](../faq.md).
+
+## En 30 secondes
+
+Donner à un agent IA un accès réel aux serveurs est risqué, mais pas principalement parce que l'agent serait
+malveillant. C'est parce qu'il peut se tromper avec une confiance totale, ou être manipulé pour exécuter une
+commande qu'il ne devrait pas, tout en détenant des droits d'administrateur. **agent-ops-guardrails** laisse
+l'agent lire et analyser librement, mais toute action qui *change* quelque chose doit d'abord être approuvée
+par un humain, sur son téléphone, pour une durée limitée — et l'agent ne peut pas s'accorder cette approbation
+lui-même.
+
+## Comment ça marche
+
+Trois couches, comme un coffre-fort à trois serrures. Chacune est indépendante : en perdre une laisse les
+deux autres debout.
+
+1. **La lecture est libre, le changement est bloqué par défaut.** Chaque commande que l'agent veut exécuter
+   est contrôlée (par un **hook** — une vérification automatique qui s'exécute avant la commande, à chaque
+   fois) puis classée en « lecture » ou « changement ». Les lectures passent toujours. Un changement a besoin
+   de l'étape 2.
+2. **Un changement a besoin de l'approbation explicite d'un humain, sur son téléphone.** L'agent rédige un
+   **plan** : ce qu'il veut faire, sur quoi, et pour combien de temps. Une carte avec ce plan — en termes
+   clairs, les droits explicités — arrive sur le téléphone de l'humain. Il approuve ou refuse d'un geste. Un
+   plan approuvé expire tout seul après une durée fixée, et un unique bouton ou commande « tout arrêter » met
+   fin à toutes les approbations immédiatement, depuis n'importe où.
+3. **Les secrets sont masqués partout où l'agent affiche quelque chose.** Mots de passe, clés d'API et jetons
+   sont retirés de la sortie des commandes avant même que l'agent ne les voie, pas seulement avant qu'un
+   humain ne les lise.
+
+```mermaid
+flowchart LR
+    R["🤖 L'agent lit et analyse<br/>toujours autorisé"] --> P["📝 L'agent propose un plan<br/>quoi, sur quoi, pour combien de temps"]
+    P --> H["📱 Téléphone de l'humain<br/>carte du plan : approuver ou refuser"]
+    H -->|approuve| K["🔒 Keeper<br/>service séparé, utilisateur séparé"]
+    K --> S["🖥️ Serveur<br/>changement appliqué, plan qui expire seul"]
+    H -->|refuse, ou pas de réponse| X["⛔ Rien ne se passe"]
+    M["🔐 Secrets masqués"] -.-> R
+    M -.-> S
+```
+
+**Pourquoi ça tient, même face à un agent manipulé.** Le composant qui détient les approbations — le projet
+l'appelle le **keeper** (le gardien) — est un service séparé, tournant sous un autre utilisateur, avec des
+fichiers que le compte de l'agent ne peut ni lire ni modifier. L'approbation elle-même est une pression sur un
+bouton d'une application de messagerie que l'agent ne peut pas lire non plus. L'agent ne peut donc pas
+s'écrire une approbation, en rejouer une ancienne, ni désactiver discrètement le système. Et quand le système
+ne peut pas classer une commande avec certitude, il la traite comme un changement et la bloque — le projet
+appelle ça le **fail-closed** (échec fermé) : dans le doute, le système demande à un humain, jamais il ne
+laisse passer.
+
+## Preuves et limites assumées
+
+| | |
+|---|---|
+| **Ce qui a été intercepté en pratique** | Une semaine d'observation de l'activité réelle de l'agent en mode à blanc (rien n'était encore réellement bloqué) a repéré 1186 commandes qui auraient nécessité une approbation en tant que changements. L'examen de ce journal a révélé une poignée de fausses alertes, corrigées avant le début du blocage réel. |
+| **Testé, pas seulement conçu** | Près de 300 tests automatisés sur l'ensemble des composants du projet, exécutés à chaque modification. La plupart des versions publiées sont passées par une revue de quatre modèles d'IA de fournisseurs différents avant d'être taguées, spécifiquement pour chercher des failles de sécurité et de conception. Une suite de tests dédiée soumet au classifieur des commandes déguisées et obfusquées (astuces de guillemets, encodages, caractères visuellement trompeurs) pour vérifier qu'il n'est pas dupé par le genre de ruse qu'un agent manipulé — ou une attaque par injection de prompt — pourrait tenter. |
+| **En usage quotidien** | La couche de masquage des secrets et la revue multi-modèle tournent déjà sur l'infrastructure réelle, bien que modeste, du créateur du projet. Le mécanisme d'approbation (la « carte de plan sur le téléphone ») a été testé de bout en bout à blanc et exécuté manuellement sur la machine réelle ; une semaine complète en gérant de vrais changements, en continu, est la prochaine étape avant de le qualifier de prêt pour la production. |
+
+**Limites assumées, dites sans détour :**
+
+- C'est un **projet jeune** (pré-version 1.0), construit et éprouvé sur l'environnement personnel d'une seule
+  personne. C'est une preuve de concept validée, pas un produit d'entreprise packagé.
+- Il **ne remplace pas** la gestion des accès, la segmentation réseau, ni une relecture humaine occasionnelle
+  de ce que l'agent a fait. C'est une couche supplémentaire, pas un substitut aux autres.
+- Il **ajoute de la friction volontairement** : les cartes d'approbation demandent quelques secondes
+  d'attention humaine. Cette friction est le but recherché, pas un défaut à optimiser.
+- Il protège contre les **erreurs et les manipulations** de l'agent — une mauvaise commande, une ruse qui le
+  pousse à exécuter quelque chose de nuisible. Il ne protège **pas** contre un administrateur humain qui a déjà
+  tous les droits et choisit d'en abuser.
+
+## Ce que ça change pour une direction IT
+
+L'idée sous-jacente ne se limite pas à ce seul projet : c'est un schéma réutilisable pour autoriser un agent IA
+à opérer une infrastructure sans lui signer un chèque en blanc.
+
+- **Moindre privilège par défaut.** L'agent peut tout regarder ; il ne peut rien changer sans une approbation
+  séparée et tracée.
+- **Chaque approbation est rattachée à une personne**, avec un périmètre (ce qu'elle couvre) et une durée
+  (sa validité).
+- **Un journal de décision** existe indépendamment de l'agent, pour pouvoir répondre après coup à « qu'a-t-il
+  presque fait, et qu'avons-nous réellement approuvé ».
+
+Le message de fond : **on ne demande pas à l'IA d'être parfaite. On construit le système pour qu'une erreur ne
+puisse pas faire de dégâts.**
+
+## Questions probables
+
+**Et si l'agent essaie de tricher avec l'approbation ?**
+C'est exactement la menace que ce système est conçu pour contrer, pas un cas marginal. L'approbation vit hors
+de portée de l'agent (un autre service, un autre utilisateur, des fichiers qu'il ne peut pas toucher), et une
+suite de tests dédiée soumet spécifiquement des commandes déguisées et obfusquées au classifieur pour attraper
+le genre de ruse qu'un agent manipulé pourrait employer. Aucun garde-fou n'est parfait, c'est pourquoi le
+projet précise d'emblée qu'il attrape les erreurs d'un agent *coopératif* et les ruses d'un agent *manipulé*,
+pas un attaquant déterminé ayant un accès illimité pour réécrire le code de l'agent lui-même.
+
+**Est-ce que ça ralentit tout ?**
+Les lectures — la grande majorité de ce qu'un agent fait au quotidien — ne sont pas affectées. Les changements
+demandent un geste de l'humain sur son téléphone, généralement quelques secondes, et la plupart impliquaient
+déjà, en principe, une décision humaine. Des premières mesures sur l'historique réel suggèrent que moins de la
+moitié des changements passés de l'agent avaient eu lieu dans les deux heures suivant un feu vert explicite
+d'un humain — c'est l'écart que ce système referme, pas un coût qu'il ajoute à quelque chose qui était déjà
+sûr.
+
+**Peut-on déployer ça chez nous ?**
+Commencez en **mode observation** : le système observe et journalise ce qu'il *aurait* bloqué, sans rien
+bloquer réellement. Cela donne une ou deux vraies semaines de données — combien de changements, combien de
+fausses alertes, quelle serait la perturbation du rythme réel — avant que quiconque ait à lui confier un
+blocage réel. Ne passez en mode bloquant qu'une fois ce journal propre.
+
+## Comment le piloter
+
+1. **Mode observation d'abord.** Installez le classifieur en mode surveillance uniquement. Laissez-le tourner
+   contre l'activité réelle de l'agent pendant au moins une semaine.
+2. **Lisez le journal avant de toucher à quoi que ce soit.** Regardez ce qu'il aurait bloqué : surtout de
+   vrais changements (c'est bon signe, c'est le but), ou du bruit causé par une tâche routinière mal
+   interprétée (à corriger avant d'aller plus loin) ?
+3. **Corrigez les fausses alertes.** Chacune est un bug concret et testable du classifieur, pas une raison
+   d'abandonner l'approche.
+4. **Passez en mode bloquant pour une période d'essai**, avec le contrôle « tout arrêter » testé et compris
+   par la personne qui le détiendra, avant de s'y fier pour quoi que ce soit d'important.
+5. **Continuez à mesurer.** Combien d'approbations par jour, combien de refus, à quelle fréquence le système
+   « échoue fermé » sur quelque chose qu'un humain aurait approuvé — affinez les règles du plan, ne vous
+   contentez pas de vous plaindre.
+
+---
+
+*Cette page relate les observations de terrain d'une seule personne sur un seul projet, ce n'est pas un
+argumentaire commercial. Pour les chiffres derrière chaque affirmation ci-dessus, voir
+[docs/results.md](../results.md) et [le changelog](../../CHANGELOG.md) (en anglais).*
