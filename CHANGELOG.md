@@ -6,6 +6,16 @@ One version scheme: **a repository tag per release**. Components have no version
 
 Next: one week of the keeper in block mode, after a dry run of refusal, approval, expiry, replay and a Telegram outage.
 
+- **change-sop: the change procedure as an installable Claude Code skill, generic and tested (17/10).** Moves
+  [method.md §1](docs/method.md#1-the-change-procedure) from "described" to code: `SKILL.md` (analyse → plan →
+  explicit GO → dry-run → execute one thing at a time → verify with evidence → document, plus a "keep everything
+  up to date" checklist with lines a reader can delete if they don't apply), a change-record template (front
+  matter: id/title/date/status/requester/go/risk/items/links/evidence; sections: context/what was
+  done/verifications/rollback), and `new-record.py` (stdlib only) to number records, regenerate their index, and
+  refuse to overwrite one that already exists. 9 tests (numbering, a gap in the sequence, slugifying, index
+  regeneration, refusal on an id already in use whether chosen explicitly or raced into). README covers install
+  (copy files, nothing to run as root) and how it combines with go-gate/keeper (the SOP says "ask for GO", they
+  make it mechanical/unforgeable), with a worked example on a made-up `example-web` service.
 - **go-gate: oracle + corpus for F4, the 13 `opaque/unbalanced` commands from a week of block-mode observation
   (14/10), no behaviour change.** The owner's log kept only each command's head, never its arguments (5 `ssh`, 5
   `pct exec ; ssh …`, 2 `bash`, 1 chained `bash ; pct exec ; ssh … sleep`) — so `go-gate/test_balance_oracle.py`
