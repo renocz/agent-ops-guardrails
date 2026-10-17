@@ -6,6 +6,25 @@ One version scheme: **a repository tag per release**. Components have no version
 
 Next: one week of the keeper in block mode, after a dry run of refusal, approval, expiry, replay and a Telegram outage.
 
+- **snapshot-gate: fixed the LVM back end, which could neither create nor ever match its own snapshots
+  (PR #12 review, 17/10).** `Lvm.create_snapshot` used to split the qualified name on `/`, handing `lvcreate`
+  an LV name containing `@` -- LVM rejects that outright, so every LVM snapshot request failed with an
+  unhandled exception and the agent-side client hung until its own timeout. `Lvm.list_snapshot_names` returned
+  a bare `vg/lv` with no `@`, which could never fullmatch `naming.qualified_pattern()` either, so the cooldown
+  check never saw an existing LVM snapshot and the purge never selected one. Both now use the same
+  `<vg>/<lv>@<prefix>-YYYYMMDD-HHMMSS` shape ZFS already used (origin, then `@`, then the snapshot's own bare LV
+  name, built from `lvs --noheadings -o lv_name,origin` and never glued back together with `/`); `retention-
+  purge.py`'s `destroy_lvm` translates it back to `lvremove -f vg/<name>` the same way. No destroy code path was
+  added to `lib/backends.py` or `snapshot-gate-host.py` -- that stays exclusive to `retention-purge.py`.
+  New `test_backend_commands.py` replaces `subprocess.run` with a recorder/fake and asserts the exact ZFS and
+  LVM command vectors (`zfs list`/`snapshot`/`destroy`, `lvs`/`lvcreate`/`lvremove`/`vgs`), plus a full round
+  trip per back end (fake listing -> create -> cooldown refusal -> purge selects only the old matching name,
+  never a foreign-origin, foreign-prefix, or child-dataset lookalike). Mutation-checked: reverting the LVM fix
+  (putting `@` back into the LV name) makes 2 tests fail. `snapshot-gate-host.py` now also fails loudly: if a
+  backend call raises, `process_pending` writes `status=ERROR` with only the exception's class name (never its
+  message or any command output) instead of leaving the request stuck, so `request-snapshot.sh` reports and
+  exits non-zero immediately instead of waiting out its own timeout; 3 new tests cover it with a raising
+  backend stub.
 - **Wired up change-sop/snapshot-gate/oncall (17/10).** README's failure-mode table: the three rows move from
   "📄 described" to "🧪 code, experimental", linked to their own directories; three new "Start here" entries.
   docs/faq.md's "Where is the code for..." answer now points at all three instead of saying "the code is
