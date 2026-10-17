@@ -28,9 +28,11 @@ deux autres debout.
    clairs, les droits explicités — arrive sur le téléphone de l'humain. Il approuve ou refuse d'un geste. Un
    plan approuvé expire tout seul après une durée fixée, et un unique bouton ou commande « tout arrêter » met
    fin à toutes les approbations immédiatement, depuis n'importe où.
-3. **Les secrets sont masqués partout où l'agent affiche quelque chose.** Mots de passe, clés d'API et jetons
-   sont retirés de la sortie des commandes avant même que l'agent ne les voie, pas seulement avant qu'un
-   humain ne les lise.
+3. **Les secrets sont masqués — un filet de sécurité, pas une barrière.** Un hook refuse une commande qui
+   pourrait afficher un secret, sauf si toute sa sortie passe par un filtre de masquage, et masque les motifs
+   connus (clés, jetons, mots de passe) partout où l'agent affiche quelque chose. Il tourne dans le propre
+   processus de l'agent : contrairement à l'étape d'approbation ci-dessus, qui est la couche forte, il attrape
+   les maladresses d'un agent coopératif, pas les contournements d'un agent manipulé et déterminé.
 
 ```mermaid
 flowchart LR
@@ -58,7 +60,7 @@ laisse passer.
 |---|---|
 | **Ce qui a été intercepté en pratique** | Une semaine d'observation de l'activité réelle de l'agent en mode à blanc (rien n'était encore réellement bloqué) a repéré 1186 commandes qui auraient nécessité une approbation en tant que changements. L'examen de ce journal a révélé une poignée de fausses alertes, corrigées avant le début du blocage réel. |
 | **Testé, pas seulement conçu** | Près de 300 tests automatisés sur l'ensemble des composants du projet, exécutés à chaque modification. La plupart des versions publiées sont passées par une revue de quatre modèles d'IA de fournisseurs différents avant d'être taguées, spécifiquement pour chercher des failles de sécurité et de conception. Une suite de tests dédiée soumet au classifieur des commandes déguisées et obfusquées (astuces de guillemets, encodages, caractères visuellement trompeurs) pour vérifier qu'il n'est pas dupé par le genre de ruse qu'un agent manipulé — ou une attaque par injection de prompt — pourrait tenter. |
-| **En usage quotidien** | La couche de masquage des secrets et la revue multi-modèle tournent déjà sur l'infrastructure réelle, bien que modeste, du créateur du projet. Le mécanisme d'approbation (la « carte de plan sur le téléphone ») a été testé de bout en bout à blanc et exécuté manuellement sur la machine réelle ; une semaine complète en gérant de vrais changements, en continu, est la prochaine étape avant de le qualifier de prêt pour la production. |
+| **En usage quotidien** | La couche de masquage des secrets et la revue multi-modèle tournent déjà sur l'infrastructure réelle, bien que modeste, du créateur du projet. Le mécanisme d'approbation (la « carte de plan sur le téléphone ») tourne en mode bloquant sur l'ordinateur réel du créateur depuis le 12/10/2026, après une répétition complète à blanc ; un essai de plusieurs jours de travail réel et varié est en cours, avant la version 1.0. L'usage réel a déjà révélé des choses que la répétition et les tests automatisés n'avaient pas vues : le bouton « Tout arrêter » disparaît une fois qu'un plan est décidé, d'où l'ajout d'une commande `/stop` permanente ; certains clics d'approbation arrivaient avec une à deux minutes de retard, ce qui a nécessité un correctif dédié ; et la limite horaire de propositions, fixée par prudence à 3, a été relevée à 8 une fois que le travail réel l'a exigé. Chacun de ces points plaide pour piloter d'abord en mode observation : un système jeune révèle des failles à l'usage réel, et c'est justement là qu'on veut les trouver. |
 
 **Limites assumées, dites sans détour :**
 
