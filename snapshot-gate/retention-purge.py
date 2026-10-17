@@ -25,8 +25,11 @@ def destroy_zfs(qualified_name):
 
 
 def destroy_lvm(qualified_name):
-    vg, lv_name = qualified_name.split("/", 1)
-    subprocess.run(["lvremove", "-f", f"{vg}/{lv_name}"], check=True, timeout=30)
+    # qualified_name is "<vg>/<lv>@<snapshot-name>" (see lib/backends.py's Lvm docstrings). The volume group is
+    # the first path segment of the origin side; lvremove takes "<vg>/<snapshot-name>", never the origin LV.
+    origin, _, snap_name = qualified_name.partition("@")
+    vg = origin.split("/", 1)[0]
+    subprocess.run(["lvremove", "-f", f"{vg}/{snap_name}"], check=True, timeout=30)
 
 
 def destroy_dir(qualified_name, root):
