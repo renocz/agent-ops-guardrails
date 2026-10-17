@@ -1,0 +1,14 @@
+# Example only, not a hardened distribution. If your setup drives the create-only snapshot request through
+# sudo instead of (or alongside) group membership on the requests directory, this is the shape of the rule:
+# exactly one command, no arguments the agent controls beyond what request-snapshot.sh itself takes, no
+# wildcard.
+#
+# Install as /etc/sudoers.d/oncall-snapshot-door (mode 440, validated with `visudo -c -f`):
+
+{{ONCALL_USER}} ALL=(root) NOPASSWD: /opt/agent-guardrails/bin/request-snapshot.sh /var/lib/snapshot-gate/requests /var/lib/snapshot-gate/states *
+
+# The trailing `*` only matches the optional timeout argument request-snapshot.sh itself accepts (see
+# snapshot-gate/README.md) -- it is not a green light for arbitrary arguments to an arbitrary command. Prefer
+# the group-membership approach in snapshot-gate/install-snapshot-gate.sh when you can: this sudoers rule
+# exists for setups where that is not an option. Replace {{ONCALL_USER}} with the real account name, and test
+# with denial-probe.sh's "add itself to a sudoers-like capability" probe afterwards.

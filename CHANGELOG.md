@@ -6,6 +6,75 @@ One version scheme: **a repository tag per release**. Components have no version
 
 Next: one week of the keeper in block mode, after a dry run of refusal, approval, expiry, replay and a Telegram outage.
 
+- **snapshot-gate: fixed the LVM back end, which could neither create nor ever match its own snapshots
+  (PR #12 review, 17/10).** `Lvm.create_snapshot` used to split the qualified name on `/`, handing `lvcreate`
+  an LV name containing `@` -- LVM rejects that outright, so every LVM snapshot request failed with an
+  unhandled exception and the agent-side client hung until its own timeout. `Lvm.list_snapshot_names` returned
+  a bare `vg/lv` with no `@`, which could never fullmatch `naming.qualified_pattern()` either, so the cooldown
+  check never saw an existing LVM snapshot and the purge never selected one. Both now use the same
+  `<vg>/<lv>@<prefix>-YYYYMMDD-HHMMSS` shape ZFS already used (origin, then `@`, then the snapshot's own bare LV
+  name, built from `lvs --noheadings -o lv_name,origin` and never glued back together with `/`); `retention-
+  purge.py`'s `destroy_lvm` translates it back to `lvremove -f vg/<name>` the same way. No destroy code path was
+  added to `lib/backends.py` or `snapshot-gate-host.py` -- that stays exclusive to `retention-purge.py`.
+  New `test_backend_commands.py` replaces `subprocess.run` with a recorder/fake and asserts the exact ZFS and
+  LVM command vectors (`zfs list`/`snapshot`/`destroy`, `lvs`/`lvcreate`/`lvremove`/`vgs`), plus a full round
+  trip per back end (fake listing -> create -> cooldown refusal -> purge selects only the old matching name,
+  never a foreign-origin, foreign-prefix, or child-dataset lookalike). Mutation-checked: reverting the LVM fix
+  (putting `@` back into the LV name) makes 2 tests fail. `snapshot-gate-host.py` now also fails loudly: if a
+  backend call raises, `process_pending` writes `status=ERROR` with only the exception's class name (never its
+  message or any command output) instead of leaving the request stuck, so `request-snapshot.sh` reports and
+  exits non-zero immediately instead of waiting out its own timeout; 3 new tests cover it with a raising
+  backend stub.
+- **Wired up change-sop/snapshot-gate/oncall (17/10).** README's failure-mode table: the three rows move from
+  "📄 described" to "🧪 code, experimental", linked to their own directories; three new "Start here" entries.
+  docs/faq.md's "Where is the code for..." answer now points at all three instead of saying "the code is
+  coming." CI (`.github/workflows/tests.yml`) gained a step per kit: unit tests, plus a syntax/dry-run/`--prefix`
+  check for snapshot-gate's installer and a syntax + harmlessness-check run for oncall's `denial-probe.sh` — none
+  of it touching the existing go-gate/keeper/secret-guard/council jobs.
+- **oncall: least privilege for the agent that works alone, with denial probes that stay harmless if they're
+  wrong (17/10).** Moves [method.md §3](docs/method.md#3-an-on-call-agent-that-cannot-undo) (the identity side)
+  and [§4](docs/method.md#4-denial-tests-must-be-harmless) from "described" to code. `denial-probe.sh` runs a
+  list of operations AS the restricted identity and reports PASS (refused) / FAIL (accepted) per line, never
+  the probed command's own output — even an unexpectedly-successful "list another user's secrets" probe must
+  not then print real filenames. The operations are a plain `probes.json` data file (6 shipped: read a
+  root-only canary, write outside the allowed directory, list another user's secrets, a hypervisor destructive
+  verb against a non-existent id, open a tunnel through a forced-command key, add itself to a sudoers-like
+  capability), with `{{PLACEHOLDER}}` tokens so nothing real ships by default. `lib/harmless_check.py` enforces
+  method.md §4 mechanically on the data file itself: once a dangerous verb (`rm`, `destroy`, `restart`, …)
+  appears as a bare word anywhere in a probe's command — including hidden inside one `sh -c "..."` string —
+  every word after it must be a flag or a placeholder, never a literal path/hostname/id. 21 tests (the runner
+  against fake stub commands only, never a real path or hypervisor call; placeholder substitution, both whole-
+  token and embedded; the harmlessness check on crafted probes and on the shipped file). Mutation-checked: a
+  harmful probe (`pct destroy 100`, no placeholder) injected into a copy of the real list is caught. Templates
+  (Proxmox-style role, sshd forced-command snippet, sudoers fragment for the create-only snapshot door) are
+  explicitly examples to adapt, not a hardened distribution. One documented, accepted limit: the non-existent-id
+  probe can't always distinguish "refused" from "would have been allowed against a real target."
+- **change-sop: the change procedure as an installable Claude Code skill, generic and tested (17/10).** Moves
+  [method.md §1](docs/method.md#1-the-change-procedure) from "described" to code: `SKILL.md` (analyse → plan →
+  explicit GO → dry-run → execute one thing at a time → verify with evidence → document, plus a "keep everything
+  up to date" checklist with lines a reader can delete if they don't apply), a change-record template (front
+  matter: id/title/date/status/requester/go/risk/items/links/evidence; sections: context/what was
+  done/verifications/rollback), and `new-record.py` (stdlib only) to number records, regenerate their index, and
+  refuse to overwrite one that already exists. 9 tests (numbering, a gap in the sequence, slugifying, index
+  regeneration, refusal on an id already in use whether chosen explicitly or raced into). README covers install
+  (copy files, nothing to run as root) and how it combines with go-gate/keeper (the SOP says "ask for GO", they
+  make it mechanical/unforgeable), with a worked example on a made-up `example-web` service.
+- **snapshot-gate: the agent requests, the host takes; the agent can never roll back or delete (17/10).** Moves
+  [method.md §3](docs/method.md#3-an-on-call-agent-that-cannot-undo) from "described" to code. The agent writes
+  an empty, never-read request file; `snapshot-gate-host.py` (triggered by a path unit/`WatchPaths` job,
+  templates provided, never installed automatically) refuses above a usage threshold or within a cooldown of an
+  existing matching snapshot (its name is returned instead), otherwise creates one named
+  `<prefix>-YYYYMMDD-HHMMSS` — no rollback or destroy code path anywhere in this file or `lib/backends.py`.
+  `retention-purge.py` is the only file that deletes anything, and only a name that fullmatches
+  `<dataset>@<prefix>-YYYYMMDD-HHMMSS` **exactly** (the dataset portion is matched in full, not as a string
+  prefix, so a recursive listing that picks up a child dataset, or a dataset merely starting the same way,
+  never gets purged) and is older than the retention period, parsed from its own embedded timestamp. Three
+  backends behind one interface (ZFS, LVM, and `Dir` — a directory of empty files, the dry-run/test backend).
+  19 tests, plus a real end-to-end run of the shell client (`request-snapshot.sh`) against the Python host over
+  actual files, both the accepted and refused paths. Mutation-checked: widening the dataset match from an exact
+  string to a `.*`-prefixed one (simulating a careless "starts with" check) makes 3 tests fail, catching both
+  the recursion case and the prefix-collision case. README covers the threat (an agent with hypervisor
+  snapshot rights can roll back or delete everything at once), what this does not protect against, and install.
 - **go-gate: oracle + corpus for F4, the 13 `opaque/unbalanced` commands from a week of block-mode observation
   (14/10), no behaviour change.** The owner's log kept only each command's head, never its arguments (5 `ssh`, 5
   `pct exec ; ssh …`, 2 `bash`, 1 chained `bash ; pct exec ; ssh … sleep`) — so `go-gate/test_balance_oracle.py`

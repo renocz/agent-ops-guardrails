@@ -38,6 +38,23 @@ jobs:
         run: cd leak-check && python -m unittest -v test_leak_check.py
       - name: leak-check orchestration scripts (syntax + offline run)
         run: bash -n leak-check/contrib/run-server.sh && bash -n leak-check/contrib/run-laptop.sh && bash leak-check/contrib/test_contrib.sh
+      - name: change-sop tests (numbering, index, refusal to overwrite)
+        run: cd change-sop && python -m unittest -v test_new_record.py
+      - name: snapshot-gate tests (dry-run backend, host + retention purge)
+        run: cd snapshot-gate && python -m unittest -v test_snapshot_gate_host.py test_retention_purge.py
+      - name: snapshot-gate installer (syntax, dry run, install into a temp prefix)
+        run: |
+          bash -n snapshot-gate/install-snapshot-gate.sh
+          bash -n snapshot-gate/request-snapshot.sh
+          snapshot-gate/install-snapshot-gate.sh --agent-user "$(id -un)" --dataset pool0/agent-data
+          snapshot-gate/install-snapshot-gate.sh --agent-user "$(id -un)" --dataset pool0/agent-data --prefix /tmp/sgp
+          python -m json.tool /tmp/sgp/etc/snapshot-gate/config.json >/dev/null
+      - name: oncall tests (fake stub commands only, harmlessness check)
+        run: cd oncall && python -m unittest -v test_run_probes.py test_harmless_check.py
+      - name: oncall denial-probe.sh and harmlessness check (syntax + shipped data file)
+        run: |
+          bash -n oncall/denial-probe.sh
+          python3 oncall/lib/harmless_check.py oncall/probes.json
 
   hook-gym:
     # External benchmark for Claude Code hooks (https://pypi.org/project/hook-gym/).

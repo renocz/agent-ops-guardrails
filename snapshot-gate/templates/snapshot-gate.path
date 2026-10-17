@@ -1,0 +1,13 @@
+# Example systemd path unit (Linux). Fires snapshot-gate.service whenever the requests directory changes.
+# This file is NEVER installed automatically by install-snapshot-gate.sh -- copy it (and snapshot-gate.service)
+# into /etc/systemd/system/ yourself, fill in the placeholders, then `systemctl daemon-reload && systemctl
+# enable --now snapshot-gate.path`.
+[Unit]
+Description=watch for snapshot-gate requests (agent-ops-guardrails)
+
+[Path]
+PathChanged=/var/lib/snapshot-gate/requests
+Unit=snapshot-gate.service
+
+[Install]
+WantedBy=multi-user.target
