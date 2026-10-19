@@ -580,7 +580,7 @@ class DirTree(unittest.TestCase):
         os.makedirs(self.news)
         os.makedirs(self.other)
         os.symlink(self.other, os.path.join(self.news, "link"))
-        self.plan = {"targets": [f"dir:{self.news}"], "actions": ["edit", "delete", "deploy", "script", "git"]}
+        self.plan = {"targets": [f"dir:{self.news}"], "actions": ["edit", "delete", "deploy", "script", "git", "api"]}
         self.old_cwd = os.getcwd()
 
     def tearDown(self):
@@ -589,6 +589,260 @@ class DirTree(unittest.TestCase):
 
     def covered(self, cmd, cwd=None):
         return decide(self.plan, cmd, cwd or self.news) is None
+
+
+class DirAllPaths(DirTree):
+    """K-dir, round 2: a `dir:` target covers an action only when EVERY path in it is inside the directory. Plain
+    targets keep the any-one-token rule they always had (last tests)."""
+
+    def test_reported_case_cp_from_inside_to_outside(self):
+        plan = {"targets": ["dir:/opt/stacks/news"], "actions": ["edit"]}
+        cmd = "cp /opt/stacks/news/x /etc/cron.d/y"
+        gap = g.coverage_gap(plan, "Bash", {"command": cmd}, "edit", cmd)
+        self.assertIsNotNone(gap)
+        text = g.describe_gap(gap, plan)
+        self.assertIn("/etc/cron.d/y", text)
+        self.assertNotIn("/opt/stacks/news/x,", text)                      # the covered path is not blamed
+        self.assertIn("every path", text)
+        cmd2 = "cp /opt/stacks/news/x /opt/stacks/news/y"
+        self.assertIsNone(g.coverage_gap(plan, "Bash", {"command": cmd2}, "edit", cmd2))
+
+    def test_cp_mv_ln_install_with_one_path_outside(self):
+        n, o = self.news, self.other
+        for cmd in (f"cp {n}/a {o}/b", f"cp {o}/a {n}/b", f"mv {n}/a /etc/b", f"ln -s {n}/a {o}/l",
+                    f"install -m 755 {n}/a {o}/b", f"rsync -a {n}/ {o}/", f"cp -r {n} {o}", f"touch {n}/a {o}/b"):
+            self.assertFalse(self.covered(cmd), cmd)
+        for cmd in (f"cp {n}/a {n}/b", f"mv {n}/a {n}/sub/b", f"ln -s {n}/a {n}/l", f"install -m 755 {n}/a {n}/b",
+                    f"rm -f {n}/a {n}/b", f"mkdir -p {n}/x/y"):
+            self.assertTrue(self.covered(cmd), cmd)
+
+    def test_mixed_command_one_inside_one_outside(self):
+        n, o = self.news, self.other
+        self.assertFalse(self.covered(f"cp {n}/a {n}/b {o}/c"))
+        self.assertFalse(self.covered(f"mv {n}/a {n}/b; rm {o}/c"))                 # second statement
+        self.assertFalse(self.covered(f"cp {n}/a {n}/b && cp {n}/b {o}/c"))
+        self.assertFalse(self.covered(f"echo ok | tee {n}/a | tee {o}/b"))          # second pipeline stage
+        self.assertTrue(self.covered(f"cp {n}/a {n}/b && cp {n}/b {n}/c"))
+
+    def test_tee_targets(self):
+        n, o = self.news, self.other
+        self.assertTrue(self.covered(f"echo x | tee {n}/a"))
+        self.assertTrue(self.covered(f"echo x | tee -a {n}/a {n}/b"))
+        self.assertFalse(self.covered(f"echo x | tee {n}/a {o}/b"))
+        self.assertFalse(self.covered(f"echo x | tee -a {o}/b"))
+        self.assertFalse(self.covered(f"echo x | tee {n}/a /etc/cron.d/y"))
+        self.assertFalse(self.covered("echo x | tee out.txt", cwd=self.other))         # a bare name lands in the cwd
+        self.assertTrue(self.covered("echo x | tee out.txt", cwd=self.news))
+
+    def test_redirections(self):
+        n, o = self.news, self.other
+        self.assertTrue(self.covered(f"echo x > {n}/a"))
+        self.assertFalse(self.covered(f"echo x > {o}/a"))
+        self.assertFalse(self.covered(f"echo x >> {o}/a"))
+        self.assertFalse(self.covered(f"cat {n}/a > {o}/b"))                            # one inside, one outside
+        self.assertFalse(self.covered(f"cat {n}/a >{o}/b"))                             # no space
+        self.assertFalse(self.covered(f"cat {n}/a 1>{o}/b"))
+        self.assertFalse(self.covered(f"cat {n}/a &> {o}/b"))
+        self.assertFalse(self.covered(f"cat {n}/a >| {o}/b"))
+        self.assertFalse(self.covered(f"cat {n}/a > '{o}/b'"))                          # quoted target
+        self.assertFalse(self.covered(f"echo x > out.txt", cwd=self.other))             # bare redirect target
+        self.assertTrue(self.covered(f"echo x > out.txt", cwd=self.news))
+        self.assertTrue(self.covered(f"echo x > {n}/a 2>&1"))                           # fd duplication is no file
+        self.assertTrue(self.covered(f"echo x > {n}/a 2>/dev/null"))                    # a null sink is fine
+        self.assertFalse(self.covered(f"echo x > {n}/a 2>{o}/err"))
+
+    def test_target_directory_style_flags(self):
+        n, o = self.news, self.other
+        self.assertFalse(self.covered(f"cp --target-directory={o} {n}/a"))
+        self.assertFalse(self.covered(f"cp --target-directory {o} {n}/a"))
+        self.assertFalse(self.covered(f"cp -t {o} {n}/a"))
+        self.assertFalse(self.covered(f"tar -xf {n}/a.tgz -C {o}"))
+        self.assertFalse(self.covered(f"tar -xf {n}/a.tgz -C{o}"))
+        self.assertFalse(self.covered(f"dd if={n}/a of={o}/b"))
+        self.assertFalse(self.covered(f"git -C {o} commit -m x"))
+        self.assertFalse(self.covered(f"git --work-tree={o} checkout ."))
+        self.assertFalse(self.covered(f"docker compose --project-directory={o} up -d"))
+        self.assertTrue(self.covered(f"tar -xf {n}/a.tgz -C {n}/out"))
+        self.assertTrue(self.covered(f"dd if={n}/a of={n}/b"))
+        self.assertTrue(self.covered(f"git -C {n} commit -m x"))
+
+    def test_nested_in_ssh_pct_docker_exec_and_bash_c(self):
+        n, o = self.news, self.other
+        # a path inside the quoted remote command is seen like any other
+        self.assertFalse(self.covered(f"ssh host 'cp {n}/a /etc/cron.d/y'"))
+        self.assertFalse(self.covered(f'ssh host "cp {n}/a /etc/cron.d/y"'))
+        self.assertFalse(self.covered(f"ssh host \"pct exec 100 -- cp {n}/a /etc/cron.d/y\""))
+        self.assertFalse(self.covered(f"docker exec web cp {n}/a /etc/cron.d/y"))
+        self.assertFalse(self.covered(f"bash -c 'cp {n}/a {o}/b'"))
+        self.assertFalse(self.covered(f"sh -c \"cd {n} && cp a {o}/b\""))
+        # ... and a command that runs elsewhere is not judged by local symlinks at all: not covered even when
+        # every path looks inside
+        self.assertFalse(self.covered(f"ssh host 'cp {n}/a {n}/b'"))
+        self.assertFalse(self.covered(f"pct exec 100 -- cp {n}/a {n}/b"))
+        self.assertFalse(self.covered(f"docker exec web cp {n}/a {n}/b"))
+        self.assertFalse(self.covered(f"docker run --rm -v {n}:/data alpine rm /data/a"))
+        self.assertFalse(self.covered(f"scp {n}/a host:/etc/y"))
+        self.assertFalse(self.covered(f"scp host:/etc/y {n}/a"))
+        self.assertFalse(self.covered(f"rsync -a {n}/ host:/srv/x/"))
+        self.assertTrue(self.covered(f"bash -c 'cp {n}/a {n}/b'"))                      # local nesting is fine
+        self.assertTrue(self.covered(f"docker compose -f {n}/compose.yml up -d"))
+
+    def test_remote_denial_says_why(self):
+        cmd = f"ssh host 'cp {self.news}/a {self.news}/b'"
+        gap = decide(self.plan, cmd, self.news)
+        self.assertIn("elsewhere", g.describe_gap(gap, self.plan))
+
+    def test_symlink_pointing_out_is_followed(self):
+        n, o = self.news, self.other
+        wtext(os.path.join(o, "f"), "x")
+        os.symlink(os.path.join(o, "f"), os.path.join(n, "linkfile"))
+        for cmd in (f"cp {n}/a {n}/link/b", f"rm {n}/link/f", f"echo x > {n}/link/f", f"echo x > {n}/linkfile",
+                    f"tee {n}/linkfile", f"cp {n}/a {n}/link", f"mv {n}/link/f {n}/f", f"rm -r {n}/link/",
+                    f"cp {n}/a {n}/./link/../link/b"):
+            self.assertFalse(self.covered(cmd), cmd)
+        self.assertFalse(self.covered(f"rm {n}/link"))      # conservative: judged on where the link points, not on the link
+
+    def test_dotdot_inside_the_path(self):
+        n, o = self.news, self.other
+        self.assertFalse(self.covered(f"cp {n}/a {n}/../other/b"))
+        self.assertFalse(self.covered(f"cp {n}/sub/../../other/a {n}/b"))
+        self.assertTrue(self.covered(f"cp {n}/sub/../a {n}/b"))
+
+    def test_protected_paths_are_never_covered(self):
+        gate = os.path.join(self.root, "gate")
+        os.makedirs(gate)
+        old = os.environ.get("GO_GATE_DIR")
+        os.environ["GO_GATE_DIR"] = gate
+        try:
+            plan = {"targets": [f"dir:{self.root}"], "actions": ["edit"]}
+            self.assertIsNone(decide(plan, f"cp {self.news}/a {self.other}/b", self.news))     # the root is a fine grant
+            self.assertIsNotNone(decide(plan, f"cp {self.news}/a {gate}/state.json", self.news))
+            self.assertIsNotNone(decide(plan, f"echo x > {gate}/config.json", self.news))
+            os.symlink(gate, os.path.join(self.news, "gl"))
+            self.assertIsNotNone(decide(plan, f"echo x > {self.news}/gl/state.json", self.news))
+            self.assertIsNotNone(decide(plan, "echo x > gl/state.json", self.news))
+        finally:
+            if old is None:
+                os.environ.pop("GO_GATE_DIR")
+            else:
+                os.environ["GO_GATE_DIR"] = old
+
+    def test_keeper_and_settings_paths_are_never_covered(self):
+        plan = {"targets": ["dir:/etc", f"dir:{self.news}"], "actions": ["edit"]}
+        for cmd in (f"cp {self.news}/a /etc/keeper/config.json", "echo x > /etc/keeper/state.json",
+                    f"cp {self.news}/a /opt/agent-guardrails/lib/go_gate.py",
+                    f"cp {self.news}/a ~/.claude/settings.json", f"echo x >> ~/.claude/hooks/go-gate.py"):
+            self.assertIsNotNone(decide(plan, cmd, self.news), cmd)
+
+    def test_paths_that_cannot_be_judged_fail_closed(self):
+        n = self.news
+        for cmd in (f"cp {n}/a $DEST", f"cp {n}/a {n}/$NAME", f"cp {n}/a $(echo /etc/y)", f"cp {n}/a `echo /etc/y`",
+                    f"cp {n}/a {n}/b\\ c", f"cp {n}/a ${{HOME}}/b", f"cp {n}/a {n}/*/x", f"rm {n}/{{a,../other/b}}",
+                    "rm /*", f"rm {n}/../*", f"cp {n}/a host:/etc/y", f"echo x > $OUT"):
+            self.assertFalse(self.covered(cmd), cmd)
+
+    def test_wildcard_in_the_last_component_stays_inside(self):
+        n = self.news
+        self.assertTrue(self.covered(f"rm {n}/*.log"))
+        self.assertTrue(self.covered(f"rm -f {n}/sub/?.tmp"))
+        self.assertTrue(self.covered("rm *.log", cwd=self.news))
+        self.assertFalse(self.covered("rm *.log", cwd=self.other))
+
+    def test_null_sinks_and_web_addresses_are_not_paths_on_this_machine(self):
+        n = self.news
+        self.assertTrue(self.covered(f"curl -s https://example.com/a/b -o {n}/out"))
+        self.assertTrue(self.covered(f"cp {n}/a {n}/b 2>/dev/null"))
+        self.assertFalse(self.covered(f"curl -s file:///etc/passwd -o {n}/out"))        # file:// IS a path
+
+    def test_file_tools_are_judged_on_their_file_not_their_content(self):
+        n = self.news
+        content = "see /etc/passwd, a/b and https://example.com/x for details"
+        ok = g.coverage_gap(self.plan, "Write", {"file_path": f"{n}/notes.md", "content": content}, "edit", None)
+        self.assertIsNone(ok)
+        out = g.coverage_gap(self.plan, "Write", {"file_path": f"{self.other}/notes.md", "content": content}, "edit", None)
+        self.assertIsNotNone(out)
+        link = g.coverage_gap(self.plan, "Edit", {"file_path": f"{n}/link/x", "old_string": "a", "new_string": "b"},
+                              "edit", None)
+        self.assertIsNotNone(link)
+
+    def test_no_path_inside_a_dir_target_is_not_covered(self):
+        self.assertFalse(self.covered("docker compose restart web"))
+        self.assertFalse(self.covered(f"cp /etc/hosts {self.other}/h"))
+
+    def test_plain_targets_keep_the_any_one_token_rule(self):
+        """The documented difference: only dir: targets got stricter."""
+        n = self.news
+        plain = {"targets": [n], "actions": ["edit"]}
+        self.assertIsNone(decide(plain, f"cp {n}/a {self.other}/b", self.news))        # as before: one token matches
+        named = {"targets": ["web"], "actions": ["deploy", "edit"]}
+        self.assertIsNone(decide(named, "docker restart web", self.news))
+        self.assertIsNone(decide(named, "cp /etc/a web", self.news))
+        mixed = {"targets": [f"dir:{n}", "web"], "actions": ["edit", "deploy"]}
+        self.assertIsNone(decide(mixed, "docker restart web", self.news))              # the plain target still works
+        self.assertIsNone(decide(mixed, f"cp {n}/a {n}/b", self.news))
+        self.assertIsNotNone(decide(mixed, f"cp {n}/a {self.other}/b", self.news))     # the dir: rule is not diluted
+        self.assertIsNone(decide(mixed, f"cp {n}/a web", self.news))                   # a path matching ANOTHER target
+
+    def test_many_dirs_each_path_in_any_of_them(self):
+        extra = os.path.join(self.root, "extra")
+        os.makedirs(extra)
+        plan = {"targets": [f"dir:{self.news}", f"dir:{extra}"], "actions": ["edit"]}
+        self.assertIsNone(decide(plan, f"cp {self.news}/a {extra}/b", self.news))
+        self.assertIsNotNone(decide(plan, f"cp {self.news}/a {self.other}/b", self.news))
+
+
+class DirRuleMutation(unittest.TestCase):
+    """Mutation check: break each part of the dir: rule in a COPY of go_gate.py and run the dir: tests against it --
+    every mutant must be caught by at least one failing test, or the tests are not guarding that part."""
+
+    MUTANTS = {
+        "any-one-path (the old rule)": ("bad = [p for p, v in verdicts if not v]", "bad = []"),
+        "daemon cwd for relative paths": ("    return STAGE_CWD.get(text, CWD) if text is not None else CWD",
+                                          "    return os.getcwd()"),
+        "no symlink following": ("        r = os.path.realpath(probe)\n    except (OSError, ValueError):\n        return 0",
+                                 "        r = os.path.normpath(probe)\n    except (OSError, ValueError):\n        return 0"),
+        "protected paths allowed": ("    if is_protected(r) or is_keeper_protected(r):\n        return 0\n    if any(r == b",
+                                    "    if any(r == b"),
+        "remote stages judged locally": ("    if remote:\n        return [safe_words", "    if False:\n        return [safe_words"),
+        "redirect targets ignored": ("    for m in REDIRECT.finditer(text):", "    for m in []:"),
+        "file-command words ignored": ("            if base in FILE_CMDS:", "            if False:"),
+        "variables judged by their text": ('    if any(c in p for c in "$`\\\\!"):\n        return 0', "    if False:\n        return 0"),
+    }
+
+    def run_suite(self, tmp):
+        env = dict(os.environ, PYTHONDONTWRITEBYTECODE="1")
+        r = subprocess.run([sys.executable, "-m", "unittest", "test_go_gate.DirAllPaths", "test_go_gate.DirRelativePaths"],
+                           cwd=os.path.join(tmp, "go-gate"), capture_output=True, text=True, env=env)
+        return r.returncode
+
+    def make_copy(self, tmp, mutate=None):
+        os.makedirs(os.path.join(tmp, "go-gate"))
+        os.makedirs(os.path.join(tmp, "secret-guard"))
+        src = rtext(os.path.join(HERE, "go_gate.py"))
+        if mutate:
+            old, new = mutate
+            self.assertIn(old, src, "the mutation no longer applies: update this test with the code")
+            src = src.replace(old, new, 1)
+        wtext(os.path.join(tmp, "go-gate", "go_gate.py"), src)
+        shutil.copy(os.path.join(HERE, "test_go_gate.py"), os.path.join(tmp, "go-gate", "test_go_gate.py"))
+        shutil.copy(os.path.join(HERE, "..", "secret-guard", "secret_guard.py"), os.path.join(tmp, "secret-guard"))
+
+    def test_unmodified_copy_passes(self):                        # the harness itself works
+        tmp = tempfile.mkdtemp(prefix=".mutation-", dir=HERE)         # outside the scratch-write exemption
+        try:
+            self.make_copy(tmp)
+            self.assertEqual(self.run_suite(tmp), 0)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_every_mutant_is_caught(self):
+        for name, mutation in self.MUTANTS.items():
+            tmp = tempfile.mkdtemp(prefix=".mutation-", dir=HERE)
+            try:
+                self.make_copy(tmp, mutation)
+                self.assertNotEqual(self.run_suite(tmp), 0, f"mutant survived: {name}")
+            finally:
+                shutil.rmtree(tmp, ignore_errors=True)
 
 
 class DirRelativePaths(DirTree):
