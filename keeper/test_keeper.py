@@ -649,6 +649,147 @@ class InstallerEnvLock(unittest.TestCase):
             self.assertIn(" -I ", text, wrapper)
 
 
+@unittest.skipUnless(shutil.which("bash") and os.path.exists("/usr/bin/python3") and
+                     subprocess.run(["id", "nobody"], capture_output=True).returncode == 0, "needs bash, /usr/bin/python3, user nobody")
+class InstallerHookTimeout(unittest.TestCase):
+    """The hook entry carries an explicit "timeout" (seconds), and wait_max_sec in the config always fits under it:
+    Claude Code does NOT block a PreToolUse call whose hook timed out, so --wait must end before the hook is killed."""
+
+    MANAGED_REL = ("Library/Application Support/ClaudeCode/managed-settings.json" if platform.system() == "Darwin"
+                   else "etc/claude-code/managed-settings.json")
+
+    def install(self, prefix=None, *extra):
+        if prefix is None:
+            prefix = tempfile.mkdtemp(prefix="kto", dir="/tmp")
+            self.addCleanup(shutil.rmtree, prefix, ignore_errors=True)
+        r = subprocess.run(["bash", os.path.join(HERE, "install-keeper.sh"), "--agent-user", "nobody", "--owner-id", "1",
+                            "--prefix", prefix, *extra], capture_output=True, text=True, timeout=60)
+        return prefix, r
+
+    def managed(self, prefix):
+        with open(os.path.join(prefix, self.MANAGED_REL)) as f:
+            return json.load(f)                                      # raises if the installer wrote invalid JSON
+
+    def config(self, prefix):
+        with open(os.path.join(prefix, "etc", "keeper", "config.json")) as f:
+            return json.load(f)
+
+    def keeper_hooks(self, doc):
+        return [h for e in doc["hooks"]["PreToolUse"] for h in e["hooks"] if "keeper_client.py" in h.get("command", "")]
+
+    def test_default_entry_has_a_timeout_that_fits_the_default_wait(self):
+        prefix, r = self.install()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        hooks = self.keeper_hooks(self.managed(prefix))
+        self.assertEqual(len(hooks), 1)
+        self.assertEqual(hooks[0]["timeout"], 60)
+        self.assertIs(type(hooks[0]["timeout"]), int)
+        cfg = self.config(prefix)
+        self.assertEqual((cfg["hook_timeout_sec"], cfg["wait_max_sec"]), (60, 50))
+        self.assertLessEqual(cfg["wait_max_sec"] + keeperd.HOOK_TIMEOUT_MARGIN_SEC, hooks[0]["timeout"])
+
+    def test_the_shipped_defaults_are_consistent(self):
+        self.assertLessEqual(keeperd.DEFAULTS["wait_max_sec"] + keeperd.HOOK_TIMEOUT_MARGIN_SEC,
+                             keeperd.DEFAULTS["hook_timeout_sec"])
+        self.assertEqual(keeperd.effective_wait_max(keeperd.DEFAULTS), keeperd.DEFAULTS["wait_max_sec"])
+
+    def test_reinstall_is_idempotent(self):
+        prefix, _ = self.install()
+        first = self.managed(prefix)
+        _, r = self.install(prefix)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self.managed(prefix), first)                # same document: no second hook, no second deny rule
+
+    def test_reinstall_upgrades_an_old_entry_without_timeout(self):
+        prefix, _ = self.install()
+        path = os.path.join(prefix, self.MANAGED_REL)
+        doc = self.managed(prefix)
+        for h in self.keeper_hooks(doc):
+            del h["timeout"]                                         # what installs before this change wrote
+        with open(path, "w") as f:
+            json.dump(doc, f)
+        self.assertNotIn("timeout", self.keeper_hooks(self.managed(prefix))[0])
+        _, r = self.install(prefix, "--hook-timeout", "90", "--wait-max", "60")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        hooks = self.keeper_hooks(self.managed(prefix))
+        self.assertEqual([h["timeout"] for h in hooks], [90])        # updated in place, still ONE entry
+
+    def test_a_foreign_hook_is_kept_and_untouched(self):
+        prefix, _ = self.install()
+        path = os.path.join(prefix, self.MANAGED_REL)
+        doc = self.managed(prefix)
+        doc["hooks"]["PreToolUse"].append({"matcher": "Bash", "hooks": [{"type": "command", "command": "/bin/true"}]})
+        with open(path, "w") as f:
+            json.dump(doc, f)
+        self.install(prefix)
+        foreign = [h for e in self.managed(prefix)["hooks"]["PreToolUse"] for h in e["hooks"] if h["command"] == "/bin/true"]
+        self.assertEqual(foreign, [{"type": "command", "command": "/bin/true"}])
+
+    def test_a_wait_max_that_does_not_fit_is_refused_and_writes_nothing(self):
+        for args in (("--wait-max", "51"), ("--wait-max", "1800"), ("--hook-timeout", "30"),
+                     ("--hook-timeout", "600", "--wait-max", "1800")):
+            prefix, r = self.install(None, *args)
+            self.assertEqual(r.returncode, 2, args)
+            self.assertIn("hook-timeout", r.stderr)
+            self.assertFalse(os.path.exists(os.path.join(prefix, "etc", "keeper", "config.json")), args)
+
+    def test_an_operator_can_choose_a_longer_wait_with_a_longer_timeout(self):
+        prefix, r = self.install(None, "--hook-timeout", "1810", "--wait-max", "1800")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self.keeper_hooks(self.managed(prefix))[0]["timeout"], 1810)
+        self.assertEqual(self.config(prefix)["wait_max_sec"], 1800)
+
+    def test_the_boundary_is_inclusive_of_the_margin(self):
+        self.assertEqual(self.install(None, "--hook-timeout", "60", "--wait-max", "50")[1].returncode, 0)
+        self.assertEqual(self.install(None, "--hook-timeout", "59", "--wait-max", "50")[1].returncode, 2)
+
+    def test_non_numbers_are_refused(self):
+        for bad in ("abc", "-5", "5.5", "", "0x10"):
+            self.assertEqual(self.install(None, "--hook-timeout", bad)[1].returncode, 2, bad)
+            self.assertEqual(self.install(None, "--wait-max", bad)[1].returncode, 2, bad)
+
+
+class WaitClamp(Base):
+    """keeperd side: the wait never exceeds hook_timeout_sec - margin, whatever wait_max_sec says."""
+
+    def wait_of(self, **cfg):
+        self.k.cfg.update(cfg)
+        r = self.k.check("s1", *bash(self.propose_cmd("id=p1 ; actions=edit") + " --wait 999999"))
+        return r["wait"]
+
+    def test_default_cap(self):
+        self.assertEqual(self.wait_of(), 50)
+
+    def test_wait_max_above_the_hook_timeout_is_clamped(self):
+        self.assertEqual(self.wait_of(wait_max_sec=1800, hook_timeout_sec=60), 50)
+
+    def test_a_longer_hook_timeout_allows_a_longer_wait(self):
+        self.assertEqual(self.wait_of(wait_max_sec=1800, hook_timeout_sec=1810), 1800)
+
+    def test_a_hook_timeout_below_the_margin_means_no_wait_at_all(self):
+        self.assertEqual(self.wait_of(wait_max_sec=50, hook_timeout_sec=5), 0)
+
+    def test_a_small_wait_is_not_raised(self):
+        self.k.cfg.update(wait_max_sec=1800, hook_timeout_sec=60)
+        r = self.k.check("s1", *bash(self.propose_cmd("id=p1 ; actions=edit") + " --wait 7"))
+        self.assertEqual(r["wait"], 7)
+
+    def test_load_config_warns_and_validates(self):
+        path = os.path.join(self.dir, "c.json")
+        with open(path, "w") as f:
+            json.dump({"wait_max_sec": 1800}, f)
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            cfg = keeperd.load_config(path)
+        self.assertEqual(keeperd.effective_wait_max(cfg), 50)
+        self.assertIn("clamped to 50s", err.getvalue())
+        for bad in ({"wait_max_sec": "50"}, {"hook_timeout_sec": -1}, {"wait_max_sec": True}, {"hook_timeout_sec": 1.5}):
+            with open(path, "w") as f:
+                json.dump(bad, f)
+            with self.assertRaises(ValueError, msg=str(bad)):
+                keeperd.load_config(path)
+
+
 def fake_secrets():
     """Fake secrets, assembled at run time so that secret scanners stay quiet on this file."""
     return {"github": "gh" + "p_" + "A1b2C3d4E5f6G7h8I9j0" * 2, "aws": "AK" + "IA" + "ABCDEFGHIJKLMNOP",
