@@ -6,6 +6,45 @@ One version scheme: **a repository tag per release**. Components have no version
 
 Next: finish the block-mode trial (started 12/10/2026, after the end-to-end dry run of refusal, approval, expiry, replay and a Telegram outage) -- a few days of varied real work, no deadlock, an acceptable number of cards -- then v1.0.
 
+- **go-gate + keeper: the refusal says what a plan does not cover, instead of just that it does not (19/10).** A
+  dozen cards in one real day traced back to the same cause: a plan covered the intent, but a temp filename, a
+  quoted path, or an action word (`pull`, `rm`, `git commit`) was not cited word-for-word, and the old reason
+  ("the approved plan 'X' does not cover this {cat} action") never said which — so the owner approved a card,
+  watched it get refused again on the next slightly different word, and proposed another. `go_gate.py`'s
+  `coverage_gap()` is `covers()`'s logic, unchanged, turned into a diagnostic: it returns the missing action
+  category (and what the plan does allow) or the specific path/filename/host-looking words in the command that none
+  of the plan's targets cover (and what its targets are), instead of a plain yes/no. `describe_gap()` turns that
+  into the extra clause both `go_gate.py`'s `on_pre_tool()` and `keeperd.py`'s `check()` now append to their deny
+  reason. `candidate_targets()` picks the target-like words (a path, a filename with an extension, a hostname, an
+  IPv4) and runs each one through the existing `safe_words()`/`redact()` masking before it is ever returned, so
+  nothing secret-shaped reaches the reason, a log, or a Telegram card. No protection changed: `covers()` is now
+  `coverage_gap(...) is None`, same control flow, same order of checks (category, the `script` carve-outs for
+  exec-dirs and git's exec surface, then targets), just with the first blocking reason kept instead of discarded.
+  **keeperd** also carries the gap, once, onto the *next* proposal's card when it follows a refusal in the same
+  session (`Keeper.check()` stores it as `last_gap` on the session; `propose()` consumes it; `render_plan_card()`
+  shows it as "Requested after a refusal: …") — context for the owner without a new kind of disclosure, since it is
+  the exact same sanitised text the agent already reads, never the raw command.
+- **go-gate + keeper: `targets=dir:<path>` (K-dir, 19/10), an explicit, visible subtree grant.** A target is
+  normally one path/file/host, matched whole-word; a literal path target already covered its own sub-paths as a
+  side effect (K7's "a prefix covers its sub-paths, kept on purpose"), silently. `dir:<path>` makes that choice
+  explicit instead: the plan's own author has to write `dir:`, and `render_plan_card()` shows a warning line for it
+  (next to the existing ones for `script`/`delete`/no-targets), so the owner is never approving "everything under
+  this directory" without seeing that in the card. Refused outright — never matches anything, as if the target were
+  missing — for `/`, the agent's home, go-gate's protected paths (`is_protected()`) and the keeper's own
+  (`is_keeper_protected()`: `/etc/keeper`, `/var/lib/keeper`, `/opt/agent-guardrails`, the managed-settings file),
+  checked both against the declared directory itself and against every matched token, so a broader grant
+  (`dir:/etc`) cannot launder a path that resolves inside one of those. Matching resolves symlinks and `..` through
+  the same `real()` every other path check here already uses, so a token that resolves outside the granted
+  directory (a literal `..`, a symlink inside it pointing out) is judged on where it actually points and is not
+  covered; see `docs/design-keeper.md` ("`dir:<path>` targets") for the TOCTOU compromise this accepts, the same
+  class already open for every path check, not a new one. 10 new tests (`go-gate/test_go_gate.py`'s
+  `DirPrefixTarget`): a valid prefix, a look-alike sibling (`news` vs `newsletter`/`news-backup`), a `..` escape, a
+  symlink escape, both protected-path guards (including the broad-`dir:`-reaches-`/etc/keeper` case), `/` and home
+  refused, no wildcard/empty prefix, and the pre-existing bare-path behaviour left untouched -- plus 4 more for
+  `coverage_gap()`/`describe_gap()` itself and one each for the deny message in go-gate's own hook and in keeperd,
+  including the carried-once card context (`test_go_gate.py`'s `Scope`/`Hook`, `keeper/test_keeper.py`'s
+  `StateMachine`). Mutation-checked: 2 deliberate reverts (`describe_gap()` gutted to `""`; the per-token protected
+  re-check dropped from the `dir:` match loop) each turned exactly the test built for it red.
 - **README, CHANGELOG and the IT-leaders pages: made the status lines true again (owner review of PR #13, 17/10).**
   The README and this changelog's intro still said the keeper "runs in observe mode" with block mode as "the next
   step" -- stale since 12/10, when block mode started after its end-to-end dry run. Both now say the real state:

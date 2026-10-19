@@ -116,6 +116,28 @@ Still open, and stated so a reader does not over-trust the gate:
   Until it is fixed: do not declare `--safe-git-repo` on a tree where the agent can create symlinks and you have not
   reviewed what they point at, and read any plan that writes inside a safe repo before approving it: creating the
   symlink there is the step that opens this gap.
+- **`dir:<path>` targets (K-dir, 19/10).** A plan target is normally one path/file/host, matched whole-word (K7) —
+  the operational pain this fixes: a plan written for `targets=web` got refused by an unrelated temp filename or a
+  quoted path one character off from what the plan actually named, and the old refusal reason never said which, so
+  the owner saw a card, approved it, got refused again on the next slightly different path, and so on — "a dozen
+  cards in a day" from one real intent. `dir:<path>` lets a plan explicitly grant a whole subtree instead of one
+  path, shown as such on the approval card (a warning line, like `script`/`delete`/no-targets already get), so the
+  owner is never approving a subtree without seeing that they are. It is refused outright — never matches anything,
+  as if the target were simply missing — for `/`, the agent's home, go-gate's own protected paths
+  (`~/.claude/go-gate`, hooks, settings, secret-guard's config) and the keeper's own system paths (`/etc/keeper`,
+  `/var/lib/keeper`, `/opt/agent-guardrails`, the managed-settings file), and this is checked twice: once against the
+  declared `<path>` itself, and once per matched token, so a broader grant (`dir:/etc`) cannot launder a path that
+  resolves inside one of those (`/etc/keeper/config.json`) just because the declared root is not itself inside one.
+  Matching goes through the same symlink/`..` resolution (`real()`, i.e. `os.path.realpath`) as every other path
+  check here, so a token that resolves outside the granted directory — a literal `..`, or a symlink planted inside it
+  pointing out — is judged on where it actually points, not on its text, and is not covered. The compromise accepted
+  for this: `real()` is evaluated at check time, against the filesystem as it is right then, so a symlink an
+  already-approved plan's own `edit`/`script` actions let the agent plant *after* approval, inside the granted
+  directory, pointing outside it, changes what the grant reaches from that point on — the same TOCTOU class already
+  open for every path check in go-gate (see below), not a new one; planting that symlink is itself a write that
+  needed its own approval first, same reasoning as the safe-git-repo symlink limit above. `dir:` adds no new
+  classifier logic and no new way to reach `script`/`delete` coverage: it only widens how a target string can match,
+  nothing else in `covers()`/`coverage_gap()` changes for it.
 - **TOCTOU on files.** `python3 script.py` is judged on the file keeperd reads; the file can change before it runs.
 - **A process started under an approved plan keeps running after the plan ends.** The keeper gates tool calls, not
   the processes they spawn.

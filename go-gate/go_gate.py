@@ -201,6 +201,21 @@ def is_protected(path):
     return any(r == x or r.startswith(x + os.sep) for x in protected_paths())
 
 
+# K-dir (19/10): the keeper's own system paths, outside the agent's home and normally out of its reach by file
+# permission alone on a real install. A `dir:` target (below) is an explicit, human-approved grant, so it gets its
+# own, second guard here rather than relying only on the filesystem: a misconfigured install must not be the one
+# thing standing between a `dir:` plan and the keeper's state, its bot token, or Claude Code's managed settings.
+KEEPER_OWN_PATHS = ("/etc/keeper", "/var/lib/keeper", "/run/keeper", "/var/run/keeper", "/opt/agent-guardrails",
+                    "/Library/Application Support/ClaudeCode/managed-settings.json",
+                    "/etc/claude-code/managed-settings.json")
+
+
+def is_keeper_protected(path):
+    """True for the keeper's and the installer's own paths (K-dir). See KEEPER_OWN_PATHS."""
+    r = real(path)
+    return any(r == real(x) or r.startswith(real(x) + os.sep) for x in KEEPER_OWN_PATHS)
+
+
 def is_scratch(path):
     """External audit of v0.8 (07/10): judged on the real location, so a symlink in /tmp does not make its target scratch."""
     p = os.path.expanduser(path.strip("'\""))
@@ -1245,42 +1260,109 @@ def touches_git_exec_surface(blob):
     return False
 
 
-def covers(plan, tool, tool_input, cat, text=None):
-    """The plan lists this category and, if it names targets, one of them appears in the action's own text."""
+def coverage_gap(plan, tool, tool_input, cat, text=None):
+    """Why `plan` does not cover this action, as a dict, or None once it does. `covers()` below is this function's
+    yes/no face, kept as one piece of logic so the allow/deny decision and the deny message can never disagree.
+    Shaped so a caller can turn it into a message with describe_gap() -- never with the raw command: every target
+    word in the result has gone through candidate_targets(), which runs safe_words() on each one first."""
     if cat not in plan.get("actions", []):
-        return False
+        return {"category": cat}
     blob0 = text if text is not None else json.dumps(tool_input, ensure_ascii=False)
     home_bin = re.escape(os.path.expanduser("~")) + r"/(?:\.local/)?bin/"
-    if cat != "script" and "script" not in plan.get("actions", []) and (EXEC_DIRS.search(blob0 or "")
-                                                                         or re.search(home_bin, blob0 or "")):
-        return False                           # council review 08/10: an edit plan must not plant ~/bin/cat
-    # R4: writing a repo's git-exec surface (.git/config, hooks, attributes, .gitmodules, or `git config` setting an
-    # exec key) turns a later `git status` into code execution. It needs the same approval as running a program, so a
-    # plan covers it only with actions=script.
-    if cat != "script" and "script" not in plan.get("actions", []) and touches_git_exec_surface(blob0 or ""):
-        return False
+    if cat != "script" and "script" not in plan.get("actions", []):
+        if EXEC_DIRS.search(blob0 or "") or re.search(home_bin, blob0 or ""):
+            return {"category": "script", "why": "writes into a directory whose programs run by name"}
+        # R4: writing a repo's git-exec surface (.git/config, hooks, attributes, .gitmodules, or `git config`
+        # setting an exec key) turns a later `git status` into code execution: same approval as running a program.
+        if touches_git_exec_surface(blob0 or ""):
+            return {"category": "script", "why": "writes a repo's git-exec surface"}
     targets = plan.get("targets") or []
     if not targets:
-        return True
+        return None
     blob = text if text is not None else json.dumps(tool_input, ensure_ascii=False)
     tokens = re.findall(r"[^\s'\"|;&<>()]+", blob)
     # K7: a target matches a whole token or a path segment, never a free substring, so targets=web no longer covers
     # `webserver`, `web-db` or `cobweb`.
     if not any(target_matches(t, tokens) for t in targets):
-        return False
+        return {"targets": candidate_targets(tokens, targets)}
     # External audit of v0.8 (07/10): `docker restart db web` passed with targets=web. For verbs that take several
     # objects, every object must match a target.
     for objs in multi_objects(text or ""):
-        if any(not any(target_matches(t, [o]) for t in targets) for o in objs):
-            return False
-    return True
+        missing = [o for o in objs if not any(target_matches(t, [o]) for t in targets)]
+        if missing:
+            return {"targets": candidate_targets(missing, targets)}
+    return None
+
+
+def covers(plan, tool, tool_input, cat, text=None):
+    """The plan lists this category and, if it names targets, one of them appears in the action's own text."""
+    return coverage_gap(plan, tool, tool_input, cat, text) is None
+
+
+def _looks_like_target(tok):
+    """A path, filename or host-looking word: what is worth telling the human is missing from a plan, not a flag,
+    a bare verb or a number."""
+    if not tok or tok.startswith("-"):
+        return False
+    if re.fullmatch(r"(?:\d{1,3}\.){3}\d{1,3}", tok):
+        return True                                             # an IPv4 host
+    if "/" in tok or tok.startswith(("~", "./", "../")):
+        return True                                             # a path
+    if re.fullmatch(r"(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,24}", tok):
+        return True                                              # a hostname
+    if re.search(r"\.[A-Za-z0-9]{1,8}$", tok) and not re.fullmatch(r"[\d.]+", tok):
+        return True                                             # a filename with an extension
+    return False
+
+
+def candidate_targets(tokens, targets, limit=8):
+    """Target-like words (paths, filenames, hosts) among `tokens` that none of `targets` already covers, in order,
+    deduplicated, capped at `limit` (a hint for the human, not a dump of the command) -- anything secret-shaped is
+    masked away by safe_words() before it is ever returned, so this is safe to put in a deny reason or a card."""
+    seen, out = set(), []
+    for tok in tokens:
+        bare = tok.strip("'\"")
+        if not _looks_like_target(bare) or any(target_matches(t, [bare]) for t in targets):
+            continue
+        shown = safe_words(bare, 80)
+        if not shown or shown == "<…>" or shown in seen:
+            continue
+        seen.add(shown)
+        out.append(shown)
+        if len(out) >= limit:
+            break
+    return out
+
+
+def describe_gap(gap, plan):
+    """The deny reason's detail: what `plan` does not cover, from coverage_gap()'s result. Empty once covered."""
+    if not gap:
+        return ""
+    if "category" in gap:
+        allowed = ", ".join(plan.get("actions") or []) or "none"
+        why = f" ({gap['why']})" if gap.get("why") else ""
+        return f"missing action '{gap['category']}'{why}; plan actions: {allowed}"
+    have = ", ".join(plan.get("targets") or []) or "none"
+    missing = ", ".join(gap.get("targets") or []) or "no path, filename or host recognised in the command"
+    return f"targets not covered: {missing}; plan targets: {have}"
+
+
+DIR_PREFIX = re.compile(r"(?i)^dir:")
 
 
 def target_matches(t, tokens):
-    """A plan target against the words of the action. A path target (with a /) matches a word equal to it or under it
-    (a prefix covers its sub-paths, kept on purpose). A name target matches a whole word or one of its /@:,-free
-    segments, never a substring."""
-    t = t.strip("'\"").lower().rstrip("/")
+    """A plan target against the words of the action. `dir:<path>` (K-dir, 19/10) is an explicit grant that covers
+    everything under `<path>`: never implicit (it needs the literal `dir:` marker, shown as such to the human
+    approving the card), never a protected path (go-gate's own state/hooks/settings, or the keeper's: see
+    is_protected()/is_keeper_protected()), and never `/` or the agent's home -- those are not a directory, they are
+    everything, and `dir:` must stay a narrower grant than no targets at all. A plain path target (with a /) also
+    matches a word equal to it or under it (a prefix covers its sub-paths, kept on purpose, predating `dir:`). A
+    name target matches a whole word or one of its /@:,-free segments, never a substring."""
+    raw = t.strip("'\"")
+    m = DIR_PREFIX.match(raw)
+    if m:
+        return _dir_prefix_matches(raw[m.end():], tokens)
+    t = raw.lower().rstrip("/")
     if not t:
         return False
     if "/" in t or t.startswith(("~", "./", "../")):
@@ -1293,6 +1375,27 @@ def target_matches(t, tokens):
     for tok in tokens:
         tok = tok.strip("'\"").lower()
         if tok == t or t in re.split(r"[/@:,]+", tok):
+            return True
+    return False
+
+
+def _dir_prefix_matches(raw_dir, tokens):
+    """K-dir: the path half of a `dir:<path>` target. Resolved through symlinks and `..` the same way as every
+    other path check here (real()), so a token escaping the directory (a symlink inside it pointing out, or a
+    literal `..`) resolves to its real, outside location and no longer starts with the directory's own real path --
+    it is judged on where it actually points, not on the text. Case is kept as given (unlike the plain-path branch
+    above): real paths are case-sensitive on the platforms this runs on, and lower-casing here could fold two
+    different directories into one."""
+    raw_dir = raw_dir.strip("'\"").rstrip("/")
+    if not raw_dir or any(c in raw_dir for c in "*$"):
+        return False                                   # no wildcard, no empty prefix: one explicit real path
+    base = real(raw_dir)
+    if base in ("/", real("~")) or is_protected(base) or is_keeper_protected(base):
+        return False
+    for tok in tokens:
+        r = real(tok.strip("'\""))
+        if (r == base or r.startswith(base + os.sep)) and not is_protected(r) and not is_keeper_protected(r):
+            # a broad dir: (e.g. /etc) must not launder a path that is itself protected or the keeper's own
             return True
     return False
 
@@ -1448,12 +1551,14 @@ def on_pre_tool(data, cfg, state):
     if act and act.get("expires", 0) < time.time():
         state.pop("active", None)
         act = None
-    cat, ok = None, bool(act)
+    cat, ok, gap = None, bool(act), None
     for k, d, st in items:                              # every change in the call must be inside the plan
         cat, detail = category(tool, ti, k, d), d
-        if not (act and covers(act, tool, ti, cat, st)):
+        gap = coverage_gap(act, tool, ti, cat, st) if act else {"category": cat}
+        if gap:
             ok = False
             break
+        gap = None                                      # this item is covered; keep checking the rest
     if tool == "Bash":
         head = " ; ".join(dict.fromkeys(command_words(st) for _k, _d, st in items if st)) or "bash"
     else:
@@ -1467,7 +1572,8 @@ def on_pre_tool(data, cfg, state):
            "Propose the plan to the user, ending with a line 'Scope: id=… ; targets=… ; actions=" + cat + " ; ttl=…', "
            "and wait for their GO.")
     if act:
-        why = f"go-gate: the approved plan '{act.get('id')}' does not cover this {cat} action ({detail[:60]}). Ask the user to extend it."
+        why = (f"go-gate: the approved plan '{act.get('id')}' does not cover this {cat} action ({detail[:60]}): "
+               f"{describe_gap(gap, act)}. Ask the user to extend it.")
     return "deny", why
 
 

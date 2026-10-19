@@ -43,6 +43,8 @@ MESSAGES = {
         "warn_script": "⚠️ script: the agent may run ANY program during this plan.",
         "warn_delete": "⚠️ delete: the agent may delete files.",
         "warn_no_targets": "⚠️ no targets: the actions apply to everything.",
+        "warn_dir_prefix": "⚠️ {dirs}: covers everything under that directory, not just one path.",
+        "card_context": "Requested after a refusal: the active plan does not cover {gap}.",
         "card_stop_note": "Stop ends the plan; it does not stop a process already started.",
         "card_explain": "The agent's explanation:",
         "btn_approve": "✅ Approve",
@@ -111,6 +113,8 @@ MESSAGES = {
         "warn_script": "⚠️ script : l'agent peut lancer N'IMPORTE QUEL programme pendant ce plan.",
         "warn_delete": "⚠️ delete : l'agent peut supprimer des fichiers.",
         "warn_no_targets": "⚠️ aucune cible : les actions s'appliquent à tout.",
+        "warn_dir_prefix": "⚠️ {dirs} : couvre tout le contenu de ce répertoire, pas un seul chemin.",
+        "card_context": "Demandé après un refus : le plan actif ne couvre pas {gap}.",
         "card_stop_note": "Arrêter met fin au plan ; cela n'interrompt pas un processus déjà lancé.",
         "card_explain": "Explication de l'agent :",
         "btn_approve": "✅ Approuver",
@@ -215,11 +219,17 @@ def render_plan_card(lang, p):
         warn += t(lang, "warn_delete") + "\n"
     if not plan["targets"]:
         warn += t(lang, "warn_no_targets") + "\n"
+    dirs = [tg for tg in plan["targets"] if tg.lower().startswith("dir:")]
+    if dirs:                                             # K-dir: a subtree grant must be visible, never silent
+        warn += t(lang, "warn_dir_prefix", dirs=", ".join(dirs)) + "\n"
     head = "\n".join([t(lang, "card_head"), t(lang, "card_plan", id=plan.get("id") or "-"),
                       t(lang, "card_targets", targets=", ".join(plan["targets"]) or t(lang, "card_any")),
                       t(lang, "card_actions", actions=", ".join(plan["actions"])),
                       t(lang, "card_duration", ttl=plan["ttl"]), t(lang, "card_fingerprint", fp=h)]) + "\n"
-    head += warn + t(lang, "card_stop_note") + "\n———\n" + t(lang, "card_explain") + "\n"
+    head += warn
+    if p.get("context"):                                 # this proposal follows a refusal (item 2): say what of it
+        head += t(lang, "card_context", gap=p["context"]) + "\n"
+    head += t(lang, "card_stop_note") + "\n———\n" + t(lang, "card_explain") + "\n"
     kb = {"inline_keyboard": [[{"text": t(lang, "btn_approve"), "callback_data": f"approve:{h}:{p['nonce']}"},
                                {"text": t(lang, "btn_reject"), "callback_data": f"reject:{h}:{p['nonce']}"}],
                               [{"text": t(lang, "btn_stop"), "callback_data": "stop:all"}]]}
@@ -568,7 +578,11 @@ class Keeper:
         phash = hashlib.sha256(body.encode()).hexdigest()
         nonce = secrets.token_hex(8)
         pending = {"plan": plan, "text": (text or "")[:3000], "hash": phash, "nonce": nonce, "proposed_at": now}
-        self.session(sid)["pending"] = pending
+        s = self.session(sid)
+        context = s.pop("last_gap", None)     # item 2: this proposal may follow a refusal; say what of it, once
+        if context:
+            pending["context"] = context
+        s["pending"] = pending
         self.state["proposals"] = recent + [now]
         self.save()
         self.log({"event": "proposed", "session": sid, "plan": plan.get("id"), "hash": phash[:12]})
@@ -625,7 +639,8 @@ class Keeper:
             self.save()
         for k, d, st in items:
             cat = self.gate.category(tool, tool_input, k, d)
-            if not (act and self.gate.covers(act["plan"], tool, tool_input, cat, st)):
+            gap = self.gate.coverage_gap(act["plan"], tool, tool_input, cat, st) if act else {"category": cat}
+            if gap:
                 self.log({"event": "denied" if self.cfg["mode"] == "block" else "would-deny", "session": sid,
                           "tool": tool, "category": cat, "shape": command_shape(tool, st, cat),
                           "plan": act["plan"].get("id") if act else None})
@@ -634,7 +649,11 @@ class Keeper:
                 why = (f"keeper: this is a change ({cat}) and no approved plan covers it. Propose a plan with "
                        "keeper-propose; the human approves it on the keeper bot.")
                 if act:
-                    why = f"keeper: the approved plan '{act['plan'].get('id')}' does not cover this {cat} action."
+                    detail_gap = self.gate.describe_gap(gap, act["plan"])
+                    why = (f"keeper: the approved plan '{act['plan'].get('id')}' does not cover this {cat} action: "
+                           f"{detail_gap}.")
+                    s["last_gap"] = detail_gap           # surfaced on the next proposal's card (item 2), once
+                    self.save()
                 return {"decision": "deny", "reason": why}
         self.log({"event": "allowed", "session": sid, "tool": tool, "plan": act["plan"].get("id")})
         return {"decision": "allow", "reason": ""}

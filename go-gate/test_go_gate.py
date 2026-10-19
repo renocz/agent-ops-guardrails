@@ -1,5 +1,5 @@
 """Offline tests for go_gate.py: the classifier, the GO parsing, the scope and the hook decisions."""
-import json, os, subprocess, sys, tempfile, time, unittest
+import json, os, shutil, subprocess, sys, tempfile, time, unittest
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import go_gate as g
@@ -250,6 +250,7 @@ def run_hook(event, gate_dir):
     out = json.loads(r.stdout) if r.stdout.strip() else {}
     run_hook.context = out.get("hookSpecificOutput", {}).get("additionalContext")
     run_hook.notice = out.get("systemMessage")
+    run_hook.reason = out.get("hookSpecificOutput", {}).get("permissionDecisionReason")
     return r.returncode, out.get("hookSpecificOutput", {}).get("permissionDecision", "allow")
 
 
@@ -420,6 +421,132 @@ class Scope(unittest.TestCase):
                                  "ls /opt/stacks/web/compose.yml"))
         self.assertFalse(g.covers(p2, "Bash", {"command": "ls /opt/stacks/webx"}, "deploy", "ls /opt/stacks/webx"))
 
+    def test_coverage_gap_names_the_missing_action(self):
+        plan = {"targets": ["web"], "actions": ["deploy"]}
+        gap = g.coverage_gap(plan, "Bash", {"command": "git push origin web"}, "git", "git push origin web")
+        self.assertEqual(gap, {"category": "git"})
+        self.assertIn("missing action 'git'", g.describe_gap(gap, plan))
+        self.assertIn("plan actions: deploy", g.describe_gap(gap, plan))
+        self.assertEqual(g.describe_gap(None, plan), "")             # covered: nothing to say
+
+    def test_coverage_gap_names_target_like_words_not_covered(self):          # the operational pain this fixes
+        plan = {"targets": ["web"], "actions": ["deploy"]}
+        cmd = "docker compose -f /opt/stacks/news/docker-compose.yml restart news.example.com"
+        gap = g.coverage_gap(plan, "Bash", {"command": cmd}, "deploy", cmd)
+        self.assertEqual(gap["targets"], ["/opt/stacks/news/docker-compose.yml", "news.example.com"])
+        text = g.describe_gap(gap, plan)
+        self.assertIn("/opt/stacks/news/docker-compose.yml", text)
+        self.assertIn("news.example.com", text)
+        self.assertIn("plan targets: web", text)
+        self.assertNotIn("-f", text)                      # a bare flag is never named as a missing target
+
+    def test_candidate_targets_never_returns_secret_shaped_text(self):
+        plan = {"targets": ["web"], "actions": ["deploy"]}
+        secret = "verysecretpassword12345"
+        cmd = f"curl https://user:{secret}@api.example.com/deploy.php"
+        gap = g.coverage_gap(plan, "Bash", {"command": cmd}, "deploy", cmd)
+        joined = " ".join(gap["targets"])
+        self.assertNotIn(secret, joined)
+
+    def test_coverage_gap_still_flags_the_exec_dir_and_git_surface_carveouts(self):    # no protection reduced
+        plan = {"targets": [], "actions": ["edit"]}
+        cmd = "echo x > ~/bin/cat"
+        gap = g.coverage_gap(plan, "Bash", {"command": cmd}, "edit", cmd)
+        self.assertEqual(gap["category"], "script")
+        cmd2 = "git config core.fsmonitor /tmp/x"
+        gap2 = g.coverage_gap(plan, "Bash", {"command": cmd2}, "edit", cmd2)
+        self.assertEqual(gap2["category"], "script")
+
+
+class DirPrefixTarget(unittest.TestCase):
+    """K-dir (19/10): `dir:<path>` is an explicit, opt-in subtree grant. Never an implicit one (a bare path keeps
+    its pre-existing prefix behaviour, exercised above), never a protected path, never `/` or the home directory."""
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp(prefix="dirtarget-")
+
+    def tearDown(self):
+        shutil.rmtree(self.root, ignore_errors=True)
+
+    def _plan(self, path):
+        return {"targets": [f"dir:{path}"], "actions": ["deploy"]}
+
+    def test_valid_prefix_covers_the_subtree(self):
+        sub = os.path.join(self.root, "news")
+        os.makedirs(sub)
+        file = os.path.join(sub, "docker-compose.yml")
+        self.assertTrue(g.covers(self._plan(sub), "Bash", {"command": f"restart {file}"}, "deploy", f"restart {file}"))
+        nested = os.path.join(sub, "sub", "x")
+        self.assertTrue(g.covers(self._plan(sub), "Bash", {"command": f"restart {nested}"}, "deploy", f"restart {nested}"))
+
+    def test_lookalike_sibling_is_not_covered(self):              # "news" must not cover "newsletter"
+        sub = os.path.join(self.root, "news")
+        os.makedirs(sub)
+        sibling = os.path.join(self.root, "newsletter", "x")
+        self.assertFalse(g.covers(self._plan(sub), "Bash", {"command": f"restart {sibling}"}, "deploy",
+                                  f"restart {sibling}"))
+
+    def test_dotdot_escape_is_not_covered(self):
+        sub = os.path.join(self.root, "news")
+        os.makedirs(sub)
+        escape = os.path.join(sub, "..", "..", "etc", "passwd")
+        self.assertFalse(g.covers(self._plan(sub), "Bash", {"command": f"cat {escape}"}, "deploy", f"cat {escape}"))
+
+    def test_symlink_escape_is_not_covered(self):
+        sub = os.path.join(self.root, "news")
+        outside = os.path.join(self.root, "outside")
+        os.makedirs(sub)
+        os.makedirs(outside)
+        secretfile = os.path.join(outside, "secret")
+        wtext(secretfile, "x")
+        link = os.path.join(sub, "escape")
+        os.symlink(outside, link)
+        via_link = os.path.join(link, "secret")
+        self.assertFalse(g.covers(self._plan(sub), "Bash", {"command": f"cat {via_link}"}, "deploy",
+                                  f"cat {via_link}"))
+
+    def test_protected_path_is_never_granted_by_dir_prefix(self):
+        env = dict(os.environ, GO_GATE_DIR=self.root)
+        old = os.environ.get("GO_GATE_DIR")
+        os.environ["GO_GATE_DIR"] = self.root
+        try:
+            target = os.path.join(self.root, "state.json")
+            self.assertFalse(g.covers(self._plan(self.root), "Bash", {"command": f"echo x > {target}"}, "deploy",
+                                      f"echo x > {target}"))
+        finally:
+            if old is None:
+                os.environ.pop("GO_GATE_DIR")
+            else:
+                os.environ["GO_GATE_DIR"] = old
+
+    def test_keeper_own_paths_are_never_granted_by_dir_prefix(self):
+        self.assertTrue(g.is_keeper_protected("/etc/keeper/config.json"))
+        self.assertTrue(g.is_keeper_protected("/opt/agent-guardrails/lib/go_gate.py"))
+        self.assertFalse(g.covers(self._plan("/etc"), "Bash", {"command": "cat /etc/keeper/config.json"}, "deploy",
+                                  "cat /etc/keeper/config.json"))
+
+    def test_root_and_home_are_too_broad_to_grant(self):
+        self.assertFalse(g.covers(self._plan("/"), "Bash", {"command": "rm -rf /x"}, "deploy", "rm -rf /x"))
+        self.assertFalse(g.covers(self._plan("~"), "Bash", {"command": "rm -rf ~/x"}, "deploy", "rm -rf ~/x"))
+
+    def test_disguised_filename_does_not_match_a_sibling_prefix(self):
+        sub = os.path.join(self.root, "news")
+        os.makedirs(sub)
+        disguise = os.path.join(self.root, "news-backup", "x")           # textually starts with "news", not a sub-path
+        self.assertFalse(g.covers(self._plan(sub), "Bash", {"command": f"restart {disguise}"}, "deploy",
+                                  f"restart {disguise}"))
+
+    def test_no_wildcard_no_empty_prefix(self):
+        self.assertFalse(g.target_matches("dir:", ["/opt/x"]))
+        self.assertFalse(g.target_matches("dir:/opt/*", ["/opt/x"]))
+
+    def test_bare_path_without_dir_marker_is_unaffected(self):            # the pre-existing, non-explicit behaviour
+        sub = os.path.join(self.root, "news")
+        os.makedirs(sub)
+        file = os.path.join(sub, "x")
+        plan = {"targets": [sub], "actions": ["deploy"]}
+        self.assertTrue(g.covers(plan, "Bash", {"command": f"restart {file}"}, "deploy", f"restart {file}"))
+
 
 class Hook(unittest.TestCase):
     def setUp(self):
@@ -588,6 +715,16 @@ class Hook(unittest.TestCase):
         self.prompt(telegram("GO"))
         self.assertEqual(self.act("docker restart web"), "allow")
         self.assertEqual(self.act("docker restart db web"), "deny")   # GG-07
+
+    def test_deny_reason_names_what_is_missing(self):
+        self.propose("Scope: id=p1 ; targets=web ; actions=deploy ; ttl=30")
+        self.prompt(telegram("GO"))
+        self.assertEqual(self.act("docker compose -f /opt/stacks/db/compose.yml restart"), "deny")
+        self.assertIn("targets not covered: /opt/stacks/db/compose.yml", run_hook.reason)
+        self.assertIn("plan targets: web", run_hook.reason)
+        self.assertEqual(self.act("git push origin web"), "deny")
+        self.assertIn("missing action 'git'", run_hook.reason)
+        self.assertIn("plan actions: deploy", run_hook.reason)
 
     def test_gate_state_cannot_be_written_through_a_link(self):
         link = os.path.join(tempfile.mkdtemp(), "x.json")

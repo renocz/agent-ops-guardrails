@@ -94,6 +94,29 @@ class StateMachine(Base):
         self.assertFalse(self.allowed(*bash("docker restart db web")))          # every object must be in scope
         self.assertFalse(self.allowed(*bash("git push origin main")))           # category not approved
 
+    def test_deny_reason_names_what_is_missing(self):
+        self.approve("id=p1 ; targets=web ; actions=deploy ; ttl=30")
+        r = self.k.check("s1", *bash("docker compose -f /opt/stacks/db/compose.yml restart"))
+        self.assertIn("targets not covered: /opt/stacks/db/compose.yml", r["reason"])
+        self.assertIn("plan targets: web", r["reason"])
+        r2 = self.k.check("s1", *bash("git push origin web"))
+        self.assertIn("missing action 'git'", r2["reason"])
+        self.assertIn("plan actions: deploy", r2["reason"])
+
+    def test_denial_context_is_surfaced_once_on_the_next_proposal_card(self):
+        self.approve("id=p1 ; targets=web ; actions=deploy ; ttl=30")
+        self.k.check("s1", *bash("docker compose -f /opt/stacks/db/compose.yml restart"))
+        ok, _no = self.plan("id=p2 ; targets=db ; actions=deploy")
+        _sid, p = self.bot.plans[-1]
+        self.assertIn("/opt/stacks/db/compose.yml", p["context"])
+        text, _kb = keeperd.render_plan_card("en", p)
+        self.assertIn("Requested after a refusal", text)
+        self.assertIn("/opt/stacks/db/compose.yml", text)
+        # consumed: a later, unrelated proposal in the same session does not carry stale context
+        self.k.decide(OWNER, CHAT, ok)
+        ok2, _no2 = self.plan("id=p3 ; targets=db ; actions=deploy")
+        self.assertNotIn("context", self.bot.plans[-1][1])
+
     def test_plan_expires(self):
         self.approve("id=p1 ; targets=web ; actions=deploy ; ttl=30")
         self.clock.t += 31 * 60
