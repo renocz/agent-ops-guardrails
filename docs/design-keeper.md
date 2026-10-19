@@ -56,6 +56,17 @@ change or forge that approval**, even if it tries. Output filtering (secret-guar
    before. Then the plan becomes active for its TTL (default 1 h, max 4 h).
 4. On every PreToolUse, the hook sends `{session, tool, input}` to keeperd. keeperd classifies, checks the active plan
    of that session (every object in scope, as in v0.9.1), answers allow / deny with a reason, and logs it.
+4a. `keeper-propose --wait SECONDS` (v1.0): after keeperd records the proposal exactly as in step 1-2, the hook
+   polls a new, read-only socket op, `status`, by the plan's fingerprint only (never its text or scope), until a
+   human decision lands or `wait_max_sec` (1800 by default) passes. Still one Bash tool call, still denied (there is
+   nothing to run), still the same socket -- no new channel, no change to what counts as approved. `status`'s own
+   vocabulary is deliberately closed to four words (pending/approved/rejected/expired); a plan keeperd never saw is
+   reported "expired" too, so a socket client (bounded to the configured agent uid regardless) cannot use a fifth,
+   distinguishable "unknown" to probe for live fingerprints. The decision itself is still written only by `decide()`
+   (step 3), from a button press on the keeper bot; `status` only reads what `decide()` already wrote, so a hook
+   that waits can shorten how long the agent takes to notice a decision, never change what the decision was. The
+   wait does not hold keeperd's approval lock: each poll takes it only for the instant it reads the state, so a
+   session waiting on its own proposal never blocks a button press, another session's check, or `/status`/`/stop`.
 5. The socket is owned by `_keeper`, group `keeperclients` (the agent's user), mode 660;
    keeperd reads the peer's uid (`getpeereid`) and only answers the configured agent user.
 6. Revocation: the **Stop** button on any approval message ends every active plan, in every session, at once. It does not stop a process already started; that is stated in the message.
@@ -210,6 +221,11 @@ shapes, not arguments. That is the same exposure as the approval cards.
 - Unit tests for keeperd (state machine, hash binding, single use, TTL, owner check), with a fake Telegram.
 - An adversarial test as the agent's user: try to write the state, call the socket with a fake approval, replay a
   callback, edit the managed settings, kill the daemon. Each must fail, and the failure must be logged.
+- `keeper-propose --wait` (v1.0): the `status` op's peer-uid gate and closed vocabulary, the ledger isolating two
+  simultaneous plans, a late click still read as expired, pruning by age, and the end-to-end wait against a real
+  socket and a real hook subprocess -- approved/rejected/expired while still waiting, the wait itself running out,
+  a daemon that is down from the start or stops answering mid-wait. Each guard above is mutation-checked (the
+  relevant line disabled or reordered in a scratch copy of keeperd.py): the test that exercises it fails.
 - A week in block mode on the Mac before v1.0.
 
 ## Open questions for the review

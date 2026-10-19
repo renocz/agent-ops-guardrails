@@ -6,6 +6,26 @@ One version scheme: **a repository tag per release**. Components have no version
 
 Next: finish the block-mode trial (started 12/10/2026, after the end-to-end dry run of refusal, approval, expiry, replay and a Telegram outage) -- a few days of varied real work, no deadlock, an acceptable number of cards -- then v1.0.
 
+- **keeper: `keeper-propose --wait SECONDS`, so the agent's session learns a plan was decided without re-running
+  its own command (owner decision, 19/10).** Until now, the only way to find out a plan had been approved was
+  for the agent to run `keeper-status` again and read its own reply. `--wait` (default: no wait, exactly the prior
+  behaviour) makes the SAME Bash tool call that proposed the plan stay blocked -- on the same Unix socket, no new
+  channel -- until a human decides or `wait_max_sec` (1800s by default) passes, then returns one of four outcomes
+  in its (still denied; nothing ever runs) reason: approved, rejected, expired before a decision, or the wait
+  itself running out while still pending. Nothing about what counts as approved changes: `decide()` is untouched,
+  and the new, read-only `status` socket op it feeds only ever reports what `decide()` already wrote, by the
+  plan's fingerprint, never its text or scope, through the same peer-uid gate as every other op. Its own
+  vocabulary is deliberately closed to four words (pending/approved/rejected/expired) -- a fingerprint keeperd
+  never saw answers "expired" too, so there is no fifth, distinguishable "unknown" a socket client could use to
+  probe for live fingerprints. The wait polls rather than holds keeperd's lock, so a session waiting on its own
+  proposal cannot block a button press, another session's check, or `/stop`. `keeper-propose`'s hourly limit,
+  hash, nonce and replay protection are all unchanged; `--wait` is parsed and clamped on the hook side only, and
+  never enters the plan's fingerprint. Tested (`test_keeper.py`, `test_block_dryrun.py`): approved, rejected,
+  expired (both a late click and the daemon noticing on its own, with nobody clicking anything), the wait running
+  out while still pending, two simultaneous plans tracked independently, an unknown plan, a daemon that is down
+  from the start or stops answering mid-wait, and that the default (no `--wait`) behaves exactly as before.
+  Mutation-checked: the approve-branch ledger write disabled, and the `status` op's peer-uid check reordered past
+  it, each in a scratch copy -- the relevant test fails both times.
 - **README, CHANGELOG and the IT-leaders pages: made the status lines true again (owner review of PR #13, 17/10).**
   The README and this changelog's intro still said the keeper "runs in observe mode" with block mode as "the next
   step" -- stale since 12/10, when block mode started after its end-to-end dry run. Both now say the real state:

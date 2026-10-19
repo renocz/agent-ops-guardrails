@@ -22,6 +22,14 @@ state, replay a GO or remove the hook. The keeper moves the approval out of the 
 - An approval is a button press, received by keeperd from Telegram. It is checked against the owner id and the chat,
   is bound to that plan's fingerprint, works once only, and must come within 2 h. The plan then stays active for its
   TTL: 1 h by default, 4 h at most. Anything the agent writes in its conversation approves nothing.
+- Add `--wait SECONDS` to `keeper-propose` and the same Bash tool call blocks (up to `wait_max_sec`, 1800 by
+  default) until you decide, instead of the agent having to run `keeper-status` again to find out. The hook polls
+  keeperd's `status` op on the same socket, by the plan's fingerprint only -- never the plan's text or scope, and
+  never a new channel. The decision itself still comes only from a button press on the keeper bot, checked exactly
+  as above; `--wait` only changes how soon the agent's own Bash call learns about it. Leaving `--wait` out behaves
+  exactly as before. The tool call always ends up denied either way (there is nothing to run): the reason tells the
+  agent the plan was approved, rejected, expired before you decided, or that the wait itself ran out while still
+  pending (propose again, or with a longer `--wait`, to keep checking).
 - The PreToolUse hook (`keeper_client.py`) only forwards the raw tool call to keeperd and applies its answer. keeperd
   classifies the call with the go-gate classifier (root-owned copy).
 - The hook is registered in Claude Code's root-owned **managed settings**. Its code lives in
@@ -156,4 +164,12 @@ cover:
   the agent's free-form text or the raw command, that `/stop` and the card's button revoke the same way, and that
   approve/reject/mode are never reachable as a typed command; the "/" menu registration (chat-scoped, non-fatal);
 - the French and English messages (every key in both languages, the English card unchanged), the startup line by mode,
-  and `keeper-summary`.
+  and `keeper-summary`;
+- `keeper-propose --wait`: the `status` op's closed vocabulary (pending/approved/rejected/expired, never the plan
+  itself) and its peer-uid gate, two plans tracked independently, a late click still counted as expired, the
+  ledger pruned by age, and the hook's own `wait_for_decision()` against a real socket (approved/rejected/expired
+  while still waiting, the wait itself running out, a daemon that is down or stops answering mid-wait).
+
+`python3 test_block_dryrun.py` adds the same `--wait` scenarios end to end, through the real hook subprocess: the
+Bash tool call stays blocked on the open socket while the card is still pending, and returns once the owner's
+click (or the plan's own age limit) resolves it, or once the wait itself runs out.

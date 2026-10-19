@@ -23,7 +23,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 DEFAULTS = {"socket": "/var/run/keeper/keeper.sock", "state_dir": "/var/lib/keeper", "agent_uids": [],
             "owner_id": None, "chat_id": None, "bot_token_file": "/etc/keeper/bot.token",
             "ttl_default_min": 60, "ttl_max_min": 240, "pending_max_age_min": 120, "max_proposals_per_hour": 3,
-            "mode": "block", "agent_home": None, "client_group": None, "safe_git_repos": [], "lang": "en"}
+            "mode": "block", "agent_home": None, "client_group": None, "safe_git_repos": [], "lang": "en",
+            "wait_max_sec": 1800}
 
 
 # ---------------------------------------------------------------------------------------------------------------
@@ -529,6 +530,7 @@ class Keeper:
             self.state = json.load(open(self.state_path))
         except (OSError, ValueError):
             self.state = {"sessions": {}, "used_nonces": [], "proposals": []}
+        self.state.setdefault("plan_status", {})               # hash12 -> {state, at}; see _record_plan_status
 
     def save(self):
         tmp = self.state_path + ".tmp"
@@ -584,17 +586,22 @@ class Keeper:
             toks = shlex.split(cmd)
         except (ValueError, TypeError):
             return None
-        if not toks or os.path.basename(toks[0]) not in ("keeper-propose", "keeper-status") \
+        name = os.path.basename(toks[0]) if toks else ""
+        if name not in ("keeper-propose", "keeper-status") \
                 or os.path.dirname(toks[0]) not in ("", "/opt/agent-guardrails/bin"):
             return None
+        allowed = ("--scope", "--text", "--wait") if name == "keeper-propose" else ("--scope", "--text")
         opts, i = {}, 1
         while i < len(toks):
-            if toks[i] in ("--scope", "--text") and i + 1 < len(toks):
+            if toks[i] in allowed and i + 1 < len(toks):
                 opts[toks[i][2:]] = toks[i + 1]
                 i += 2
             else:
                 return None
-        return os.path.basename(toks[0]), opts
+        if "wait" in opts and not re.fullmatch(r"\d{1,7}", opts["wait"]):     # a plain non-negative integer only
+            return None                                                      # (clamped to wait_max_sec in check());
+            # anything else (negative, decimal, non-numeric) is not recognized, same fallback as any other option
+        return name, opts
 
     def check(self, sid, tool, tool_input, cwd=None):
         self.gate.CWD = cwd                                            # the dir the agent ran the tool in (K6)
@@ -602,12 +609,18 @@ class Keeper:
         if kc and kc[0] == "keeper-status":
             return {"decision": "deny", "reason": "keeper status (nothing was run): " + json.dumps(self.status(sid))}
         if kc:
-            out = self.propose(sid, kc[1].get("text", ""), kc[1].get("scope", ""))
+            opts = kc[1]
+            out = self.propose(sid, opts.get("text", ""), opts.get("scope", ""))
             why = (f"keeper: plan sent to the human for approval (fingerprint {out['hash']}). Nothing was run. Wait for "
                    "their decision, then retry the actions." if out["ok"] else f"keeper: proposal refused: {out['reason']}")
             res = {"decision": "deny", "reason": why}
             if out.get("_notify"):
                 res["_notify"] = out["_notify"]
+            if out["ok"] and "wait" in opts:
+                # The hook polls keeperd's "status" op (by fingerprint only) for up to this many seconds instead of
+                # the agent having to re-run keeper-status itself. Clamped here, never inside propose(): wait is a
+                # per-call client preference, not part of the plan, and must never enter the plan's hash/scope.
+                res["hash"], res["wait"] = out["hash"], min(int(opts["wait"]), self.cfg["wait_max_sec"])
             return res
         try:
             kind, detail = self.gate.classify(tool, tool_input)
@@ -645,6 +658,39 @@ class Keeper:
         if act and act["expires"] > self.now():
             return {"active": act["plan"], "expires_in_min": int((act["expires"] - self.now()) / 60)}
         return {"active": None, "pending": bool(s.get("pending"))}
+
+    # ----- plan status by fingerprint (keeper-propose --wait) ----------------------------------------------------
+    # A read-only view of what decide() already decided, keyed by the plan's hash12 instead of a session. Exists so
+    # a client can wait for a decision without re-running keeper-status itself. The vocabulary is closed to exactly
+    # four words -- pending/approved/rejected/expired -- and "never proposed" / "ledger entry aged out" both answer
+    # "expired" too: a fifth, distinguishable "unknown" would let a socket client tell those two apart and probe
+    # for live fingerprints. Never includes the plan's text or scope (council constraint: only the state travels).
+    PLAN_STATUS_RETENTION_SEC = 86400
+
+    def _record_plan_status(self, h, state):
+        """Called from decide() only (approve/reject/expired-on-decide), never from anything the socket drives: the
+        ledger is write-once per outcome and has no path back to "pending", so a socket client can only ever learn
+        of a decision decide() already made, never cause one. Bounded by age, not by a click: unlike used_nonces
+        (bounded by count because a replay is cheap to attempt), a decision is written at most once per plan, so
+        the only growth to bound here is time."""
+        now = self.now()
+        self.state["plan_status"] = {k: v for k, v in self.state["plan_status"].items()
+                                      if now - v["at"] < self.PLAN_STATUS_RETENTION_SEC}
+        self.state["plan_status"][h] = {"state": state, "at": now}
+
+    def plan_status(self, h):
+        """pending / approved / rejected / expired for a plan's hash12 -- never the plan itself. Read-only: it does
+        not pop or mutate a pending entry even past its age limit, so it can never race decide()'s own, separate
+        expiry check (which still applies when a late approval actually arrives)."""
+        rec = self.state["plan_status"].get(h)
+        if rec:
+            return rec["state"]
+        for s in self.state["sessions"].values():
+            p = s.get("pending")
+            if p and p["hash"][:12] == h:
+                age = self.now() - p["proposed_at"]
+                return "expired" if age > self.cfg["pending_max_age_min"] * 60 else "pending"
+        return "expired"                                        # never proposed, or its ledger entry aged out
 
     # ----- human side (only reached from the bot) ---------------------------------------------------------------
     def is_owner(self, from_id, chat_id):
@@ -804,15 +850,18 @@ class Keeper:
                 self.state["used_nonces"] = (self.state["used_nonces"] + [nonce])[-1000:]
                 s.pop("pending", None)
                 if action == "reject":
+                    self._record_plan_status(h, "rejected")
                     self.save()
                     self.log({"event": "rejected", "session": sid, "plan": p["plan"].get("id")})
                     return self.msg("ans_rejected")
                 if self.now() - p["proposed_at"] > self.cfg["pending_max_age_min"] * 60:
+                    self._record_plan_status(h, "expired")
                     self.save()
                     self.log({"event": "approval-of-expired-plan-ignored", "session": sid, "plan": p["plan"].get("id")})
                     return self.msg("ans_expired")
                 s["active"] = {"plan": p["plan"], "hash": p["hash"], "approved_at": self.now(),
                                "expires": self.now() + p["plan"]["ttl"] * 60}
+                self._record_plan_status(h, "approved")
                 self.save()
                 self.log({"event": "approved", "session": sid, "plan": p["plan"].get("id"), "hash": h})
                 return self.msg("ans_approved", ttl=p["plan"]["ttl"])
@@ -1051,6 +1100,15 @@ def serve(keeper, cfg, ready=None):
             if uid not in cfg["agent_uids"]:                            # empty list = nobody (fail closed)
                 keeper.log({"event": "socket-peer-refused", "uid": uid})
                 return self.reply({"decision": "deny", "reason": "keeper: unknown client"})
+            if req.get("op") == "status":
+                # keeper-propose --wait polls this instead of re-running keeper-status: by fingerprint only, never
+                # the plan itself. Same peer check as "check" above; no lock_scope label needed, the read is brief.
+                h = req.get("hash")
+                if not isinstance(h, str) or not re.fullmatch(r"[0-9a-f]{12}", h):
+                    return self.reply({"error": "bad hash"})
+                with keeper.lock_scope("status"):
+                    state = keeper.plan_status(h)
+                return self.reply({"state": state})
             if req.get("op") != "check" or not isinstance(req.get("input") or {}, dict):
                 return self.reply({"error": "unknown op"})
             # Lock audit (13/10, chasing the reported lag): check() runs the go-gate classifier, which is slower

@@ -1501,5 +1501,286 @@ class Socket(Base):
             idle.close()
 
 
+class WaitCommand(Base):
+    """`keeper-propose --wait SECONDS`: parsing and the one extra field it adds to check()'s reply. Default (no
+    --wait) is untouched -- see test_only_a_lone_keeper_propose_is_a_proposal and friends in StateMachine, which
+    already cover the no-wait path and still pass unmodified."""
+
+    def test_wait_is_recognized_and_clamped(self):
+        r = self.k.check("s1", *bash(self.propose_cmd("id=p1 ; actions=edit", "why") + " --wait 999999"))
+        self.assertEqual(r["wait"], self.k.cfg["wait_max_sec"])          # 999999 > wait_max_sec: clamped, not refused
+        self.assertEqual(r["hash"], r["_notify"][1]["hash"][:12])
+
+    def test_wait_absent_by_default(self):
+        r = self.k.check("s1", *bash(self.propose_cmd("id=p1 ; actions=edit")))
+        self.assertNotIn("wait", r)
+        self.assertNotIn("hash", r)                                      # only added alongside wait, see check()
+
+    def test_a_small_wait_is_kept_as_is(self):
+        r = self.k.check("s1", *bash(self.propose_cmd("id=p1 ; actions=edit") + " --wait 5"))
+        self.assertEqual(r["wait"], 5)
+
+    def test_malformed_wait_is_not_a_proposal(self):
+        for bad in ("abc", "-5", "5.0", "1 2", "999999999999"):
+            cmd = self.propose_cmd("id=p1 ; actions=edit") + f" --wait {bad}"
+            r = self.k.check("s1", *bash(cmd))
+            self.assertNotIn("_notify", r, bad)                          # same fallback as any other unknown option
+        self.assertEqual(self.bot.plans, [])
+
+    def test_wait_is_not_recognized_for_keeper_status(self):
+        r = self.k.check("s1", *bash("keeper-status --wait 5"))
+        self.assertNotIn("keeper status", r["reason"])                  # not the keeper-status fast path either
+        self.assertNotIn("_notify", r)
+
+    def test_wait_never_enters_the_plan_hash_or_scope(self):
+        """Security constraint: --wait is a client preference, never part of what was approved."""
+        r1 = self.k.check("s1", *bash(self.propose_cmd("id=p1 ; actions=edit", "why")))
+        h1 = r1["_notify"][1]["hash"]
+        self.bot.plans.clear()
+        self.k.session("s1").pop("pending", None)
+        r2 = self.k.check("s1", *bash(self.propose_cmd("id=p1 ; actions=edit", "why") + " --wait 42"))
+        h2 = r2["_notify"][1]["hash"]
+        self.assertEqual(h1, h2)                                         # identical plan, with or without --wait
+        self.assertNotIn("wait", r2["_notify"][1]["plan"])
+
+    def test_wait_does_not_change_the_hourly_proposal_limit(self):
+        for i in range(3):
+            r = self.k.check("s1", *bash(self.propose_cmd(f"id=p{i} ; actions=edit") + " --wait 5"))
+            self.assertIn("_notify", r, i)
+        r = self.k.check("s1", *bash(self.propose_cmd("id=p4 ; actions=edit") + " --wait 5"))
+        self.assertNotIn("_notify", r)
+        self.assertIn("more than", r["reason"])
+
+
+class PlanStatusLedger(Base):
+    """keeperd.plan_status(hash12): the read-only view keeper-propose --wait polls instead of keeper-status. Closed
+    vocabulary (pending/approved/rejected/expired only), never the plan's content, and write-only from decide() --
+    nothing reachable from the socket can make it answer anything decide() didn't already decide."""
+
+    def test_unknown_hash_is_expired_not_a_distinct_value(self):
+        """A 5th, distinguishable "unknown" would let a socket client tell "never existed" apart from "existed and
+        expired" -- an oracle for probing fingerprints. Both answer "expired"."""
+        self.assertEqual(self.k.plan_status("0" * 12), "expired")
+
+    def test_pending_then_approved(self):
+        ok, _no = self.plan("id=p1 ; actions=edit")
+        h = self.bot.plans[-1][1]["hash"][:12]
+        self.assertEqual(self.k.plan_status(h), "pending")
+        self.k.decide(OWNER, CHAT, ok)
+        self.assertEqual(self.k.plan_status(h), "approved")
+
+    def test_rejected(self):
+        ok, no = self.plan("id=p1 ; actions=edit")
+        h = self.bot.plans[-1][1]["hash"][:12]
+        self.k.decide(OWNER, CHAT, no)
+        self.assertEqual(self.k.plan_status(h), "rejected")
+
+    def test_approved_plan_keeps_reporting_approved_after_its_ttl_runs_out(self):
+        """--wait is about the HUMAN'S decision, not whether the plan is still currently active."""
+        self.approve("id=p1 ; actions=edit ; ttl=10")
+        h = self.bot.plans[-1][1]["hash"][:12]
+        self.clock.t += 11 * 60
+        self.assertFalse(self.allowed("Write", {"file_path": "/srv/app/a.py", "content": "x"}))   # no longer active...
+        self.assertEqual(self.k.plan_status(h), "approved")              # ...but it WAS approved
+
+    def test_late_click_reports_expired(self):
+        ok, _no = self.plan("id=p1 ; actions=edit")
+        h = self.bot.plans[-1][1]["hash"][:12]
+        self.clock.t += 121 * 60
+        self.k.decide(OWNER, CHAT, ok)
+        self.assertEqual(self.k.plan_status(h), "expired")
+
+    def test_expired_is_detected_live_without_any_click(self):
+        """A plan nobody ever approved or rejected still reports expired once it has aged out -- plan_status()
+        checks the age itself; it does not need decide() to have run first."""
+        self.plan("id=p1 ; actions=edit")
+        h = self.bot.plans[-1][1]["hash"][:12]
+        self.clock.t += 121 * 60
+        self.assertEqual(self.k.plan_status(h), "expired")
+        self.assertEqual(self.k.state["plan_status"], {})                # read-only: no click ever happened
+
+    def test_stop_wipes_a_pending_plan_to_expired(self):
+        self.plan("id=p1 ; actions=edit")
+        h = self.bot.plans[-1][1]["hash"][:12]
+        self.k.decide(OWNER, CHAT, "stop:all")
+        self.assertEqual(self.k.plan_status(h), "expired")
+
+    def test_two_simultaneous_plans_are_independent(self):
+        ok_a, _ = self.plan("id=a ; actions=edit", sid="A")
+        ok_b, no_b = self.plan("id=b ; actions=edit", sid="B")
+        h_a, h_b = self.bot.plans[-2][1]["hash"][:12], self.bot.plans[-1][1]["hash"][:12]
+        self.k.decide(OWNER, CHAT, ok_a)
+        self.assertEqual(self.k.plan_status(h_a), "approved")
+        self.assertEqual(self.k.plan_status(h_b), "pending")             # B untouched by A's decision
+        self.k.decide(OWNER, CHAT, no_b)
+        self.assertEqual(self.k.plan_status(h_a), "approved")            # A untouched by B's decision
+        self.assertEqual(self.k.plan_status(h_b), "rejected")
+
+    def test_status_never_returns_plan_content(self):
+        """By construction (the return value is one of 4 words, never a dict): a plan with a tell-tale id/target/
+        explanation must not appear in what plan_status() hands back."""
+        secret = "do-not-leak-this-explanation"
+        self.plan("id=tell-tale-id ; targets=tell-tale-target ; actions=edit", text=secret)
+        h = self.bot.plans[-1][1]["hash"][:12]
+        state = self.k.plan_status(h)
+        self.assertIsInstance(state, str)
+        self.assertIn(state, ("pending", "approved", "rejected", "expired"))
+        self.assertNotIn("tell-tale", state)
+        self.assertNotIn(secret, state)
+
+    def test_ledger_is_bounded_by_age(self):
+        self.approve("id=p1 ; actions=edit")
+        h = self.bot.plans[-1][1]["hash"][:12]
+        self.clock.t += keeperd.Keeper.PLAN_STATUS_RETENTION_SEC + 1
+        self.approve("id=p2 ; actions=edit")                             # any later decide() call prunes the ledger
+        self.assertNotIn(h, self.k.state["plan_status"])
+        self.assertEqual(self.k.plan_status(h), "expired")               # evicted, not "pending" forever
+
+    def test_plan_status_is_never_written_outside_decide(self):
+        """Mutation-checked: with _record_plan_status's call in the approve branch commented out, this test fails
+        (plan_status(h) comes back "pending" instead of "approved") -- confirming the ledger write really is what
+        makes decide()'s decision visible here, not some other path."""
+        self.approve("id=p1 ; actions=edit")
+        h = self.bot.plans[-1][1]["hash"][:12]
+        self.assertEqual(self.k.plan_status(h), "approved")
+        self.assertEqual(set(self.k.state["plan_status"][h]), {"state", "at"})   # never plan/scope/text
+
+
+class StatusSocketOp(Base):
+    """The real "status" op on the real socket: same peer-uid gate as "check", a closed reply shape, and a
+    malformed/missing hash refused rather than guessed at."""
+
+    def setUp(self):
+        super().setUp()
+        ready = threading.Event()
+        threading.Thread(target=keeperd.serve, args=(self.k, self.cfg, ready), daemon=True).start()
+        self.assertTrue(ready.wait(5))
+
+    def raw(self, req):
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.connect(self.cfg["socket"])
+        s.sendall((json.dumps(req) + "\n").encode())
+        out = s.makefile().readline()
+        s.close()
+        return json.loads(out)
+
+    def test_status_over_the_real_socket(self):
+        self.plan("id=p1 ; actions=edit")
+        h = self.bot.plans[-1][1]["hash"][:12]
+        self.assertEqual(self.raw({"op": "status", "hash": h}), {"state": "pending"})
+
+    def test_reply_never_carries_anything_but_the_state(self):
+        self.approve("id=p1 ; targets=secret-target ; actions=edit")
+        h = self.bot.plans[-1][1]["hash"][:12]
+        r = self.raw({"op": "status", "hash": h})
+        self.assertEqual(set(r), {"state"})
+        self.assertNotIn("secret-target", json.dumps(r))
+
+    def test_malformed_or_missing_hash_is_refused(self):
+        for bad in ({}, {"hash": "not-hex"}, {"hash": "a" * 11}, {"hash": "a" * 13}, {"hash": 12345}, {"hash": None}):
+            r = self.raw(dict({"op": "status"}, **bad))
+            self.assertEqual(r, {"error": "bad hash"}, bad)
+
+    def test_stranger_uid_is_refused_like_check(self):
+        """Mutation-checked: moving the "status" branch above the uid-authorization check in a scratch copy of
+        keeperd.py makes this test fail (a stranger uid would get a real state back instead of a refusal)."""
+        self.plan("id=p1 ; actions=edit")
+        h = self.bot.plans[-1][1]["hash"][:12]
+        self.cfg["agent_uids"] = [os.getuid() + 12345]
+        r = self.raw({"op": "status", "hash": h})
+        self.assertEqual(r, {"decision": "deny", "reason": "keeper: unknown client"})
+        self.assertIn("socket-peer-refused", self.log_events())
+
+
+class WaitForDecisionClient(Base):
+    """keeper_client.wait_for_decision(): the hook-side half of --wait, against the real socket."""
+
+    def setUp(self):
+        super().setUp()
+        sys.path.insert(0, HERE)
+        global keeper_client
+        import keeper_client
+        self._socket_env = (os.environ.get("KEEPER_TEST_MODE"), os.environ.get("KEEPER_SOCKET_FOR_TESTS"))
+        os.environ["KEEPER_TEST_MODE"] = "1"
+        os.environ["KEEPER_SOCKET_FOR_TESTS"] = self.cfg["socket"]
+        keeper_client.SOCKET = self.cfg["socket"]
+        ready = threading.Event()
+        threading.Thread(target=keeperd.serve, args=(self.k, self.cfg, ready), daemon=True).start()
+        self.assertTrue(ready.wait(5))
+
+    def tearDown(self):
+        env_mode, env_sock = self._socket_env
+        for k, v in (("KEEPER_TEST_MODE", env_mode), ("KEEPER_SOCKET_FOR_TESTS", env_sock)):
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+        super().tearDown()
+
+    def test_already_approved_returns_at_once(self):
+        self.approve("id=p1 ; actions=edit")
+        h = self.bot.plans[-1][1]["hash"][:12]
+        t0 = time.time()
+        code, state = keeper_client.wait_for_decision(h, 30)
+        self.assertEqual((code, state), (keeper_client.WAIT_APPROVED, "approved"))
+        self.assertLess(time.time() - t0, 2)                             # did not sleep through the 30s budget
+
+    def test_already_rejected_returns_at_once(self):
+        ok, no = self.plan("id=p1 ; actions=edit")
+        self.k.decide(OWNER, CHAT, no)
+        h = self.bot.plans[-1][1]["hash"][:12]
+        self.assertEqual(keeper_client.wait_for_decision(h, 30), (keeper_client.WAIT_REJECTED, "rejected"))
+
+    def test_already_expired_returns_at_once(self):
+        self.plan("id=p1 ; actions=edit")
+        h = self.bot.plans[-1][1]["hash"][:12]
+        self.clock.t += 121 * 60
+        self.assertEqual(keeper_client.wait_for_decision(h, 30), (keeper_client.WAIT_EXPIRED, "expired"))
+
+    def test_still_pending_times_out(self):
+        self.plan("id=p1 ; actions=edit")
+        h = self.bot.plans[-1][1]["hash"][:12]
+        t0 = time.time()
+        self.assertEqual(keeper_client.wait_for_decision(h, 1), (keeper_client.WAIT_STILL_PENDING, "pending"))
+        self.assertGreaterEqual(time.time() - t0, 1)
+
+    def test_approved_while_polling(self):
+        """The decision lands between two polls: the next poll (not the wait's own deadline) picks it up."""
+        ok, _no = self.plan("id=p1 ; actions=edit")
+        h = self.bot.plans[-1][1]["hash"][:12]
+
+        def approve_shortly():
+            time.sleep(keeper_client.STATUS_POLL_INTERVAL * 0.6)
+            self.k.decide(OWNER, CHAT, ok)
+        threading.Thread(target=approve_shortly).start()
+        t0 = time.time()
+        code, state = keeper_client.wait_for_decision(h, 30)
+        self.assertEqual((code, state), (keeper_client.WAIT_APPROVED, "approved"))
+        self.assertLess(time.time() - t0, 30)                            # returned on the next poll, not the deadline
+
+    def test_daemon_down_raises(self):
+        keeper_client.SOCKET = os.path.join(self.dir, "no-such.sock")
+        try:
+            with self.assertRaises(OSError):
+                keeper_client.wait_for_decision("0" * 12, 1)
+        finally:
+            keeper_client.SOCKET = self.cfg["socket"]
+
+    def test_daemon_stopped_mid_wait_raises(self):
+        """A socket that existed (propose() succeeded) but whose daemon then stopped answering: polling must stop
+        and propagate, never spin forever or silently report a decision that never happened."""
+        self.plan("id=p1 ; actions=edit")
+        h = self.bot.plans[-1][1]["hash"][:12]
+        os.unlink(self.cfg["socket"])
+        with self.assertRaises(OSError):
+            keeper_client.wait_for_decision(h, 5)
+
+    def test_hash_rejected_by_the_daemon_raises_value_error(self):
+        """A malformed hash never happens from propose()'s own output, but wait_for_decision() must not silently
+        treat the daemon's {"error": ...} reply as a state."""
+        with self.assertRaises(ValueError):
+            keeper_client.wait_for_decision("not-a-hash", 1)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=1)
