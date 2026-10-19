@@ -6,6 +6,21 @@ One version scheme: **a repository tag per release**. Components have no version
 
 Next: one week of the keeper in block mode, after a dry run of refusal, approval, expiry, replay and a Telegram outage.
 
+- **snapshot-gate: tested against real zfs/vgs/lvs/lvcreate/lvremove processes for the first time (19/10).**
+  No ZFS pool or LVM volume group could be created in the sandbox this ran in: no loadable kernel modules at
+  all (ZFS is always out-of-tree) and no device-mapper kernel driver (`lvcreate` fails even though `pvcreate`/
+  `vgcreate` succeed on a real loop device) — verified by actually running `losetup`/`pvcreate`/`vgcreate`/
+  `lvcreate`/`dmsetup version`, not assumed. See [docs/snapshot-gate-real-disk-testing.md](docs/snapshot-gate-real-disk-testing.md)
+  for the full breakdown and an owner checklist for the one thing only a real pool/VG can prove (including
+  restoring a single service from a snapshot, which stays a human action by design). New
+  `test_fakebin_subprocess.py` execs real stand-in binaries (`test_fixtures/fakebin/`) through the unmodified
+  `lib/backends.py`/`retention-purge.py` code — a real process, real argv, real stdout, a real
+  `subprocess.CalledProcessError` on failure — closing the gap `test_backend_commands.py`'s Python-level
+  `subprocess.run` mock cannot. Two real defects found and fixed: `test_backend_commands.py` itself (19 tests,
+  added 18/10) was never wired into CI, so it gave no actual coverage until now; and `retention-purge.py
+  --apply` let one busy/held snapshot's destroy failure abort the whole run, leaving every other eligible
+  snapshot undeleted — it now reports a per-target failure to stderr, keeps purging the rest, and exits 1 only
+  if at least one target failed.
 - **snapshot-gate: fixed the LVM back end, which could neither create nor ever match its own snapshots
   (PR #12 review, 17/10).** `Lvm.create_snapshot` used to split the qualified name on `/`, handing `lvcreate`
   an LV name containing `@` -- LVM rejects that outright, so every LVM snapshot request failed with an

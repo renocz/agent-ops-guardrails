@@ -4,9 +4,13 @@ The agent *requests* a snapshot; the host *takes* it. The agent can never roll b
 code path for that anywhere in the files it can run. Generic, no homelab-specific names: `pool0`,
 `example-host`, `testds` are placeholders to replace with your own dataset/volume.
 
-**Status: experimental.** Tested against a dry-run/fixture backend (19 tests) plus a real end-to-end run of the
-shell client against the Python host over actual files. Not yet run against a real ZFS or LVM host, and not
-yet run by anyone outside this repo.
+**Status: experimental.** Tested against a dry-run/fixture backend, the exact ZFS/LVM command vectors (a
+Python-level `subprocess.run` mock), and real `zfs`/`vgs`/`lvs`/`lvcreate`/`lvremove` *processes* standing in
+for the real tools (real argv, real exit codes, no real pool/VG — see
+[docs/snapshot-gate-real-disk-testing.md](../docs/snapshot-gate-real-disk-testing.md) for why no automated run
+here has ever reached a real pool/VG, what each tier of testing does and does not prove, and an owner checklist
+for the one real-pool/VG pass this still needs, including restoring a single service). Not yet run against a
+real ZFS or LVM host, and not yet run by anyone outside this repo.
 
 ## The threat this answers
 
@@ -113,14 +117,20 @@ execute as a module, and the config/state paths are not agent-writable).
 ## Testing
 
 ```sh
-python3 -m unittest test_snapshot_gate_host test_retention_purge -v
+python3 -m unittest test_snapshot_gate_host test_retention_purge test_backend_commands test_fakebin_subprocess -v
 ```
 
-19 tests: request accepted and creates a snapshot; refusal on usage (and acceptance at exactly the threshold);
-refusal on a recent matching snapshot (its name is returned, no new one is created); a foreign name or a
-different dataset's snapshot never counts towards the cooldown; several pending requests are each answered (the
-first succeeds, the rest are refused by the cooldown it just created); a second run while the lock is held does
-nothing; binary garbage / arbitrary content in a request is never read or interpreted; strict name matching for
-purge, including the recursion and dataset-prefix-collision cases, and a timestamp-shaped-but-impossible date is
-skipped rather than crashing the run; dry run vs `--apply` on a temp fixture directory removes only the matching
-old names.
+19 tests against the `Dir` dry-run backend: request accepted and creates a snapshot; refusal on usage (and
+acceptance at exactly the threshold); refusal on a recent matching snapshot (its name is returned, no new one is
+created); a foreign name or a different dataset's snapshot never counts towards the cooldown; several pending
+requests are each answered (the first succeeds, the rest are refused by the cooldown it just created); a second
+run while the lock is held does nothing; binary garbage / arbitrary content in a request is never read or
+interpreted; strict name matching for purge, including the recursion and dataset-prefix-collision cases, and a
+timestamp-shaped-but-impossible date is skipped rather than crashing the run; dry run vs `--apply` on a temp
+fixture directory removes only the matching old names.
+
+`test_backend_commands.py` (19 more) asserts the exact ZFS/LVM command vectors via a Python-level
+`subprocess.run` mock, plus a full create → cooldown-refuse → purge round trip per backend.
+`test_fakebin_subprocess.py` (7 more) execs real stand-in `zfs`/`vgs`/`lvs`/`lvcreate`/`lvremove` processes
+through the same unmodified code — see [docs/snapshot-gate-real-disk-testing.md](../docs/snapshot-gate-real-disk-testing.md)
+for what each tier proves and does not.
