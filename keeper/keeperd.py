@@ -515,6 +515,7 @@ def render_summary(lang, st, days, mode):
 # existing log(), no free text, kept small by only firing on the slow path. Measures where a delay could sit:
 # waiting for keeper.lock, a single Telegram api() call, and the end-to-end handling of one update.
 # ---------------------------------------------------------------------------------------------------------------
+LAST_GAP_TTL_S = 600                   # a refusal's "what the plan lacks" is shown on the next card only within 10 min
 LOCK_WAIT_LOG_THRESHOLD = 1.0          # log keeper-lock-wait only once the wait itself is user-visible
 API_SLOW_LOG_THRESHOLD = 2.0           # log telegram-api-slow only when an api() call is this slow (or failed)
 UPDATE_SLOW_LOG_THRESHOLD = 5.0        # tally()'s own "slow" counter: telegram-update is logged for every update
@@ -579,9 +580,12 @@ class Keeper:
         nonce = secrets.token_hex(8)
         pending = {"plan": plan, "text": (text or "")[:3000], "hash": phash, "nonce": nonce, "proposed_at": now}
         s = self.session(sid)
-        context = s.pop("last_gap", None)     # item 2: this proposal may follow a refusal; say what of it, once
-        if context:
-            pending["context"] = context
+        last = s.pop("last_gap", None)        # item 2: this proposal may follow a refusal; say what of it, once
+        # ...but only if the refusal is recent: a refusal from an hour ago has nothing to do with this plan, and
+        # showing it on an unrelated card would send the human to read the wrong thing. A bare string (state written
+        # by an earlier version, no timestamp) is dropped the same way.
+        if isinstance(last, dict) and now - float(last.get("at", 0)) <= LAST_GAP_TTL_S and last.get("text"):
+            pending["context"] = last["text"]
         s["pending"] = pending
         self.state["proposals"] = recent + [now]
         self.save()
@@ -652,7 +656,7 @@ class Keeper:
                     detail_gap = self.gate.describe_gap(gap, act["plan"])
                     why = (f"keeper: the approved plan '{act['plan'].get('id')}' does not cover this {cat} action: "
                            f"{detail_gap}.")
-                    s["last_gap"] = detail_gap           # surfaced on the next proposal's card (item 2), once
+                    s["last_gap"] = {"text": detail_gap, "at": self.now()}   # next proposal's card (item 2), once, if recent
                     self.save()
                 return {"decision": "deny", "reason": why}
         self.log({"event": "allowed", "session": sid, "tool": tool, "plan": act["plan"].get("id")})

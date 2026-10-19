@@ -117,6 +117,27 @@ class StateMachine(Base):
         ok2, _no2 = self.plan("id=p3 ; targets=db ; actions=deploy")
         self.assertNotIn("context", self.bot.plans[-1][1])
 
+    def test_denial_context_expires_after_ten_minutes(self):
+        self.approve("id=p1 ; targets=web ; actions=deploy ; ttl=60")
+        self.k.check("s1", *bash("docker compose -f /opt/stacks/db/compose.yml restart"))
+        self.clock.t += 11 * 60                                   # an unrelated proposal much later
+        self.plan("id=p2 ; targets=db ; actions=deploy")
+        self.assertNotIn("context", self.bot.plans[-1][1])
+        self.assertNotIn("last_gap", self.k.session("s1"))        # and it is gone, not kept for a third card
+
+    def test_denial_context_still_shown_just_inside_the_window(self):
+        self.approve("id=p1 ; targets=web ; actions=deploy ; ttl=60")
+        self.k.check("s1", *bash("docker compose -f /opt/stacks/db/compose.yml restart"))
+        self.clock.t += 9 * 60
+        self.plan("id=p2 ; targets=db ; actions=deploy")
+        self.assertIn("/opt/stacks/db/compose.yml", self.bot.plans[-1][1]["context"])
+
+    def test_denial_context_without_a_timestamp_is_dropped(self):   # state written by an earlier version
+        self.approve("id=p1 ; targets=web ; actions=deploy ; ttl=60")
+        self.k.session("s1")["last_gap"] = "targets not covered: /opt/stacks/db/compose.yml"
+        self.plan("id=p2 ; targets=db ; actions=deploy")
+        self.assertNotIn("context", self.bot.plans[-1][1])
+
     def test_plan_expires(self):
         self.approve("id=p1 ; targets=web ; actions=deploy ; ttl=30")
         self.clock.t += 31 * 60
