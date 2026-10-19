@@ -955,6 +955,7 @@ def classify_read_cmd(c, args, depth):
 
 
 CHANGES = []                  # every (kind, detail, stage) found by the last classify(); reset by classify()
+STAGE_CWD = {}                # stage text -> the cwd it runs in once the command's own `cd`s are followed (K-dir)
 
 
 def classify_bash(cmd, depth=0):
@@ -981,6 +982,8 @@ def classify_bash(cmd, depth=0):
                 k = classify_stage(stage, depth, mine)
                 if k[0] in ("change", "opaque"):
                     CHANGES.append((k[0], k[1], stage))
+                    # K-dir: the same text run under two different cwds is judged as "unknown", never as either
+                    STAGE_CWD[stage] = eff if STAGE_CWD.get(stage, eff) == eff else _CWD_UNKNOWN
                 if order[k[0]] > order[worst[0]]:
                     worst = k
             cd = _cd_target(s)                            # follow cd/pushd/popd across statements of the same command
@@ -1050,6 +1053,7 @@ MEMORY_DIR = re.compile(r"^" + re.escape(os.path.expanduser("~/.claude/projects/
 
 def classify(tool, tool_input):
     CHANGES.clear()
+    STAGE_CWD.clear()
     KNOWN_VARS.clear()
     if tool == "Bash":
         KNOWN_VARS.update(literal_assignments(tool_input.get("command", "")))
@@ -1514,7 +1518,7 @@ def _action_paths(text, tool_input, tokens):
 
 
 def _stage_cwd(text):
-    return os.getcwd()          # as real() does today: the daemon's own cwd (changed in the next commit)
+    return STAGE_CWD.get(text, CWD) if text is not None else CWD
 
 
 def _judge_path(p, cwd, bases, plain_targets):
@@ -1522,7 +1526,10 @@ def _judge_path(p, cwd, bases, plain_targets):
     against the agent's cwd) and not protected; 1 when it is acceptable otherwise (a null sink, a web address, a path
     matched by another, plain, target of the plan); 0 when not. Anything that
     cannot be judged -- a variable, a command substitution, an escaped character, a remote `host:path`, a relative
-    path with no known cwd, a wildcard anywhere but the last component -- is False (fail closed)."""
+    path with no known cwd, a wildcard anywhere but the last component -- scores 0 (fail closed).
+
+    Relative paths are resolved against the AGENT's cwd (`cwd`: the hook input's, followed through the command's own
+    `cd`s), never against the daemon's: realpath() alone would use whatever directory this process happens to run in."""
     orig = p.strip("'\"")
     p = orig
     if URL_SCHEME.match(p):

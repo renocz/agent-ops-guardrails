@@ -548,6 +548,96 @@ class DirPrefixTarget(unittest.TestCase):
         self.assertTrue(g.covers(plan, "Bash", {"command": f"restart {file}"}, "deploy", f"restart {file}"))
 
 
+def decide(plan, cmd, cwd):
+    """What the hook decides for a Bash command run in `cwd`, without the subprocess: classify() it as the hook does
+    (so the command's own `cd`s are followed), then ask coverage_gap() for every change in it. None = covered, the
+    command is not a change at all, or the first gap."""
+    old = g.CWD
+    g.CWD = cwd
+    try:
+        g.classify("Bash", {"command": cmd})
+        for k, d, st in list(g.CHANGES):
+            cat = g.category("Bash", {"command": cmd}, k, d)
+            gap = g.coverage_gap(plan, "Bash", {"command": cmd}, cat, st)
+            if gap:
+                return gap
+        return None
+    finally:
+        g.CWD = old
+
+
+class DirTree(unittest.TestCase):
+    """A scratch tree OUTSIDE the scratch-write exemption (those are never changes), so the gate really judges it:
+        root/news          the dir: target
+        root/other         a sibling outside it
+        root/news/link     a symlink inside news that points to root/other
+    """
+
+    def setUp(self):
+        self.root = os.path.realpath(tempfile.mkdtemp(prefix="dirtree-", dir=HERE))
+        self.news = os.path.join(self.root, "news")
+        self.other = os.path.join(self.root, "other")
+        os.makedirs(self.news)
+        os.makedirs(self.other)
+        os.symlink(self.other, os.path.join(self.news, "link"))
+        self.plan = {"targets": [f"dir:{self.news}"], "actions": ["edit", "delete", "deploy", "script", "git"]}
+        self.old_cwd = os.getcwd()
+
+    def tearDown(self):
+        os.chdir(self.old_cwd)
+        shutil.rmtree(self.root, ignore_errors=True)
+
+    def covered(self, cmd, cwd=None):
+        return decide(self.plan, cmd, cwd or self.news) is None
+
+
+class DirRelativePaths(DirTree):
+    """Relative paths are resolved against the AGENT's cwd (the hook input's), never against the daemon's."""
+
+    def test_relative_paths_inside_the_agents_cwd_are_covered(self):
+        self.assertTrue(self.covered("touch notes.md"))
+        self.assertTrue(self.covered("cp ./a.txt sub/b.txt"))
+        self.assertTrue(self.covered("echo hi > out.log"))
+
+    def test_relative_dotdot_escape_is_not_covered(self):
+        self.assertFalse(self.covered("touch ../x"))
+        self.assertFalse(self.covered("cp a.txt ../other/b.txt"))
+        self.assertFalse(self.covered("echo hi > ../other/out.log"))
+        self.assertFalse(self.covered("touch sub/../../x"))
+
+    def test_relative_path_is_judged_against_the_agents_cwd_not_the_daemons(self):
+        os.chdir(self.news)                                   # the daemon sits INSIDE the dir ...
+        self.assertFalse(self.covered("touch x", cwd=self.other))      # ... but the agent runs in a sibling
+        self.assertFalse(self.covered("touch x", cwd=self.root))
+        os.chdir(self.other)                                  # and the other way round
+        self.assertTrue(self.covered("touch x", cwd=self.news))
+        self.assertTrue(self.covered("touch news/x", cwd=self.root))
+
+    def test_relative_symlink_escape_is_not_covered(self):
+        self.assertFalse(self.covered("touch link/x"))
+        self.assertFalse(self.covered("cp a.txt ./link/b.txt"))
+
+    def test_unknown_cwd_fails_closed_for_a_relative_path(self):
+        self.assertFalse(self.covered("touch x", cwd="<unset>"))
+        old, g.CWD = g.CWD, None
+        try:
+            gap = g.coverage_gap(self.plan, "Bash", {"command": "touch x"}, "edit", "touch x")
+            self.assertIsNotNone(gap)
+        finally:
+            g.CWD = old
+        self.assertTrue(self.covered(f"touch {self.news}/x", cwd="<unset>"))   # an absolute path needs no cwd
+
+    def test_a_cd_in_the_same_command_moves_the_cwd(self):
+        self.assertFalse(self.covered(f"cd {self.other} && touch x"))          # starts inside, `cd`s out
+        self.assertFalse(self.covered("cd .. && touch x"))
+        self.assertTrue(self.covered(f"cd {self.news} && touch x", cwd=self.root))
+        self.assertFalse(self.covered("cd \"$SOMEWHERE\" && touch x"))         # a cd that cannot be resolved
+
+    def test_relative_dir_target_is_not_a_grant(self):
+        plan = {"targets": ["dir:news"], "actions": ["edit"]}
+        self.assertIsNotNone(decide(plan, f"touch {self.news}/x", self.root))
+
+
 class Hook(unittest.TestCase):
     def setUp(self):
         self.dir = tempfile.mkdtemp()
