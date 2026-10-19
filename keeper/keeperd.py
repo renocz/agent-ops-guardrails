@@ -24,7 +24,16 @@ DEFAULTS = {"socket": "/var/run/keeper/keeper.sock", "state_dir": "/var/lib/keep
             "owner_id": None, "chat_id": None, "bot_token_file": "/etc/keeper/bot.token",
             "ttl_default_min": 60, "ttl_max_min": 240, "pending_max_age_min": 120, "max_proposals_per_hour": 3,
             "mode": "block", "agent_home": None, "client_group": None, "safe_git_repos": [], "lang": "en",
-            "wait_max_sec": 1800}
+            "wait_max_sec": 50, "hook_timeout_sec": 60}
+# keeper-propose --wait blocks the PreToolUse hook process. Claude Code kills a command hook at its "timeout" and, on
+# PreToolUse, a timed-out hook does NOT block the tool call (it falls through to the normal permission flow), so the
+# wait must always end first: wait_max_sec + this margin (one in-flight status poll, process start-up) <= hook_timeout_sec.
+HOOK_TIMEOUT_MARGIN_SEC = 10
+
+
+def effective_wait_max(cfg):
+    """The longest --wait the hook may be asked to do: wait_max_sec, clamped under the hook's own timeout."""
+    return max(0, min(int(cfg["wait_max_sec"]), int(cfg["hook_timeout_sec"]) - HOOK_TIMEOUT_MARGIN_SEC))
 
 
 # ---------------------------------------------------------------------------------------------------------------
@@ -620,7 +629,7 @@ class Keeper:
                 # The hook polls keeperd's "status" op (by fingerprint only) for up to this many seconds instead of
                 # the agent having to re-run keeper-status itself. Clamped here, never inside propose(): wait is a
                 # per-call client preference, not part of the plan, and must never enter the plan's hash/scope.
-                res["hash"], res["wait"] = out["hash"], min(int(opts["wait"]), self.cfg["wait_max_sec"])
+                res["hash"], res["wait"] = out["hash"], min(int(opts["wait"]), effective_wait_max(self.cfg))
             return res
         try:
             kind, detail = self.gate.classify(tool, tool_input)
@@ -1160,6 +1169,13 @@ def load_config(path=None):
     p = path or os.environ.get("KEEPER_CONFIG", "/etc/keeper/config.json")
     with open(p) as f:
         cfg.update(json.load(f))
+    for k in ("wait_max_sec", "hook_timeout_sec"):
+        if isinstance(cfg[k], bool) or not isinstance(cfg[k], int) or cfg[k] < 0:
+            raise ValueError(f"config: {k} must be a non-negative integer (seconds)")
+    if cfg["wait_max_sec"] > effective_wait_max(cfg):
+        print(f"keeperd: wait_max_sec={cfg['wait_max_sec']} does not fit under hook_timeout_sec={cfg['hook_timeout_sec']} "
+              f"(needs {HOOK_TIMEOUT_MARGIN_SEC}s of margin): --wait is clamped to {effective_wait_max(cfg)}s. A hook killed "
+              "by its timeout does not block the tool call.", file=sys.stderr)
     return cfg
 
 
