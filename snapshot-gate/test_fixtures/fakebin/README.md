@@ -24,3 +24,7 @@ State files read/written under `$FAKE_SG_STATE`:
 - `lvm_missing_vg` — if present, its content is a VG name; `vgs`/`lvs` on exactly that VG fail
 - `lvm_busy` — if present, its content is a `vg/snap-name`; `lvremove` on exactly that target
   fails like a logical volume still in use would
+
+Portability rule: these scripts are `#!/bin/sh` and must stay valid for bash 3.2 (stock macOS) and
+dash. No arrays, negative subscripts, `${!#}`, `[[ ]]`, `local` or `pipefail`. CI enforces it
+(`shell-portability` job).

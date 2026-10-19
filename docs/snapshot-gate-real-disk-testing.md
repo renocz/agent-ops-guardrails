@@ -5,6 +5,37 @@ this pass (19/10) — only against the `Dir` dry-run backend, and against a Pyth
 for `subprocess.run()`. This page records exactly what changed, in three tiers of "how real", and
 gives the owner a short manual checklist for the one thing none of them can prove: a real pool/VG.
 
+## Where each part runs (read this first if you are on a Mac)
+
+| What | Needs | Runs on a stock Mac (no ZFS, no LVM)? |
+|---|---|---|
+| Tier 1, `test_snapshot_gate_host.py`, `test_retention_purge.py` | Python 3.9+ | Yes |
+| Tier 2, `test_backend_commands.py` | Python 3.9+ | Yes |
+| Tier 3, `test_fakebin_subprocess.py` (fake `zfs`/`vgs`/`lvs`/`lvcreate`/`lvremove`) | Python 3.9+ and `/bin/sh` (bash 3.2 or dash) | Yes. No root, nothing is installed, nothing real is touched |
+| `change-sop` and `oncall` suites | Python 3.9+ | Yes |
+| Manual checklist below, steps 1 to 7 | A **Linux** host or VM whose kernel really has `zfs.ko` or `dm_mod`, root, `losetup`, `zpool` or LVM tools | **No.** macOS has no `losetup`, no `dm_mod`, no LVM; the checklist uses GNU `truncate` and Linux paths. OpenZFS on macOS is a different environment and is not covered by this checklist |
+
+On a Mac, run everything that is automated from the kit directory:
+
+```
+cd snapshot-gate && python3 -m unittest test_snapshot_gate_host test_retention_purge \
+    test_backend_commands test_fakebin_subprocess
+```
+
+A green run on a Mac proves the Python policy and the way the code handles a process boundary. It
+does **not** replace the checklist: only a Linux host with a real pool or VG can show that the real
+`zfs`/`lvm` command syntax is accepted and that a real restore works. If you only have a Mac, run
+the checklist on a throwaway Linux VM (any distribution that ships the ZFS or device-mapper
+modules); the loop-device approach in step 1 keeps it away from real disks.
+
+**The fake binaries must stay bash 3.2 / POSIX portable.** Stock macOS ships bash 3.2 and BSD
+tools, so the files under `test_fixtures/fakebin/` use `#!/bin/sh` and only POSIX constructs: no
+negative array subscripts (`${a[-1]}`, bash 4.3+), no `${!#}`, no arrays, no associative arrays, no
+`mapfile`/`readarray`, no `${var,,}`, no `[[ ]]`, no `local`, no `pipefail`, and no GNU-only flags
+of `sed`/`date`/`stat`/`readlink`. The `shell-portability` CI job (`checkbashisms` and
+`shellcheck --shell=sh`) and `FixturesPortableAcrossShells` in `test_fakebin_subprocess.py` (runs
+every fake through dash and bash) enforce this. Keep new fixtures to the same rule.
+
 ## What this pass found, verified by running real commands
 
 The CI/sandbox environment this kit's tests run in (and the container this pass ran in) has **no
@@ -79,6 +110,8 @@ it to stderr, keeps purging the rest, and exits 1 only if at least one target fa
 behavior under real contention matches what the `lvm_busy` simulation assumes.
 
 ## What only a real pool/VG can prove — manual checklist
+
+**Linux host or VM only** (see the table at the top): none of these steps can be run on macOS.
 
 Run this once, by hand, on real hardware or a VM whose kernel actually has `dm_mod` (check first
 with `dmsetup version`) or the `zfs` DKMS module installed — **not** on a shared/production
