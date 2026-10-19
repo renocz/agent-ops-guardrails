@@ -4,7 +4,7 @@ One version scheme: **a repository tag per release**. Components have no version
 
 ## Unreleased (towards v1.0)
 
-Next: one week of the keeper in block mode, after a dry run of refusal, approval, expiry, replay and a Telegram outage.
+Next: finish the block-mode trial (started 12/10/2026, after the end-to-end dry run of refusal, approval, expiry, replay and a Telegram outage) -- a few days of varied real work, no deadlock, an acceptable number of cards -- then v1.0.
 
 - **snapshot-gate: tested against real zfs/vgs/lvs/lvcreate/lvremove processes for the first time (19/10).**
   No ZFS pool or LVM volume group could be created in the sandbox this ran in: no loadable kernel modules at
@@ -90,6 +90,24 @@ Next: one week of the keeper in block mode, after a dry run of refusal, approval
   string to a `.*`-prefixed one (simulating a careless "starts with" check) makes 3 tests fail, catching both
   the recursion case and the prefix-collision case. README covers the threat (an agent with hypervisor
   snapshot rights can roll back or delete everything at once), what this does not protect against, and install.
+- **README, CHANGELOG and the IT-leaders pages: made the status lines true again (owner review of PR #13, 17/10).**
+  The README and this changelog's intro still said the keeper "runs in observe mode" with block mode as "the next
+  step" -- stale since 12/10, when block mode started after its end-to-end dry run. Both now say the real state:
+  observe from 08/10, block since 12/10, a trial under way, v1.0 after it. `docs/for-it-leaders.md` and the French
+  page: the "In daily use" row now says the approval mechanism has run in block mode on the owner's own laptop
+  since 12/10, with the trial under way, and names what real use found that the dry run and the tests had not
+  (the "Stop everything" button disappearing once a plan is decided, late approval clicks, the hourly proposal
+  limit raised from 3 to 8) as a point in favour of piloting in observe mode first. Both pages also overstated
+  secret-guard: "stripped out of command output before the agent ever sees them" reads as a barrier; per
+  `secret-guard/README.md`, it is a hook that refuses a command unless its output goes through a masking filter,
+  running in the agent's own process -- a safety net for a cooperative agent, not a barrier against a manipulated
+  one, unlike the approval step, which is the strong layer. Recounted the test suites on current main (297 tests
+  across council/secret-guard/go-gate/keeper/leak-check): "nearly 300" still holds, left unchanged.
+- **docs: a plain-language page for IT leaders, English and French (17/10).** `docs/for-it-leaders.md` and
+  `docs/fr/pour-les-dirigeants-it.md`: a five-minute, non-technical read for a CIO/IT manager — the 30-second
+  pitch, a three-layer explanation with a mermaid diagram, an evidence table (every number traced to this
+  changelog or `docs/results.md`), honest limits stated plainly, what the pattern changes for an IT department,
+  a short FAQ, and how to pilot it. Linked from the README's "Start here".
 - **go-gate: oracle + corpus for F4, the 13 `opaque/unbalanced` commands from a week of block-mode observation
   (14/10), no behaviour change.** The owner's log kept only each command's head, never its arguments (5 `ssh`, 5
   `pct exec ; ssh …`, 2 `bash`, 1 chained `bash ; pct exec ; ssh … sleep`) — so `go-gate/test_balance_oracle.py`
