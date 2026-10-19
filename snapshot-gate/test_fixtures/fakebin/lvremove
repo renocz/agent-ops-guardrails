@@ -1,8 +1,9 @@
-#!/usr/bin/env bash
+#!/bin/sh
 # Fake `lvremove`: see test_fixtures/fakebin/README.md. Not a real backend -- removes no real LV.
-set -euo pipefail
+set -eu
 state="${FAKE_SG_STATE:?FAKE_SG_STATE not set}"
-target="${!#}"
+target=""
+for a in "$@"; do target="$a"; done
 vg="${target%%/*}"
 snap="${target#*/}"
 if [ -f "$state/lvm_busy" ] && [ "$(cat "$state/lvm_busy")" = "$target" ]; then

@@ -223,6 +223,41 @@ class LvmRealExecPartialPurgeFailure(FakeBinHarness):
         self.assertIn(old_a, backend.list_snapshot_names())
 
 
+class FixturesPortableAcrossShells(FakeBinHarness):
+    """The fakes must stay POSIX sh / bash 3.2 portable (stock macOS). Drive each one through every
+    shell found on this machine (dash = strict POSIX, bash = whatever is installed), bypassing the
+    shebang. A shell that is not installed is skipped, never silently passed."""
+
+    def _run(self, shell, fixture, *args):
+        import subprocess
+        return subprocess.run([shell, os.path.join(FAKEBIN, fixture), *args], capture_output=True, text=True)
+
+    def test_every_fixture_runs_under_each_available_shell(self):
+        shells = [p for p in (shutil.which(n) for n in ("dash", "bash", "sh")) if p]
+        self.assertTrue(shells, "no shell found")
+        for shell in sorted(set(shells)):
+            with self.subTest(shell=shell):
+                for name in ("zfs_snapshots", "lvm_snapshots"):
+                    path = os.path.join(self.state, name)
+                    if os.path.exists(path):
+                        os.remove(path)
+                self.assertEqual(self._run(shell, "zfs", "snapshot", "pool/ds@a").returncode, 0)
+                listed = self._run(shell, "zfs", "list", "-H", "-t", "snapshot", "-o", "name", "pool/ds")
+                self.assertEqual(listed.stdout.split(), ["pool/ds@a"], listed.stderr)
+                usage = self._run(shell, "zfs", "list", "-Hp", "-o", "used,avail", "pool/ds")
+                self.assertEqual(usage.stdout.split(), ["10", "90"], usage.stderr)
+                self.assertEqual(self._run(shell, "zfs", "destroy", "pool/ds@a").returncode, 0)
+                self.assertEqual(self._run(shell, "zfs", "bogus").returncode, 2)
+                self.assertEqual(self._run(shell, "lvcreate", "-s", "-n", "s1", "-L1G", "vg/lv").returncode, 0)
+                self.assertEqual(self._run(shell, "lvcreate", "-s", "-n", "b@d", "vg/lv").returncode, 3)
+                lvs = self._run(shell, "lvs", "--noheadings", "-o", "lv_name", "vg")
+                self.assertEqual(lvs.stdout.split(), ["s1", "lv"], lvs.stderr)
+                vgs = self._run(shell, "vgs", "--noheadings", "-o", "vg_size,vg_free", "vg")
+                self.assertEqual(vgs.stdout.split(), ["100", "90"], vgs.stderr)
+                self.assertEqual(self._run(shell, "lvremove", "-f", "vg/s1").returncode, 0)
+                self.assertEqual(self._run(shell, "lvs", "x", "vg").stdout.strip(), "")
+
+
 def _ago_days(days):
     import datetime
     return datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=days)

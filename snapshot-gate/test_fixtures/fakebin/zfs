@@ -1,12 +1,12 @@
-#!/usr/bin/env bash
+#!/bin/sh
 # Fake `zfs`: see test_fixtures/fakebin/README.md. Not a real backend -- never touches any real pool.
-set -euo pipefail
+set -eu
 state="${FAKE_SG_STATE:?FAKE_SG_STATE not set}"
 snap_file="$state/zfs_snapshots"
 touch "$snap_file"
 
 fail_if_missing() {
-    local ds="$1"
+    ds="$1"
     if [ -f "$state/zfs_missing_dataset" ] && [ "$(cat "$state/zfs_missing_dataset")" = "$ds" ]; then
         echo "cannot open '$ds': dataset does not exist" >&2
         exit 1
@@ -17,15 +17,18 @@ cmd="$1"; shift
 
 case "$cmd" in
     list)
-        args=("$@")
-        dataset="${args[-1]}"
+        dataset=""
+        for a in "$@"; do dataset="$a"; done
         fail_if_missing "$dataset"
-        joined=" ${args[*]} "
-        if [[ "$joined" == *" used,avail "* ]]; then
-            printf '%s\t%s\n' "$(cat "$state/zfs_used")" "$(cat "$state/zfs_avail")"
-        else
-            awk -F'@' -v d="$dataset" '$1==d || index($1, d "/")==1 {print}' "$snap_file"
-        fi
+        joined=" $* "
+        case "$joined" in
+            *" used,avail "*)
+                printf '%s\t%s\n' "$(cat "$state/zfs_used")" "$(cat "$state/zfs_avail")"
+                ;;
+            *)
+                awk -F'@' -v d="$dataset" '$1==d || index($1, d "/")==1 {print}' "$snap_file"
+                ;;
+        esac
         ;;
     snapshot)
         name="$1"
