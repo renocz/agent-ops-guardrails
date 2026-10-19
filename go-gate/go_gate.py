@@ -1283,8 +1283,18 @@ def coverage_gap(plan, tool, tool_input, cat, text=None):
     tokens = re.findall(r"[^\s'\"|;&<>()]+", blob)
     # K7: a target matches a whole token or a path segment, never a free substring, so targets=web no longer covers
     # `webserver`, `web-db` or `cobweb`.
-    if not any(target_matches(t, tokens) for t in targets):
-        return {"targets": candidate_targets(tokens, targets)}
+    dir_targets = [t for t in targets if DIR_PREFIX.match(t.strip("'\""))]
+    plain_targets = [t for t in targets if t not in dir_targets]
+    if not any(target_matches(t, tokens) for t in plain_targets):          # plain targets: unchanged, ANY one token
+        if not dir_targets:
+            return {"targets": candidate_targets(tokens, targets)}
+        # `dir:` targets are stricter (K-dir, round 2): EVERY path the action names must stay inside one of them.
+        bad, note = dir_paths_gap(dir_targets, plain_targets, tool_input, text, tokens)
+        if bad is not None:
+            gap = {"targets": bad or candidate_targets(tokens, targets)}
+            if note:
+                gap["why"] = note
+            return gap
     # External audit of v0.8 (07/10): `docker restart db web` passed with targets=web. For verbs that take several
     # objects, every object must match a target.
     for objs in multi_objects(text or ""):
@@ -1344,7 +1354,8 @@ def describe_gap(gap, plan):
         return f"missing action '{gap['category']}'{why}; plan actions: {allowed}"
     have = ", ".join(plan.get("targets") or []) or "none"
     missing = ", ".join(gap.get("targets") or []) or "no path, filename or host recognised in the command"
-    return f"targets not covered: {missing}; plan targets: {have}"
+    note = f" ({gap['why']})" if gap.get("why") else ""
+    return f"targets not covered: {missing}{note}; plan targets: {have}"
 
 
 DIR_PREFIX = re.compile(r"(?i)^dir:")
@@ -1379,25 +1390,204 @@ def target_matches(t, tokens):
     return False
 
 
-def _dir_prefix_matches(raw_dir, tokens):
-    """K-dir: the path half of a `dir:<path>` target. Resolved through symlinks and `..` the same way as every
-    other path check here (real()), so a token escaping the directory (a symlink inside it pointing out, or a
-    literal `..`) resolves to its real, outside location and no longer starts with the directory's own real path --
-    it is judged on where it actually points, not on the text. Case is kept as given (unlike the plain-path branch
-    above): real paths are case-sensitive on the platforms this runs on, and lower-casing here could fold two
-    different directories into one."""
+def _dir_base(raw_dir):
+    """The real, absolute directory a `dir:<path>` target names, or None when it is not a usable grant: empty, a
+    wildcard or variable, relative (a plan is read later, from somewhere else), `/`, the agent's home, or a protected
+    path (go-gate's own, or the keeper's)."""
     raw_dir = raw_dir.strip("'\"").rstrip("/")
-    if not raw_dir or any(c in raw_dir for c in "*$"):
-        return False                                   # no wildcard, no empty prefix: one explicit real path
+    if not raw_dir or any(c in raw_dir for c in "*$?[{`\\"):
+        return None
+    if not os.path.isabs(os.path.expanduser(raw_dir)):
+        return None
     base = real(raw_dir)
     if base in ("/", real("~")) or is_protected(base) or is_keeper_protected(base):
+        return None
+    return base
+
+
+def _dir_prefix_matches(raw_dir, tokens):
+    """K-dir: the path half of a `dir:<path>` target, at the level of ONE token: true when some token resolves
+    (symlinks and `..` followed, real()) to the directory or under it, and is not protected. That is the weak, any-token
+    notion `target_matches` keeps for plain targets; coverage_gap() additionally requires EVERY path of the action to
+    be inside a `dir:` target (dir_paths_gap). Case is kept as given (unlike the plain-path branch): real paths are
+    case-sensitive on the platforms this runs on."""
+    base = _dir_base(raw_dir)
+    if base is None:
         return False
     for tok in tokens:
         r = real(tok.strip("'\""))
         if (r == base or r.startswith(base + os.sep)) and not is_protected(r) and not is_keeper_protected(r):
-            # a broad dir: (e.g. /etc) must not launder a path that is itself protected or the keeper's own
             return True
     return False
+
+
+URL_SCHEME = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*://")
+GLOB_CHARS = "*?[{"
+SINKS = ("/dev/null", "/dev/stdout", "/dev/stderr", "/dev/zero", "/dev/tty")
+# commands whose every non-option word is a file path, bare names included (`cp a b` writes b in the cwd)
+FILE_CMDS = {"cp", "mv", "install", "ln", "touch", "mkdir", "rmdir", "rm", "tee", "truncate", "rsync", "chmod",
+             "chown", "chgrp", "unlink", "shred", "dd", "tar", "unzip", "sed", "patch"}
+SKIP_FIRST_ARG = {"chmod", "chown", "chgrp", "sed"}            # the mode / owner / script comes first, not a path
+# options that take a NON-path value, per command (a wrong entry would drop a path, so this list stays short)
+VALUE_FLAGS = {"install": {"-m", "-o", "-g", "--mode", "--owner", "--group"}, "mkdir": {"-m", "--mode"},
+               "sed": {"-e", "--expression"}}
+PATH_FLAGS = {"-C", "--directory", "--target-directory", "--work-tree", "--git-dir", "--output", "--file"}
+PATH_KEYS = {"of", "if", "--target-directory", "--directory", "--output", "--target", "--dest", "--destination",
+             "--work-tree", "--git-dir", "--file", "--prefix", "--root"}
+# a stage that runs its words somewhere else (another host, a container, a chroot): the paths in it are that
+# machine's, so local realpath() says nothing about symlinks there and the dir: rule cannot judge them
+REMOTE_EXEC = re.compile(r"(?:^|/)(ssh|scp|sftp|pct|qm|lxc|lxc-attach|nsenter|chroot|kubectl|machinectl)$")
+CONTAINER_EXEC = ("exec", "run", "cp", "create")
+REDIRECT = re.compile(r"(?<![<>&])(?:\d*|&)>>?\|?[ \t]*(?:'([^']*)'|\"([^\"]*)\"|([^\s'\"|;&<>()`]+))")
+
+
+def _pathlike(tok):
+    if URL_SCHEME.match(tok):
+        return tok.lower().startswith("file://")
+    return tok.startswith(("/", "~", "./", "../")) or tok in (".", "..") or "/" in tok
+
+
+def _action_paths(text, tool_input, tokens):
+    """(paths, remote): every path the action names, as written, in order -- path-like words (absolute, ~/, ./, ../,
+    or any word with a `/`), the value of `--opt=PATH` / `-CPATH` / `NAME=PATH`, redirection targets (`> f`, `>> f`),
+    and every word a file-writing command takes (`cp a b`, `tee f`: bare names too, they land in the cwd). `remote` is
+    true when a stage runs its words elsewhere (ssh, pct, docker exec ...). Quotes only separate words, so a path
+    inside `ssh host "cp a /etc/b"` is seen like any other. Over-collects on purpose: an extra word can only make a
+    plan not cover the action, never cover it."""
+    if text is None:
+        for k in ("file_path", "notebook_path"):
+            if tool_input.get(k):
+                return [str(tool_input[k])], False        # a file tool: its own file, not the text it writes
+        words = [tok for tok in tokens]
+        return [w for w in words if _pathlike(w)], False
+    paths, remote = [], False
+    for m in REDIRECT.finditer(text):
+        paths.append(next(g for g in m.groups() if g is not None))
+    for seg in re.split(r"[;&|\n()`]+", text):
+        words = re.findall(r"[^\s'\"<>]+", seg)
+        for i, w in enumerate(words):
+            base = os.path.basename(w) if not w.startswith("-") else ""
+            if REMOTE_EXEC.search(w) or (base in ("docker", "podman", "docker-compose", "compose")
+                                         and any(x in CONTAINER_EXEC for x in words[i + 1:i + 4])):
+                remote = True
+            if w.startswith("-") and "=" in w:
+                key, val = w.split("=", 1)
+                if val and (_pathlike(val) or key in PATH_KEYS):
+                    paths.append(val)
+                continue
+            if "=" in w and not w.startswith(("/", "~", ".")) and "/" not in w.split("=", 1)[0]:
+                key, val = w.split("=", 1)
+                if val and (_pathlike(val) or key in PATH_KEYS):
+                    paths.append(val)
+                continue
+            if w.startswith("-") and "/" in w:
+                paths.append(w[2:] if not w.startswith("--") and _pathlike(w[2:]) else w[w.index("/"):])
+                continue
+            if w in PATH_FLAGS and i + 1 < len(words):
+                paths.append(words[i + 1])
+            if base in FILE_CMDS:
+                args, skip_value, first = [], False, base in SKIP_FIRST_ARG
+                for a in words[i + 1:]:
+                    if skip_value:
+                        skip_value = False
+                        continue
+                    if a.startswith("-"):
+                        skip_value = a in VALUE_FLAGS.get(base, ())
+                        if skip_value and base == "sed":
+                            first = False                 # `sed -e SCRIPT file`: the script is not a leading word
+                        continue
+                    if "=" in a and not _pathlike(a.split("=", 1)[0]):
+                        continue                          # NAME=value handled above (dd of=...)
+                    if first:
+                        first = False
+                        continue
+                    args.append(a)
+                paths += args
+            elif _pathlike(w) and not w.startswith("-"):
+                paths.append(w)
+    seen, out = set(), []
+    for p in paths:
+        if p and p not in seen:
+            seen.add(p)
+            out.append(p)
+    return out, remote
+
+
+def _stage_cwd(text):
+    return os.getcwd()          # as real() does today: the daemon's own cwd (changed in the next commit)
+
+
+def _judge_path(p, cwd, bases, plain_targets):
+    """2 when the path `p` is inside one of the dir: bases (symlinks and `..` followed, relative paths resolved
+    against the agent's cwd) and not protected; 1 when it is acceptable otherwise (a null sink, a web address, a path
+    matched by another, plain, target of the plan); 0 when not. Anything that
+    cannot be judged -- a variable, a command substitution, an escaped character, a remote `host:path`, a relative
+    path with no known cwd, a wildcard anywhere but the last component -- is False (fail closed)."""
+    orig = p.strip("'\"")
+    p = orig
+    if URL_SCHEME.match(p):
+        if not p.lower().startswith("file://"):
+            return 1                                   # a web address is not a path on this machine
+        p = p[7:]
+    if not p:
+        return 1
+    if any(c in p for c in "$`\\!"):
+        return 0
+    if ":" in p:                                          # `host:/path` is remote; `/a:/b` (a volume) is two paths
+        if not p.startswith(("/", "~", ".")):
+            return 0
+        return min([_judge_path(x, cwd, bases, plain_targets) for x in p.split(":") if x and _pathlike(x)] or [0])
+    probe = p
+    for i, c in enumerate(p):
+        if c in GLOB_CHARS:
+            rest = p[i:]
+            if "/" in rest or ".." in rest:
+                return 0
+            probe = p[:p.rfind("/", 0, i) + 1] or "./"
+            break
+    probe = os.path.expanduser(probe)
+    if not os.path.isabs(probe):
+        if cwd is None or cwd is _CWD_UNKNOWN or not os.path.isabs(str(cwd)):
+            return 0
+        probe = os.path.join(cwd, probe)
+    try:
+        r = os.path.realpath(probe)
+    except (OSError, ValueError):
+        return 0
+    if r in SINKS:
+        return 1
+    if is_protected(r) or is_keeper_protected(r):
+        return 0
+    if any(r == b or r.startswith(b + os.sep) for b in bases):
+        return 2
+    return 1 if any(target_matches(t, [orig]) for t in plain_targets) else 0
+
+
+def dir_paths_gap(dir_targets, plain_targets, tool_input, text, tokens):
+    """The `dir:` rule (K-dir, round 2): EVERY path the action names must be inside one of the plan's dir: targets
+    (or match another target of the plan), none protected, and at least one inside a dir: target. Returns
+    (None, None) when covered, else (the offending paths, safe to show, and an explanatory note or None)."""
+    bases = [b for b in (_dir_base(t.strip("'\"")[4:]) for t in dir_targets) if b]
+    paths, remote = _action_paths(text, tool_input, tokens)
+    if not bases:
+        return [], None
+    if remote:
+        return [safe_words(p, 80) for p in paths if safe_words(p, 80) != "<…>"][:8], \
+            "dir: targets cover paths on this machine only, and this runs a command elsewhere"
+    cwd = _stage_cwd(text)
+    verdicts = [(p, _judge_path(p, cwd, bases, plain_targets)) for p in paths]
+    bad = [p for p, v in verdicts if not v]
+    if bad:
+        shown, seen = [], set()
+        for p in bad:
+            w = safe_words(p.strip("'\""), 80)
+            if w and w != "<…>" and w not in seen:
+                seen.add(w)
+                shown.append(w)
+        return shown[:8], "a dir: target covers an action only when every path in it is inside it"
+    if not any(v == 2 for _p, v in verdicts):
+        return [], None                                   # nothing in it names a place inside a dir: target
+    return None, None
 
 
 MULTI_VERBS = re.compile(r"\b(docker(?:\s+compose)?|podman|systemctl|pct|qm|kubectl\s+delete\s+\w+)\s+"
