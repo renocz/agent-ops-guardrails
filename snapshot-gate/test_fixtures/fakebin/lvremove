@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# Fake `lvremove`: see test_fixtures/fakebin/README.md. Not a real backend -- removes no real LV.
+set -euo pipefail
+state="${FAKE_SG_STATE:?FAKE_SG_STATE not set}"
+target="${!#}"
+vg="${target%%/*}"
+snap="${target#*/}"
+if [ -f "$state/lvm_busy" ] && [ "$(cat "$state/lvm_busy")" = "$target" ]; then
+    echo "Logical volume $vg/$snap in use" >&2
+    exit 5
+fi
+snap_file="$state/lvm_snapshots"
+touch "$snap_file"
+awk -F'@' -v vg="$vg" -v snap="$snap" '{
+    split($1, a, "/");
+    if (!(a[1] == vg && $2 == snap)) print;
+}' "$snap_file" > "$snap_file.tmp"
+mv "$snap_file.tmp" "$snap_file"

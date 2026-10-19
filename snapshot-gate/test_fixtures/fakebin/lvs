@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# Fake `lvs`: see test_fixtures/fakebin/README.md. Not a real backend -- never touches any real VG.
+set -euo pipefail
+state="${FAKE_SG_STATE:?FAKE_SG_STATE not set}"
+vg="${!#}"
+snap_file="$state/lvm_snapshots"
+touch "$snap_file"
+if [ -f "$state/lvm_missing_vg" ] && [ "$(cat "$state/lvm_missing_vg")" = "$vg" ]; then
+    echo "Volume group \"$vg\" not found" >&2
+    exit 5
+fi
+awk -F'@' -v vg="$vg" '{
+    split($1, a, "/");
+    if (a[1] == vg) print $2, a[2];
+}' "$snap_file"

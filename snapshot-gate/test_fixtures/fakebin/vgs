@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# Fake `vgs`: see test_fixtures/fakebin/README.md. Not a real backend -- never touches any real VG.
+set -euo pipefail
+state="${FAKE_SG_STATE:?FAKE_SG_STATE not set}"
+vg="${!#}"
+if [ -f "$state/lvm_missing_vg" ] && [ "$(cat "$state/lvm_missing_vg")" = "$vg" ]; then
+    echo "Volume group \"$vg\" not found" >&2
+    exit 5
+fi
+printf '%s\t%s\n' "$(cat "$state/lvm_total")" "$(cat "$state/lvm_free")"

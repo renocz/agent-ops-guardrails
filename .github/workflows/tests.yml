@@ -41,7 +41,9 @@ jobs:
       - name: change-sop tests (numbering, index, refusal to overwrite)
         run: cd change-sop && python -m unittest -v test_new_record.py
       - name: snapshot-gate tests (dry-run backend, host + retention purge)
-        run: cd snapshot-gate && python -m unittest -v test_snapshot_gate_host.py test_retention_purge.py
+        run: cd snapshot-gate && python -m unittest -v test_snapshot_gate_host.py test_retention_purge.py test_backend_commands.py
+      - name: snapshot-gate tests against real zfs/vgs/lvs/lvcreate/lvremove fakes (real subprocess exec, no real pool/VG)
+        run: cd snapshot-gate && python -m unittest -v test_fakebin_subprocess.py
       - name: snapshot-gate installer (syntax, dry run, install into a temp prefix)
         run: |
           bash -n snapshot-gate/install-snapshot-gate.sh

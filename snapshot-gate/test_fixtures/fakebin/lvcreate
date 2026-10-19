@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# Fake `lvcreate`: see test_fixtures/fakebin/README.md. Not a real backend -- creates no real LV.
+set -euo pipefail
+state="${FAKE_SG_STATE:?FAKE_SG_STATE not set}"
+snap_file="$state/lvm_snapshots"
+touch "$snap_file"
+args=("$@")
+name=""
+for ((i = 0; i < ${#args[@]}; i++)); do
+    if [ "${args[$i]}" = "-n" ]; then
+        name="${args[$((i + 1))]}"
+    fi
+done
+origin="${args[-1]}"
+if [[ "$name" == *"@"* ]]; then
+    echo "lvcreate: new logical volume name \"$name\" is invalid" >&2
+    exit 3
+fi
+echo "${origin}@${name}" >> "$snap_file"
