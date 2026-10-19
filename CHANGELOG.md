@@ -6,11 +6,25 @@ One version scheme: **a repository tag per release**. Components have no version
 
 Next: finish the block-mode trial (started 12/10/2026, after the end-to-end dry run of refusal, approval, expiry, replay and a Telegram outage) -- a few days of varied real work, no deadlock, an acceptable number of cards -- then v1.0.
 
+- **keeper: the hook entry gets an explicit `timeout`, and `--wait` is kept under it (independent review of PR #16,
+  19/10).** `--wait` keeps the PreToolUse hook process blocked, but the installer registered the hook with no
+  `timeout`, and `wait_max_sec` defaulted to 1800 s. Per the Claude Code hooks documentation, command hooks default to
+  600 s and a PreToolUse hook that times out does NOT block the tool call: the call continues through the normal
+  permission flow. A wait longer than the timeout would therefore have ended in a fail-open outcome instead of a deny.
+  `install-keeper.sh` now writes `"timeout": 60` into the hook entry (`--hook-timeout N`), a reinstall updates an
+  existing keeper entry in place (an old one without timeout is upgraded, never duplicated), and `wait_max_sec` drops
+  to 50 s (`--wait-max N`, config key `wait_max_sec`). Rule, documented in `keeper/README.md` and the design: hook
+  timeout >= `wait_max_sec` + 10 s. The installer refuses a combination that breaks it (nothing is written) and
+  keeperd, which reads the new config key `hook_timeout_sec`, clamps every `--wait` to `hook_timeout_sec - 10` and
+  warns at start-up if the configured `wait_max_sec` does not fit. An operator who wants a longer wait raises both
+  numbers. Tested: valid JSON with the timeout, idempotent reinstall, upgrade of an old entry, refusal and boundary,
+  the clamp; mutation-checked on the clamp, the installer's refusal and the in-place upgrade. Not verified: what Claude
+  Code does in a real session when a hook exceeds its timeout (documented, not observed).
 - **keeper: `keeper-propose --wait SECONDS`, so the agent's session learns a plan was decided without re-running
   its own command (owner decision, 19/10).** Until now, the only way to find out a plan had been approved was
   for the agent to run `keeper-status` again and read its own reply. `--wait` (default: no wait, exactly the prior
   behaviour) makes the SAME Bash tool call that proposed the plan stay blocked -- on the same Unix socket, no new
-  channel -- until a human decides or `wait_max_sec` (1800s by default) passes, then returns one of four outcomes
+  channel -- until a human decides or `wait_max_sec` (50s by default, see the next entry) passes, then returns one of four outcomes
   in its (still denied; nothing ever runs) reason: approved, rejected, expired before a decision, or the wait
   itself running out while still pending. Nothing about what counts as approved changes: `decide()` is untouched,
   and the new, read-only `status` socket op it feeds only ever reports what `decide()` already wrote, by the
