@@ -58,6 +58,38 @@ jobs:
           bash -n oncall/denial-probe.sh
           python3 oncall/lib/harmless_check.py oncall/probes.json
 
+  shell-portability:
+    # The shell fixtures and agent-side scripts must stay POSIX sh / bash 3.2 portable (stock macOS has
+    # bash 3.2 and no GNU userland). checkbashisms flags bash-only syntax in #!/bin/sh scripts;
+    # shellcheck --shell=sh flags the rest. The fakebin test also runs every fake under dash (strict POSIX).
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
+      - name: install checkbashisms and dash
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq devscripts dash
+      - name: checkbashisms on the fake binaries and the agent-side sh scripts
+        run: |
+          checkbashisms -f snapshot-gate/test_fixtures/fakebin/zfs snapshot-gate/test_fixtures/fakebin/vgs \
+            snapshot-gate/test_fixtures/fakebin/lvs snapshot-gate/test_fixtures/fakebin/lvcreate \
+            snapshot-gate/test_fixtures/fakebin/lvremove snapshot-gate/request-snapshot.sh oncall/denial-probe.sh
+      - name: shellcheck --shell=sh on the same files
+        run: |
+          shellcheck --shell=sh -S warning snapshot-gate/test_fixtures/fakebin/zfs snapshot-gate/test_fixtures/fakebin/vgs \
+            snapshot-gate/test_fixtures/fakebin/lvs snapshot-gate/test_fixtures/fakebin/lvcreate \
+            snapshot-gate/test_fixtures/fakebin/lvremove snapshot-gate/request-snapshot.sh oncall/denial-probe.sh
+      - name: every fake binary has a #!/bin/sh shebang
+        run: |
+          for f in snapshot-gate/test_fixtures/fakebin/*; do
+            case "$f" in *.md) continue ;; esac
+            [ "$(head -n 1 "$f")" = "#!/bin/sh" ] || { echo "not #!/bin/sh: $f"; exit 1; }
+          done
+      - name: set up python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6
+        with:
+          python-version: "3.12"
+      - name: fakebin tests (the portability test drives every fake through dash and bash)
+        run: cd snapshot-gate && python -m unittest -v test_fakebin_subprocess.py
+
   hook-gym:
     # External benchmark for Claude Code hooks (https://pypi.org/project/hook-gym/).
     # secret-guard only targets secret leaks, so we report the credentials and secrets categories and our own homelab cases.
