@@ -72,14 +72,28 @@ def main(argv=None):
         print("nothing eligible for purge")
         return 0
     destroy = DESTROYERS[cfg["backend"]]
+    failures = 0
     for name, age in sorted(targets):
-        if apply:
-            destroy(cfg, name)
-            print(f"deleted: {name} ({age:.1f} days old)")
-        else:
+        if not apply:
             print(f"would delete: {name} ({age:.1f} days old)")
+            continue
+        try:
+            destroy(cfg, name)
+        except Exception as e:
+            # One busy/held snapshot (an LV still open, a transient pool hiccup) must never stop the
+            # rest of an unattended retention run -- the next one may well still be deletable, and
+            # leaving all of them untouched over one bad target is its own kind of incident. This is
+            # host-local admin tooling invoked directly (never by the agent), so -- unlike
+            # snapshot-gate-host.py's state file -- printing the real error here is the point.
+            failures += 1
+            print(f"FAILED to delete: {name} ({age:.1f} days old): {type(e).__name__}: {e}", file=sys.stderr)
+            continue
+        print(f"deleted: {name} ({age:.1f} days old)")
     if not apply:
         print(f"-- dry run: {len(targets)} snapshot(s) would be deleted. Re-run with --apply to really delete.")
+    elif failures:
+        print(f"-- {failures} of {len(targets)} snapshot(s) failed to delete; see above", file=sys.stderr)
+        return 1
     return 0
 
 
