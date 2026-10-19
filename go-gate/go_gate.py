@@ -93,6 +93,13 @@ GIT_READ = {"status", "log", "diff", "show", "rev-parse", "ls-files", "ls-remote
             "name-rev", "merge-base", "version", "help"}
 DOCKER_READ = {"ps", "images", "inspect", "logs", "stats", "version", "info", "top", "port", "diff", "events",
                "history", "search"}
+# `docker exec`'s own flags: a closed, authoritative table (it is a stable CLI, unlike an arbitrary shell command),
+# each marked by whether it takes a separate value (round 2 red-team, 19/10 -- see the call site for why an
+# unrecognised flag must never be guessed at instead of looked up here).
+DOCKER_EXEC_FLAGS = {"-d": 0, "--detach": 0, "--detach-keys": 1, "-e": 1, "--env": 1, "--env-file": 1,
+                    "-i": 0, "--interactive": 0, "--privileged": 0, "-t": 0, "--tty": 0,
+                    "-u": 1, "--user": 1, "-w": 1, "--workdir": 1}
+DOCKER_EXEC_GROUPED_BOOL = re.compile(r"-[dit]+")          # `-it`, `-dit`...: combined short boolean flags
 DOCKER_SUB_READ = {("network", "ls"), ("network", "inspect"), ("volume", "ls"), ("volume", "inspect"),
                    ("image", "ls"), ("image", "inspect"), ("container", "ls"), ("container", "inspect"),
                    ("compose", "ps"), ("compose", "config"), ("compose", "ls"), ("compose", "logs"),
@@ -535,7 +542,21 @@ def _classify_stage(stage, depth, bodies=()):
         if sub == "exec":
             j = 1
             while j < len(args) and args[j].startswith("-"):
-                j += 2 if args[j] in ("-u", "-w", "-e", "--user", "--workdir", "--env") else 1
+                flag = args[j]
+                name, eq, _val = flag.partition("=")
+                if DOCKER_EXEC_GROUPED_BOOL.fullmatch(name):     # `-it`, `-dit`...: combined, none takes a value
+                    j += 1
+                    continue
+                if name not in DOCKER_EXEC_FLAGS:
+                    # Round 2 red-team (19/10): the old by-hand list of "takes a value" flags
+                    # (-u/-w/-e/--user/--workdir/--env) left out --env-file and --detach-keys, so the loop stopped
+                    # one token too early on those and swallowed the CONTAINER NAME into `inner` below instead of
+                    # the flag's own value -- a container literally named `cat` or `find` (the agent's own
+                    # `docker run --name cat ...` earlier in the session) then made `docker exec --env-file x.env
+                    # cat bash -c "rm -rf /x"` classify as a read. Whitelist, not blacklist: an unrecognised flag
+                    # is never assumed to take zero arguments, it makes the whole call opaque instead of guessing.
+                    return "opaque", f"docker exec unrecognised option {flag[:24]}"
+                j += 1 if (eq or DOCKER_EXEC_FLAGS[name] == 0) else 2
             inner = args[j + 1:]
             if not inner:
                 return "change", "docker exec"
@@ -1019,7 +1040,11 @@ def mcp_writes(method):
       since there is no word left that could be an innocent object for it to collide with;
     - and/then/or glued straight onto a write verb with no separator, in any word of a method that does split
       (`get_itemanddelete`, `listanddelete_item`): a connector spelled out by coincidence inside an object word
-      (`list_commits`, `get_check_run`) essentially never happens, so this one is safe to search everywhere."""
+      (`list_commits`, `get_check_run`) essentially never happens, so this one is safe to search everywhere.
+
+    This is a defensive EXTRA check on the raw (possibly server-prefixed) method name, kept as a second layer; the
+    actual read/write decision for the stripped method name is `mcp_is_read_verb()` below, a whitelist rather than
+    this blacklist -- see its docstring for why (round 2 red-team, 19/10)."""
     words = [w.lower() for w in re.split(r"[_\-.]|(?<=[a-z])(?=[A-Z])", method) if w]
     verbs = words[:1] + [words[i + 1] for i, w in enumerate(words[:-1]) if w in ("and", "then", "or")]
     if any(MCP_WRITE.fullmatch(v) for v in verbs):
@@ -1027,6 +1052,45 @@ def mcp_writes(method):
     if len(words) == 1 and MCP_WRITE.search(words[0]):
         return True
     return any(MCP_CONNECTOR_WRITE.search(w) for w in words)
+
+
+# Verbs this project has actual positive evidence are read-only. Round 2 red-team (19/10): `mcp_writes()` above is
+# a BLACKLIST of write verbs, and a blacklist of "dangerous" verbs can never be complete -- `get_and_archive_repo`,
+# `list_and_close_issue`, `find_and_merge_duplicates`, `get_and_lock_thread`, `search_and_block_user`,
+# `get_and_overwrite_file`, `list_and_add_label`, `get_and_ban_member`, `get_and_disable_webhook`,
+# `get_and_publish_draft`, `get_and_wipe_cache` and `get_and_clear_history` all read as "read" on main, because
+# archive/close/merge/lock/block/overwrite/add/ban/disable/publish/wipe/clear were simply never on MCP_WRITE --
+# every one of them changes state. For a method that splits into separate words (the overwhelming majority of
+# real MCP tool names: every one of the 94 real names this project checked uses `_` or camelCase), the verb after
+# and/then/or must now be ON this short list to count as a read, not merely absent from a list of known write
+# verbs.
+MCP_SAFE_VERBS = {"get", "list", "search", "read", "query", "find", "scrape", "fetch", "describe", "status", "map",
+                  "check", "resolve", "guide"}
+# A method with no separator at ALL (`getandarchiveitem`) cannot be split into words with any confidence, so an
+# exact whitelist is impractical there: ordinary object words contain "and"/"or" by pure accident often enough
+# that it breaks real, already-tested tool names (`getstatuses`, `searchrepositories` -- "or" sits inside
+# "repositories" with nothing to do with a connector). This one case keeps a blacklist as a narrow, explicit
+# exception, widened here to cover the run-on form of every verb MCP_SAFE_VERBS' connector check above now catches
+# in its separated form.
+MCP_WRITE_WIDE = re.compile("(" + MCP_WRITE.pattern[1:-1] + r"|archive|merge|close|lock|unlock|ban|unban|block|unblock|"
+                            r"overwrite|add|disable|enable|publish|unpublish|wipe|clear|flush|cancel|approve|"
+                            r"reject|fork|label|assign|unassign|transfer|convert|migrate|import|export|replace|"
+                            r"override|suspend|resume|terminate|quarantine|grant|kick|mute|pin|unpin|follow|"
+                            r"unfollow|subscribe|unsubscribe|draft|reopen)", re.I)
+
+
+def mcp_is_read_verb(method):
+    """True only when every verb-shaped position in `method` is positively known to be read-only: the leading verb
+    (via MCP_READ, left exactly as it judged it before -- it already requires the method to START WITH a
+    recognised read verb or phrase, tabs_context/read_page included, which is itself whitelist-shaped), and, for a
+    method that splits into separate words, the verb after and/then/or (MCP_SAFE_VERBS, a real whitelist). A
+    method with no separator at all falls back to MCP_WRITE_WIDE, documented above."""
+    if not MCP_READ.search("__" + method):
+        return False
+    words = [w.lower() for w in re.split(r"[_\-.]|(?<=[a-z])(?=[A-Z])", method) if w]
+    if len(words) <= 1:
+        return not MCP_WRITE_WIDE.search(words[0] if words else method)
+    return all(words[i + 1] in MCP_SAFE_VERBS for i, w in enumerate(words[:-1]) if w in ("and", "then", "or"))
 
 
 BROWSER_READ_ACTIONS = {"screenshot", "scroll", "zoom", "hover", "wait", "mouse_move", "scroll_to"}
@@ -1063,7 +1127,7 @@ def classify(tool, tool_input):
         # server picks its own name, so that dropped word can itself be a write verb (`mcp__delete__delete_search`
         # strips to `search`). A write verb in EITHER form makes it a change; an empty method (nothing left after
         # the drop, or an empty method to begin with) is never a read either.
-        if method and MCP_READ.search("__" + method) and not mcp_writes(method) and not mcp_writes(full_method):
+        if method and mcp_is_read_verb(method) and not mcp_writes(full_method):
             url = tool_input.get("url") if isinstance(tool_input, dict) else None
             if isinstance(url, str) and is_action_url(url):     # a fetch of a webhook or an action URL changes state
                 return "change", f"{tool} (action URL)"
