@@ -4,6 +4,17 @@ One version scheme: **a repository tag per release**. Components have no version
 
 ## Unreleased (towards v1.0)
 
+- **keeper installer: the hook entry gets `"onFailure": "block"`, and the useless `Write(...)` deny rules go (20/10).**
+  The owner ran a real test on Claude Code 2.1.302 (a hook that sleeps 90 s with `"timeout": 60`): without `onFailure` the
+  command ran after about 67 s, i.e. a timed-out PreToolUse hook is fail-open in practice, not only in the documentation;
+  with `"onFailure": "block"` the command was blocked (71 s); a fast hook ran in 9 s. `install-keeper.sh` now writes
+  `"onFailure": "block"` next to the explicit `timeout` (a reinstall updates an existing keeper entry in place, never a
+  second one), so a hook that fails or times out denies instead of opening the door. The same run showed that Claude Code
+  ignores `Write(path)` deny rules (it prints a warning at every start; only `Edit(path)` rules match and they cover every
+  file-editing tool): the installer now writes the three `Edit(...)` rules only and removes the keeper's own old
+  `Write(...)` duplicates, leaving foreign rules alone. Tests: default entry, in-place upgrade of an old entry, edit-only
+  deny rules with legacy cleanup and a kept foreign rule; mutation-checked (each of four mutants makes them fail).
+
 Next: finish the block-mode trial (started 12/10/2026, after the end-to-end dry run of refusal, approval, expiry, replay and a Telegram outage) -- a few days of varied real work, no deadlock, an acceptable number of cards -- then v1.0.
 
 - **go-gate: round 2 red-team on our own classifier (attacker mode, authorised, 19/10) -- two real bypasses found
@@ -54,6 +65,149 @@ Next: finish the block-mode trial (started 12/10/2026, after the end-to-end dry 
   - **What was tried and rejected:** widening the leading-verb check itself to a free substring search (instead of
     requiring it to START the method) would have reopened exactly the `mcp__x__y_search` case PR #11's own test
     already pins to "change" ("only a prefix naming the server goes") -- kept as `MCP_READ` already was.
+- **go-gate: a `dir:` grant also requires the working directory to be inside it (owner decision, 20/10).** A command
+  that changes something and is covered through a `dir:` target must also run with its effective working directory
+  (`go_gate.CWD`, followed through the command's own `cd`/`pushd`/`popd` per stage, symlinks followed) inside one of the
+  plan's `dir:` targets and not under a protected path; an unknown or unresolvable cwd is refused. Plans without `dir:`
+  targets, plain-target matches (also in a mixed plan) and file tools are unchanged. Over-refusal is accepted (for
+  example `docker compose -f <abs path>` started from another directory); the refusal says to run it from inside the
+  directory or use `cd <dir> && ...`. Tests: cwd inside, outside, unknown, equal to the dir, symlink, protected,
+  `cd` and subshell chains, the message; five new mutants of the mutation check.
+- **go-gate: a `dir:` target now covers an action only when *every* path in it is inside (independent review of PR
+  #15, 19/10).** The first version of `dir:` matched like any target: one word of the action under the directory was
+  enough, so with `targets=dir:/opt/stacks/news` the action `cp /opt/stacks/news/x /etc/cron.d/y` was covered although
+  it writes outside it. `coverage_gap()` now collects every path the action names -- path-like words, the value of
+  `--opt=PATH` / `-CPATH`, redirection targets (`>`, `>>`, `2>`, `&>`), and the file arguments of file-writing commands
+  (`cp`, `mv`, `tee`, `rm`, `install`, `tar`, `dd of=` ...), also inside a quoted `bash -c` or `ssh` command -- and
+  requires each to resolve (symlinks and `..` followed) inside one of the plan's `dir:` targets or to match another
+  target of the plan, with none protected (`is_protected()` / `is_keeper_protected()`). It fails closed on what it
+  cannot judge (variables, command substitutions, escapes, a wildcard before the last component, remote `host:path`),
+  and never covers a stage that runs elsewhere (`ssh`, `scp`, `pct`, `docker exec/run`, `kubectl`): remote work needs
+  plain targets. **Plain, non-`dir:` targets behave exactly as before** (any one matching word covers), including in a
+  plan that mixes both kinds. A relative `dir:` target is no longer a grant. The refusal names the offending paths and,
+  for a `dir:` plan, says that every path must be inside.
+- **go-gate: relative paths are resolved against the agent's cwd for `dir:` matching.** `real()` resolved a relative
+  word against the daemon's own cwd, unrelated to where the agent runs. They now use `go_gate.CWD` (the hook input's
+  cwd), followed through the command's own `cd`/`pushd`/`popd` per stage (`STAGE_CWD`); with no cwd, or one that cannot
+  be resolved statically, a relative path cannot be judged and is not covered.
+- **keeper: the "requested after a refusal" note expires after 10 minutes.** It was stored on the session and shown on
+  the next proposal's card, once, however unrelated and however much later. It is now timestamped and dropped when
+  older than 10 minutes (state written without a timestamp is dropped too).
+- **Tests.** `DirAllPaths` (cp/mv/ln/install, `tee`, every redirection form, `--target-directory`/`-t`/`-C`/`of=`,
+  `ssh`/`pct`/`docker exec`/`bash -c` nesting, symlinks pointing out, `..` inside a path, go-gate and keeper protected
+  paths, unjudgeable paths, wildcards, a mixed command with one path in and one out, file tools judged on their file,
+  plain targets unchanged), `DirRelativePaths` (including a relative `..` escape and a daemon cwd that differs from the
+  agent's), 3 keeper tests for the expiry, and `DirRuleMutation`: it breaks 8 parts of the rule one at a time in a copy
+  of `go_gate.py` and requires the `dir:` tests to fail on each (and to pass on an unmodified copy).
+- **go-gate + keeper: the refusal says what a plan does not cover, instead of just that it does not (19/10).** A
+  dozen cards in one real day traced back to the same cause: a plan covered the intent, but a temp filename, a
+  quoted path, or an action word (`pull`, `rm`, `git commit`) was not cited word-for-word, and the old reason
+  ("the approved plan 'X' does not cover this {cat} action") never said which — so the owner approved a card,
+  watched it get refused again on the next slightly different word, and proposed another. `go_gate.py`'s
+  `coverage_gap()` is `covers()`'s logic, unchanged, turned into a diagnostic: it returns the missing action
+  category (and what the plan does allow) or the specific path/filename/host-looking words in the command that none
+  of the plan's targets cover (and what its targets are), instead of a plain yes/no. `describe_gap()` turns that
+  into the extra clause both `go_gate.py`'s `on_pre_tool()` and `keeperd.py`'s `check()` now append to their deny
+  reason. `candidate_targets()` picks the target-like words (a path, a filename with an extension, a hostname, an
+  IPv4) and runs each one through the existing `safe_words()`/`redact()` masking before it is ever returned, so
+  nothing secret-shaped reaches the reason, a log, or a Telegram card. No protection changed: `covers()` is now
+  `coverage_gap(...) is None`, same control flow, same order of checks (category, the `script` carve-outs for
+  exec-dirs and git's exec surface, then targets), just with the first blocking reason kept instead of discarded.
+  **keeperd** also carries the gap, once, onto the *next* proposal's card when it follows a refusal in the same
+  session (`Keeper.check()` stores it as `last_gap` on the session; `propose()` consumes it; `render_plan_card()`
+  shows it as "Requested after a refusal: …") — context for the owner without a new kind of disclosure, since it is
+  the exact same sanitised text the agent already reads, never the raw command.
+- **go-gate + keeper: `targets=dir:<path>` (K-dir, 19/10), an explicit, visible subtree grant.** A target is
+  normally one path/file/host, matched whole-word; a literal path target already covered its own sub-paths as a
+  side effect (K7's "a prefix covers its sub-paths, kept on purpose"), silently. `dir:<path>` makes that choice
+  explicit instead: the plan's own author has to write `dir:`, and `render_plan_card()` shows a warning line for it
+  (next to the existing ones for `script`/`delete`/no-targets), so the owner is never approving "everything under
+  this directory" without seeing that in the card. Refused outright — never matches anything, as if the target were
+  missing — for `/`, the agent's home, go-gate's protected paths (`is_protected()`) and the keeper's own
+  (`is_keeper_protected()`: `/etc/keeper`, `/var/lib/keeper`, `/opt/agent-guardrails`, the managed-settings file),
+  checked both against the declared directory itself and against every matched token, so a broader grant
+  (`dir:/etc`) cannot launder a path that resolves inside one of those. Matching resolves symlinks and `..` through
+  the same `real()` every other path check here already uses, so a token that resolves outside the granted
+  directory (a literal `..`, a symlink inside it pointing out) is judged on where it actually points and is not
+  covered; see `docs/design-keeper.md` ("`dir:<path>` targets") for the TOCTOU compromise this accepts, the same
+  class already open for every path check, not a new one. 10 new tests (`go-gate/test_go_gate.py`'s
+  `DirPrefixTarget`): a valid prefix, a look-alike sibling (`news` vs `newsletter`/`news-backup`), a `..` escape, a
+  symlink escape, both protected-path guards (including the broad-`dir:`-reaches-`/etc/keeper` case), `/` and home
+  refused, no wildcard/empty prefix, and the pre-existing bare-path behaviour left untouched -- plus 4 more for
+  `coverage_gap()`/`describe_gap()` itself and one each for the deny message in go-gate's own hook and in keeperd,
+  including the carried-once card context (`test_go_gate.py`'s `Scope`/`Hook`, `keeper/test_keeper.py`'s
+  `StateMachine`). Mutation-checked: 2 deliberate reverts (`describe_gap()` gutted to `""`; the per-token protected
+  re-check dropped from the `dir:` match loop) each turned exactly the test built for it red.
+- **keeper: the hook entry gets an explicit `timeout`, and `--wait` is kept under it (independent review of PR #16,
+  19/10).** `--wait` keeps the PreToolUse hook process blocked, but the installer registered the hook with no
+  `timeout`, and `wait_max_sec` defaulted to 1800 s. Per the Claude Code hooks documentation, command hooks default to
+  600 s and a PreToolUse hook that times out does NOT block the tool call: the call continues through the normal
+  permission flow. A wait longer than the timeout would therefore have ended in a fail-open outcome instead of a deny.
+  `install-keeper.sh` now writes `"timeout": 60` into the hook entry (`--hook-timeout N`), a reinstall updates an
+  existing keeper entry in place (an old one without timeout is upgraded, never duplicated), and `wait_max_sec` drops
+  to 50 s (`--wait-max N`, config key `wait_max_sec`). Rule, documented in `keeper/README.md` and the design: hook
+  timeout >= `wait_max_sec` + 10 s. The installer refuses a combination that breaks it (nothing is written) and
+  keeperd, which reads the new config key `hook_timeout_sec`, clamps every `--wait` to `hook_timeout_sec - 10` and
+  warns at start-up if the configured `wait_max_sec` does not fit. An operator who wants a longer wait raises both
+  numbers. Tested: valid JSON with the timeout, idempotent reinstall, upgrade of an old entry, refusal and boundary,
+  the clamp; mutation-checked on the clamp, the installer's refusal and the in-place upgrade. Not verified: what Claude
+  Code does in a real session when a hook exceeds its timeout (documented, not observed).
+- **keeper: `keeper-propose --wait SECONDS`, so the agent's session learns a plan was decided without re-running
+  its own command (owner decision, 19/10).** Until now, the only way to find out a plan had been approved was
+  for the agent to run `keeper-status` again and read its own reply. `--wait` (default: no wait, exactly the prior
+  behaviour) makes the SAME Bash tool call that proposed the plan stay blocked -- on the same Unix socket, no new
+  channel -- until a human decides or `wait_max_sec` (50s by default, see the next entry) passes, then returns one of four outcomes
+  in its (still denied; nothing ever runs) reason: approved, rejected, expired before a decision, or the wait
+  itself running out while still pending. Nothing about what counts as approved changes: `decide()` is untouched,
+  and the new, read-only `status` socket op it feeds only ever reports what `decide()` already wrote, by the
+  plan's fingerprint, never its text or scope, through the same peer-uid gate as every other op. Its own
+  vocabulary is deliberately closed to four words (pending/approved/rejected/expired) -- a fingerprint keeperd
+  never saw answers "expired" too, so there is no fifth, distinguishable "unknown" a socket client could use to
+  probe for live fingerprints. The wait polls rather than holds keeperd's lock, so a session waiting on its own
+  proposal cannot block a button press, another session's check, or `/stop`. `keeper-propose`'s hourly limit,
+  hash, nonce and replay protection are all unchanged; `--wait` is parsed and clamped on the hook side only, and
+  never enters the plan's fingerprint. Tested (`test_keeper.py`, `test_block_dryrun.py`): approved, rejected,
+  expired (both a late click and the daemon noticing on its own, with nobody clicking anything), the wait running
+  out while still pending, two simultaneous plans tracked independently, an unknown plan, a daemon that is down
+  from the start or stops answering mid-wait, and that the default (no `--wait`) behaves exactly as before.
+  Mutation-checked: the approve-branch ledger write disabled, and the `status` op's peer-uid check reordered past
+  it, each in a scratch copy -- the relevant test fails both times.
+- **keeper: several plans can be active in one session at once (production incident, 20/10).** `s["active"]` was a
+  single plan per session: approving a new one replaced it outright, so approving a small 30-minute card while a
+  parallel sub-agent's broad 300-minute plan was still running threw the broad plan away mid-task, refusing work
+  that had nothing to do with the small card just approved ("the approved plan X does not cover this action"). It
+  is now a list, bounded by `max_active_plans` (config key, default 3, hard cap 5 enforced in `Keeper.__init__`
+  regardless of what the config file says).
+  - **Coverage stays single-plan.** An action is allowed when at least one active plan covers it whole --
+    `go_gate.covers()` itself is unchanged, and `check()` never adds up the targets or actions of two different
+    plans to approve something neither covers alone (that would be exactly the implicit scope-widening the keeper
+    exists to prevent). The one exception: a compound Bash command go-gate already splits into stages can have
+    different stages covered by different plans, each still in full -- this already existed for a single active
+    plan and is unchanged, just checked against every active plan instead of only one.
+  - **The cap evicts the oldest, never silently.** Past `max_active_plans`, approving a new plan drops the oldest
+    active one (the plan just approved is never a candidate, by construction). The approval card says what
+    approving it will do *before* the tap ("adds to: …", "renews: …", or which plan the cap would drop); the
+    confirmation names the dropped plan; `/plans` and the log get a `plan-evicted` event; the agent sees the
+    current active ids in `keeper-status` and in any later refusal's reason.
+  - **Renewal.** Approving a plan whose `id` matches one already active replaces it in place (fresh hash, fresh
+    expiry) instead of adding a second entry, and never counts against the cap or evicts anything.
+  - **`/stop <id>`** ends only the named plan (active or pending), in every session; `/stop` with no id still ends
+    everything, unchanged. `/status` and `keeper-status` list every active plan of a session, never just one.
+  - **Compatibility:** `migrate_state()` turns an old `state.json`'s single `active` dict into a one-element list
+    on load, same plan, same hash, same expiry -- nothing it already granted is widened or dropped.
+  - 16 new tests (`keeper/test_keeper.py`, class `MultiPlan`): two plans each covering a different command; a
+    command covered by only one; by neither; the multi-object "no union of two plans" case and its compound-command
+    exception; the cap evicting the oldest with a logged, told-to-both-sides message; a hard cap of 5 regardless of
+    config; renewal by id; independent expiry per plan; `/stop`, `/stop <id>` and the unknown-id case; `/status`
+    and `keeper-status` listing every plan; the card's preview line through add/renew/evict; migration from an old
+    `state.json`, including one holding an already-expired plan. Mutation-checked (disabling the cap guard, letting
+    two plans' coverage union instead of requiring one to cover whole, and disabling the migration, each in a
+    scratch copy): every one of those breaks exactly the test meant to catch it. The existing 138 keeper tests,
+    `test_block_dryrun.py`'s 30, and every other suite in the repo (council, secret-guard, go-gate, leak-check)
+    stayed green, unmodified.
+  - `docs/block-mode-dry-run.md` gets a third checklist part (two proposals) exercising this by hand: a second
+    plan must not throw away the first, `/status` must list both, and `/stop <id>` must end only the one named.
+
 - **README, CHANGELOG and the IT-leaders pages: made the status lines true again (owner review of PR #13, 17/10).**
   The README and this changelog's intro still said the keeper "runs in observe mode" with block mode as "the next
   step" -- stale since 12/10, when block mode started after its end-to-end dry run. Both now say the real state:

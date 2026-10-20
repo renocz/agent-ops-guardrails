@@ -34,6 +34,12 @@ jobs:
           keeper/install-keeper.sh --agent-user "$(id -un)" --owner-id 1
           keeper/install-keeper.sh --agent-user "$(id -un)" --owner-id 1 --prefix /tmp/kp
           python -m json.tool /tmp/kp/etc/claude-code/managed-settings.json >/dev/null
+          # the hook entry carries an explicit timeout; a reinstall is idempotent; a wait that cannot fit is refused
+          python -c "import json; h=json.load(open('/tmp/kp/etc/claude-code/managed-settings.json'))['hooks']['PreToolUse'][0]['hooks'][0]; assert h['timeout']==60, h"
+          cp /tmp/kp/etc/claude-code/managed-settings.json /tmp/kp-first.json
+          keeper/install-keeper.sh --agent-user "$(id -un)" --owner-id 1 --prefix /tmp/kp
+          cmp /tmp/kp-first.json /tmp/kp/etc/claude-code/managed-settings.json
+          if keeper/install-keeper.sh --agent-user "$(id -un)" --owner-id 1 --prefix /tmp/kp2 --wait-max 1800; then exit 1; fi
       - name: leak-check tests (fake secrets only)
         run: cd leak-check && python -m unittest -v test_leak_check.py
       - name: leak-check orchestration scripts (syntax + offline run)

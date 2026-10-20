@@ -9,6 +9,9 @@
 # Options: --chat-id N (default: the owner id); --observe (log only, do not block); --lang en|fr (language of what the
 # human reads on Telegram, default en; what the agent reads stays English); --safe-git-repo DIR (repeatable: a repo
 # where a git read verb is trusted; without any, every git read needs a plan — see K6 in docs/design-keeper.md).
+# The hook entry also gets "onFailure": "block" (measured 20/10/2026: without it a timed-out PreToolUse hook lets the call run).
+# --hook-timeout N (default 60) is the "timeout" written into the hook entry; --wait-max N (default 50) caps
+# keeper-propose --wait. Rule: hook timeout >= wait-max + 10 (a hook killed by its timeout does NOT block the call).
 # The keeper bot's token is never passed on the command line: with --apply, the script asks for it on the terminal
 # (hidden input) if /etc/keeper/bot.token does not exist yet.
 # Precondition: the agent user is not root and cannot sudo without a password it does not have.
@@ -17,6 +20,8 @@ set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 REPO="$(cd "$HERE/.." && pwd)"
 MODE=dry PREFIX="" AGENT="" OWNER="" CHAT="" GATE_MODE=block UI_LANG=en
+HOOK_TIMEOUT=60 WAIT_MAX=50   # hook timeout must be >= WAIT_MAX + HOOK_MARGIN (keeperd.py's HOOK_TIMEOUT_MARGIN_SEC)
+HOOK_MARGIN=10
 SAFE_REPOS=()                 # K6: repos where a git read verb is trusted (empty = every git read needs a plan)
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -28,6 +33,8 @@ while [ $# -gt 0 ]; do
     --safe-git-repo) SAFE_REPOS+=("$2"); shift ;;       # repeatable; absolute path to a repo the agent cannot tamper with
     --observe) GATE_MODE=observe ;;
     --lang) UI_LANG="$2"; shift ;;
+    --hook-timeout) HOOK_TIMEOUT="$2"; shift ;;      # seconds Claude Code lets the keeper hook run (written into the hook entry)
+    --wait-max) WAIT_MAX="$2"; shift ;;              # longest keeper-propose --wait, seconds (config key wait_max_sec)
     -h|--help) sed -n '2,14p' "$0"; exit 0 ;;
     *) echo "unknown option: $1" >&2; exit 2 ;;
   esac
@@ -36,6 +43,9 @@ done
 [ -n "$AGENT" ] && [ -n "$OWNER" ] || { echo "need --agent-user and --owner-id" >&2; exit 2; }
 [[ "$OWNER" =~ ^[0-9]+$ ]] || { echo "--owner-id must be a Telegram numeric id" >&2; exit 2; }
 CHAT="${CHAT:-$OWNER}"
+[[ "$HOOK_TIMEOUT" =~ ^[0-9]{1,5}$ && "$WAIT_MAX" =~ ^[0-9]{1,5}$ ]] || { echo "--hook-timeout and --wait-max must be whole seconds" >&2; exit 2; }
+[ "$HOOK_TIMEOUT" -ge 1 ] || { echo "--hook-timeout must be at least 1" >&2; exit 2; }
+[ $((WAIT_MAX + HOOK_MARGIN)) -le "$HOOK_TIMEOUT" ] || { echo "refusing: --hook-timeout ($HOOK_TIMEOUT) must be at least --wait-max ($WAIT_MAX) + $HOOK_MARGIN: a hook killed by its timeout does not block the tool call" >&2; exit 2; }
 case "$UI_LANG" in en|fr) ;; *) echo "--lang must be en or fr" >&2; exit 2 ;; esac
 [ "$AGENT" != root ] || { echo "refusing: the agent must not be root (see the design's precondition)" >&2; exit 2; }
 id "$AGENT" >/dev/null 2>&1 || { echo "no such user: $AGENT" >&2; exit 2; }
@@ -159,13 +169,14 @@ printf '#!/bin/sh\nexec /usr/bin/env -i %s -I %s/keeperd.py --summary "$@"\n' "$
 put "$BIN/keeper-summary" 700 "root:$ROOTGRP" "$TMP/keeper-summary"
 
 echo "-- 3. config, state and socket directory"
-"$PY" - "$OWNER" "$CHAT" "$AGENT_UID" "$AGENT_HOME" "$GROUP" "$RUN_DIR" "$GATE_MODE" "$UI_LANG" \
+"$PY" - "$OWNER" "$CHAT" "$AGENT_UID" "$AGENT_HOME" "$GROUP" "$RUN_DIR" "$GATE_MODE" "$UI_LANG" "$HOOK_TIMEOUT" "$WAIT_MAX" \
   ${SAFE_REPOS[@]+"${SAFE_REPOS[@]}"} > "$TMP/config.json" <<'PYEOF'
 import json, sys
-o, c, uid, home, grp, run, mode, lang, *safe_repos = sys.argv[1:]
+o, c, uid, home, grp, run, mode, lang, hook_timeout, wait_max, *safe_repos = sys.argv[1:]
 print(json.dumps({"owner_id": int(o), "chat_id": int(c), "agent_uids": [int(uid)], "agent_home": home,
                   "client_group": grp, "socket": run + "/keeper.sock", "state_dir": "/var/lib/keeper",
                   "bot_token_file": "/etc/keeper/bot.token", "mode": mode, "lang": lang,
+                  "hook_timeout_sec": int(hook_timeout), "wait_max_sec": int(wait_max),
                   "safe_git_repos": safe_repos}, indent=1))
 PYEOF
 mkd /etc/keeper 750 "root:$KUSER"
@@ -244,17 +255,29 @@ echo "-- 5. Claude Code managed settings: $MANAGED"
 # Council review (08/10): existing managed settings are merged (backup kept), never skipped: a keeper without its
 # hook registered would gate nothing.
 EXISTING="$MANAGED"; [ "$MODE" = prefix ] && EXISTING="$PREFIX$MANAGED"
-"$PY" - "$HOOK_CMD" "$BASE" "$EXISTING" > "$TMP/managed.json" <<'PYEOF'
+"$PY" - "$HOOK_CMD" "$BASE" "$EXISTING" "$HOOK_TIMEOUT" > "$TMP/managed.json" <<'PYEOF'
 import json, os, sys
-cmd, base, existing = sys.argv[1:]
+cmd, base, existing, hook_timeout = sys.argv[1:]
 cur = {}
 if os.path.exists(existing):
     cur = json.load(open(existing))          # unreadable JSON: stop here, the install fails before writing
-deny = [f"{t}({p})" for t in ("Edit", "Write") for p in (base + "/**", "/etc/keeper/**", "/var/lib/keeper/**")]
+paths = (base + "/**", "/etc/keeper/**", "/var/lib/keeper/**")
+# Measured on Claude Code 2.1.302 (20/10/2026): only Edit(path) deny rules match (they cover every file-editing tool);
+# a Write(path) rule matches nothing and Claude Code prints a warning at every start. Earlier installs wrote both.
+deny = [f"Edit({p})" for p in paths]
+legacy = [f"Write({p})" for p in paths]
 pre = cur.setdefault("hooks", {}).setdefault("PreToolUse", [])
-if not any(h.get("command") == cmd for e in pre for h in e.get("hooks", [])):
-    pre.insert(0, {"matcher": "*", "hooks": [{"type": "command", "command": cmd}]})
+mine = [h for e in pre for h in e.get("hooks", []) if h.get("command") == cmd]
+# Measured on Claude Code 2.1.302 (20/10/2026): a PreToolUse hook that exceeds its "timeout" does NOT block the tool call
+# (the command ran after ~67 s); with "onFailure": "block" it is blocked. So the keeper hook always carries both.
+for h in mine:
+    h["timeout"] = int(hook_timeout)           # a reinstall upgrades an old entry that had none (never a duplicate)
+    h["onFailure"] = "block"
+if not mine:
+    pre.insert(0, {"matcher": "*", "hooks": [{"type": "command", "command": cmd, "timeout": int(hook_timeout),
+                                               "onFailure": "block"}]})
 d = cur.setdefault("permissions", {}).setdefault("deny", [])
+d[:] = [x for x in d if x not in legacy]       # drop the useless Write(...) duplicates an earlier install wrote
 d += [x for x in deny if x not in d]
 print(json.dumps(cur, indent=1))
 PYEOF
