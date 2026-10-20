@@ -229,6 +229,11 @@ To hand control back fast (do this as a human with sudo; the agent cannot):
 3. **Or remove the gate entirely**: restore the managed settings the installer backed up
    (`managed-settings.json.bak-keeper`).
 
+A reinstall **merges** into an existing `/etc/keeper/config.json` instead of overwriting it: only the keys this run's
+own options drive (`--lang`, `--safe-git-repo`, `--hook-timeout`, …) are refreshed, and any key you edited by hand --
+`mode` above, `max_proposals_per_hour`, a key a newer script version adds -- survives untouched. With no existing
+file, the script writes its usual defaults, unchanged.
+
 ## Tests
 
 `python3 test_keeper.py`: no network and no install. The tests use a fake Telegram and a socket in a temp dir, and

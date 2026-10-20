@@ -169,16 +169,29 @@ printf '#!/bin/sh\nexec /usr/bin/env -i %s -I %s/keeperd.py --summary "$@"\n' "$
 put "$BIN/keeper-summary" 700 "root:$ROOTGRP" "$TMP/keeper-summary"
 
 echo "-- 3. config, state and socket directory"
-"$PY" - "$OWNER" "$CHAT" "$AGENT_UID" "$AGENT_HOME" "$GROUP" "$RUN_DIR" "$GATE_MODE" "$UI_LANG" "$HOOK_TIMEOUT" "$WAIT_MAX" \
+# A reinstall MERGES into an existing config.json (owner review, 20/10): only the keys this installer run is
+# actually in charge of (the ones below, driven by its command-line options) are set; every other key already in
+# the file -- known to this script or not, a future version's key included -- is kept exactly as it is. This is
+# the only way a value the owner edited by hand after install (say max_proposals_per_hour, which the installer
+# never writes at all) survives the next --apply instead of silently reverting to a script default.
+EXISTING_CONFIG=/etc/keeper/config.json; [ "$MODE" = prefix ] && EXISTING_CONFIG="$PREFIX/etc/keeper/config.json"
+"$PY" - "$OWNER" "$CHAT" "$AGENT_UID" "$AGENT_HOME" "$GROUP" "$RUN_DIR" "$GATE_MODE" "$UI_LANG" "$HOOK_TIMEOUT" "$WAIT_MAX" "$EXISTING_CONFIG" \
   ${SAFE_REPOS[@]+"${SAFE_REPOS[@]}"} > "$TMP/config.json" <<'PYEOF'
-import json, sys
-o, c, uid, home, grp, run, mode, lang, hook_timeout, wait_max, *safe_repos = sys.argv[1:]
-print(json.dumps({"owner_id": int(o), "chat_id": int(c), "agent_uids": [int(uid)], "agent_home": home,
-                  "client_group": grp, "socket": run + "/keeper.sock", "state_dir": "/var/lib/keeper",
-                  "bot_token_file": "/etc/keeper/bot.token", "mode": mode, "lang": lang,
-                  "hook_timeout_sec": int(hook_timeout), "wait_max_sec": int(wait_max),
-                  "safe_git_repos": safe_repos}, indent=1))
+import json, os, sys
+o, c, uid, home, grp, run, mode, lang, hook_timeout, wait_max, existing, *safe_repos = sys.argv[1:]
+cur = {}
+if os.path.exists(existing):
+    cur = json.load(open(existing))          # unreadable JSON: stop here, the install fails before writing
+cur.update({"owner_id": int(o), "chat_id": int(c), "agent_uids": [int(uid)], "agent_home": home,
+            "client_group": grp, "socket": run + "/keeper.sock", "state_dir": "/var/lib/keeper",
+            "bot_token_file": "/etc/keeper/bot.token", "mode": mode, "lang": lang,
+            "hook_timeout_sec": int(hook_timeout), "wait_max_sec": int(wait_max),
+            "safe_git_repos": safe_repos})
+print(json.dumps(cur, indent=1))
 PYEOF
+if [ -e "$EXISTING_CONFIG" ]; then
+  echo "   /etc/keeper/config.json exists: merged (this run's options refreshed, every other existing key kept as-is)"
+fi
 mkd /etc/keeper 750 "root:$KUSER"
 put /etc/keeper/config.json 640 "root:$KUSER" "$TMP/config.json"
 mkd /var/lib/keeper 700 "$KUSER:$GROUP"

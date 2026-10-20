@@ -999,6 +999,120 @@ class InstallerHookTimeout(unittest.TestCase):
             self.assertEqual(self.install(None, "--wait-max", bad)[1].returncode, 2, bad)
 
 
+@unittest.skipUnless(shutil.which("bash") and os.path.exists("/usr/bin/python3") and
+                     subprocess.run(["id", "nobody"], capture_output=True).returncode == 0, "needs bash, /usr/bin/python3, user nobody")
+class InstallerConfigMerge(unittest.TestCase):
+    """A reinstall MERGES into an existing /etc/keeper/config.json instead of overwriting it: only the keys this
+    run's command-line options actually drive are refreshed; every other key already in the file -- one the script
+    knows about or not -- is kept exactly as it is (value and presence), so a value the owner edited by hand after
+    install (say `max_proposals_per_hour`, which the installer never writes at all) survives the next --apply."""
+
+    SCRIPT = os.path.join(HERE, "install-keeper.sh")
+
+    def install(self, script, prefix=None, *extra):
+        if prefix is None:
+            prefix = tempfile.mkdtemp(prefix="kcfg", dir="/tmp")
+            self.addCleanup(shutil.rmtree, prefix, ignore_errors=True)
+        r = subprocess.run(["bash", script, "--agent-user", "nobody", "--owner-id", "1",
+                            "--prefix", prefix, *extra], capture_output=True, text=True, timeout=60)
+        return prefix, r
+
+    def config(self, prefix):
+        with open(os.path.join(prefix, "etc", "keeper", "config.json")) as f:
+            return json.load(f)
+
+    def test_a_hand_edited_key_the_installer_never_writes_survives_reinstall(self):
+        prefix, r = self.install(self.SCRIPT)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        path = os.path.join(prefix, "etc", "keeper", "config.json")
+        doc = self.config(prefix)
+        self.assertNotIn("max_proposals_per_hour", doc)                  # the installer itself never writes this key
+        doc["max_proposals_per_hour"] = 8                                 # owner raised it by hand (council review of PR #8)
+        with open(path, "w") as f:
+            json.dump(doc, f)
+        _, r = self.install(self.SCRIPT, prefix)                          # reinstall, same user, same options
+        self.assertEqual(r.returncode, 0, r.stderr)
+        after = self.config(prefix)
+        self.assertIn("max_proposals_per_hour", after)                    # survived the reinstall at all
+        self.assertEqual(after["max_proposals_per_hour"], 8)              # ... with the hand-edited value, not the default
+        self.assertEqual((after["lang"], after["hook_timeout_sec"]), ("en", 60))   # installer-owned keys still correct
+
+    def test_an_unknown_key_from_a_future_script_version_survives_reinstall(self):
+        prefix, r = self.install(self.SCRIPT)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        path = os.path.join(prefix, "etc", "keeper", "config.json")
+        doc = self.config(prefix)
+        doc["some_future_key"] = {"nested": ["value"]}                    # simulates a key a later script version added
+        with open(path, "w") as f:
+            json.dump(doc, f)
+        self.install(self.SCRIPT, prefix, "--lang", "fr")                  # reinstall with one explicit option
+        after = self.config(prefix)
+        self.assertIn("some_future_key", after)                           # unknown key: still there
+        self.assertEqual(after["some_future_key"], {"nested": ["value"]})  # ... untouched
+        self.assertEqual(after["lang"], "fr")                              # this run's own option still takes effect
+
+    def test_without_an_existing_file_defaults_are_written_as_before(self):
+        prefix, r = self.install(self.SCRIPT)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        doc = self.config(prefix)
+        self.assertEqual((doc["lang"], doc["hook_timeout_sec"], doc["wait_max_sec"]), ("en", 60, 50))
+        self.assertNotIn("max_proposals_per_hour", doc)
+
+
+@unittest.skipUnless(shutil.which("bash") and os.path.exists("/usr/bin/python3") and
+                     subprocess.run(["id", "nobody"], capture_output=True).returncode == 0, "needs bash, /usr/bin/python3, user nobody")
+class InstallerConfigMergeMutation(InstallerConfigMerge):
+    """Mutation check: run the exact tests above (inherited unchanged) against a sibling copy of install-keeper.sh
+    that reinstates the original bug -- a full overwrite of config.json, ignoring any existing file -- and require
+    every one of them to fail. The mutant is written INSIDE keeper/ (not a separate tree) so $HERE/$REPO in the
+    script still resolve to the real keeper_client.py, keeperd.py, go_gate.py and secret_guard.py."""
+
+    OLD = '''cur = {}
+if os.path.exists(existing):
+    cur = json.load(open(existing))          # unreadable JSON: stop here, the install fails before writing
+cur.update({"owner_id": int(o), "chat_id": int(c), "agent_uids": [int(uid)], "agent_home": home,
+            "client_group": grp, "socket": run + "/keeper.sock", "state_dir": "/var/lib/keeper",
+            "bot_token_file": "/etc/keeper/bot.token", "mode": mode, "lang": lang,
+            "hook_timeout_sec": int(hook_timeout), "wait_max_sec": int(wait_max),
+            "safe_git_repos": safe_repos})
+print(json.dumps(cur, indent=1))'''
+    NEW = '''print(json.dumps({"owner_id": int(o), "chat_id": int(c), "agent_uids": [int(uid)], "agent_home": home,
+                  "client_group": grp, "socket": run + "/keeper.sock", "state_dir": "/var/lib/keeper",
+                  "bot_token_file": "/etc/keeper/bot.token", "mode": mode, "lang": lang,
+                  "hook_timeout_sec": int(hook_timeout), "wait_max_sec": int(wait_max),
+                  "safe_git_repos": safe_repos}, indent=1))'''
+
+    @classmethod
+    def setUpClass(cls):
+        with open(cls.SCRIPT) as f:
+            src = f.read()
+        if cls.OLD not in src:
+            raise AssertionError("the mutation text no longer matches install-keeper.sh: update this test")
+        mutated = src.replace(cls.OLD, cls.NEW, 1)
+        fd, path = tempfile.mkstemp(prefix=".mutant-install-keeper-", suffix=".sh", dir=HERE)
+        os.close(fd)
+        with open(path, "w") as f:
+            f.write(mutated)
+        os.chmod(path, 0o755)
+        cls.SCRIPT = path
+
+    @classmethod
+    def tearDownClass(cls):
+        os.remove(cls.SCRIPT)
+
+    def test_a_hand_edited_key_the_installer_never_writes_survives_reinstall(self):
+        with self.assertRaises(AssertionError):
+            super().test_a_hand_edited_key_the_installer_never_writes_survives_reinstall()
+
+    def test_an_unknown_key_from_a_future_script_version_survives_reinstall(self):
+        with self.assertRaises(AssertionError):
+            super().test_an_unknown_key_from_a_future_script_version_survives_reinstall()
+
+    # Not mutated: the fresh-install path (no existing file) never went through the merge, so it still passes.
+    # Kept here (inherited unchanged, run again) to prove the mutant is otherwise a working installer, not broken
+    # in some other way that would make it fail every test regardless of the merge.
+
+
 class WaitClamp(Base):
     """keeperd side: the wait never exceeds hook_timeout_sec - margin, whatever wait_max_sec says."""
 
