@@ -48,11 +48,41 @@ state, replay a GO or remove the hook. The keeper moves the approval out of the 
 - An approval is a button press, received by keeperd from Telegram. It is checked against the owner id and the chat,
   is bound to that plan's fingerprint, works once only, and must come within 2 h. The plan then stays active for its
   TTL: 1 h by default, 4 h at most. Anything the agent writes in its conversation approves nothing.
+- Add `--wait SECONDS` to `keeper-propose` and the same Bash tool call blocks (up to `wait_max_sec`, 50 s by
+  default, see "Hook timeout and `--wait`" below) until you decide, instead of the agent having to run `keeper-status` again to find out. The hook polls
+  keeperd's `status` op on the same socket, by the plan's fingerprint only -- never the plan's text or scope, and
+  never a new channel. The decision itself still comes only from a button press on the keeper bot, checked exactly
+  as above; `--wait` only changes how soon the agent's own Bash call learns about it. Leaving `--wait` out behaves
+  exactly as before. The tool call always ends up denied either way (there is nothing to run): the reason tells the
+  agent the plan was approved, rejected, expired before you decided, or that the wait itself ran out while still
+  pending (propose again to keep checking).
 - The PreToolUse hook (`keeper_client.py`) only forwards the raw tool call to keeperd and applies its answer. keeperd
   classifies the call with the go-gate classifier (root-owned copy).
 - The hook is registered in Claude Code's root-owned **managed settings**. Its code lives in
   `/opt/agent-guardrails/lib/` (root, 644) and runs as `/usr/bin/env -i /usr/bin/python3 -I`.
 - If keeperd is down, the hook lets reads through and refuses changes.
+
+## Several plans active at once
+
+A session can hold more than one approved plan at the same time (20/10): approving a small, narrow plan while a
+broad one is still running no longer throws the broad one away. Design and the exact rule: `docs/design-keeper.md`.
+In short:
+
+- An action is allowed when **at least one** active plan covers it, whole — never by adding up the targets or
+  actions of two different plans. A compound Bash command (`a && b`) is the one exception: go-gate already splits
+  it into stages, and each stage can be covered by a different plan, but still only one, in full.
+- The config key `max_active_plans` (default 3, hard cap 5 regardless of what the config file says) bounds how many
+  plans one session can hold. Approving past the cap **replaces the oldest active plan** — never silently: the
+  approval card says so before you tap Approve ("⚠️ N plans are already active: approving this drops the oldest,
+  …"), the confirmation names which plan was dropped, and `/plans` lists it as a lifecycle event of its own.
+- Approving a plan whose `id` matches one already active **renews** it (fresh TTL, same slot) instead of adding a
+  second entry, and never counts against the cap.
+- `/stop` still ends every active and pending plan everywhere, like before. `/stop <id>` ends only the plan with
+  that id (active or pending), in every session — plans are not scoped to a session, see "Known limits" below.
+- `/status` and `keeper-status` list **every** active plan of a session (id, expiration, targets, actions), never
+  more than one.
+- An old `state.json` (one active plan per session, not a list) is upgraded automatically on the next start; nothing
+  it already granted is widened or lost.
 
 ## Install
 
@@ -80,9 +110,10 @@ attempt (text starting with `/`) from anyone else is ignored and logged without 
 through the socket, so the agent can never see it. All five also show up in Telegram's "/" menu for this chat (never
 in a global menu a stranger who finds the bot could see).
 
-- **`/stop`** — revokes every active and pending plan right now, across every session, exactly like the card's own
-  "Stop everything" button (they share the same code). Answers "stopped" or "nothing active".
-- **`/status`** — mode (block/observe); for each session with an active plan, its id, actions, targets and the time
+- **`/stop [id]`** — with no id, revokes every active and pending plan right now, across every session, exactly like
+  the card's own "Stop everything" button (they share the same code). With an id, revokes only the plan with that
+  id. Answers "stopped" / "nothing active", or "stopped: plan `id`" / "nothing was active for plan `id`".
+- **`/status`** — mode (block/observe); for each session, every active plan's id, actions, targets and the time
   left; how many proposals are pending; proposals made in the last rolling hour against `max_proposals_per_hour`.
   Read-only, and never the agent's free-form explanation or the raw command.
 - **`/plans [n]`** — the last `n` plan events (default 5, max 20): proposed, approved, rejected, expired, revoked,
@@ -109,6 +140,26 @@ user, so you cannot (and the agent must not) read it. Ask the bot instead: send 
 What to look at before blocking: which shapes dominate (a routine you forgot to cover with a plan?), anything in the
 `script` category (it needs `actions=script`), and whether `Telegram errors` is zero (an approval you cannot receive is a
 block you cannot lift).
+
+## Hook timeout and `--wait`
+
+`--wait` keeps the PreToolUse hook process alive while it polls, and Claude Code kills a command hook at its
+`timeout` (seconds; its documented default is 600 for command hooks, and the installer does not rely on it). Per the
+Claude Code hooks documentation, **a PreToolUse command hook that times out does not block the tool call**: the call
+continues through the normal permission flow. A timeout is therefore a fail-open outcome, not a deny, and a wait must
+never be allowed to reach it.
+
+- `install-keeper.sh` writes an explicit `"timeout"` into the hook entry: 60 s by default (`--hook-timeout N`). A
+  reinstall updates an existing keeper entry that has none (or another value) in place, and never adds a second one.
+- `wait_max_sec` (config key, `--wait-max N` at install) defaults to 50 s. **Rule: `hook_timeout_sec` must be at
+  least `wait_max_sec` + 10** (the margin covers one in-flight status poll and the hook's start-up). The installer
+  refuses a combination that breaks it; keeperd, which also reads `hook_timeout_sec` from its config, clamps any
+  `--wait` to `hook_timeout_sec - 10` anyway (and warns at start-up if `wait_max_sec` itself does not fit), so
+  editing only one of the two numbers by hand cannot reopen the gap.
+- To allow a longer wait, raise both: `install-keeper.sh ... --hook-timeout 1810 --wait-max 1800`. If you edit the
+  keeper's config by hand instead, the hook entry in the managed settings must carry the same value as its
+  `timeout`: keeperd cannot read the managed settings, so it trusts its own config.
+- Without `--wait`, the hook answers in milliseconds and none of this applies.
 
 ## Language
 
@@ -200,3 +251,16 @@ cover:
   `..`/symlink escape do not, and
   neither does `/`, the home directory, go-gate's own protected paths, or the keeper's own (`/etc/keeper`,
   `/opt/agent-guardrails`), even through a broader `dir:` that would otherwise reach them.
+- `keeper-propose --wait`: the `status` op's closed vocabulary (pending/approved/rejected/expired, never the plan
+  itself) and its peer-uid gate, two plans tracked independently, a late click still counted as expired, the
+  ledger pruned by age, and the hook's own `wait_for_decision()` against a real socket (approved/rejected/expired
+  while still waiting, the wait itself running out, a daemon that is down or stops answering mid-wait).
+
+- the hook timeout (`InstallerHookTimeout`, `WaitClamp`): the installer writes the `timeout` into the entry, a
+  reinstall is idempotent and upgrades an entry that has none, a `--wait-max` that does not fit under
+  `--hook-timeout` is refused with nothing written, and keeperd clamps `--wait` under the timeout. Mutation-checked:
+  the clamp removed, the installer's refusal removed, and the in-place upgrade removed, each makes tests fail.
+
+`python3 test_block_dryrun.py` adds the same `--wait` scenarios end to end, through the real hook subprocess: the
+Bash tool call stays blocked on the open socket while the card is still pending, and returns once the owner's
+click (or the plan's own age limit) resolves it, or once the wait itself runs out.

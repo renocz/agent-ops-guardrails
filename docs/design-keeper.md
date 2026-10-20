@@ -56,9 +56,83 @@ change or forge that approval**, even if it tries. Output filtering (secret-guar
    before. Then the plan becomes active for its TTL (default 1 h, max 4 h).
 4. On every PreToolUse, the hook sends `{session, tool, input}` to keeperd. keeperd classifies, checks the active plan
    of that session (every object in scope, as in v0.9.1), answers allow / deny with a reason, and logs it.
+4a. `keeper-propose --wait SECONDS` (v1.0): after keeperd records the proposal exactly as in step 1-2, the hook
+   polls a new, read-only socket op, `status`, by the plan's fingerprint only (never its text or scope), until a
+   human decision lands or `wait_max_sec` (50 s by default, see 4b) passes. Still one Bash tool call, still denied (there is
+   nothing to run), still the same socket -- no new channel, no change to what counts as approved. `status`'s own
+   vocabulary is deliberately closed to four words (pending/approved/rejected/expired); a plan keeperd never saw is
+   reported "expired" too, so a socket client (bounded to the configured agent uid regardless) cannot use a fifth,
+   distinguishable "unknown" to probe for live fingerprints. The decision itself is still written only by `decide()`
+   (step 3), from a button press on the keeper bot; `status` only reads what `decide()` already wrote, so a hook
+   that waits can shorten how long the agent takes to notice a decision, never change what the decision was. The
+   wait does not hold keeperd's approval lock: each poll takes it only for the instant it reads the state, so a
+   session waiting on its own proposal never blocks a button press, another session's check, or `/status`/`/stop`.
+4b. Hook timeout (the fail-open risk of `--wait`). The wait runs inside the hook process, and Claude Code kills a
+   command hook at its `timeout`. Per the Claude Code hooks documentation, a PreToolUse command hook that times out
+   "doesn't block the tool call" (it continues through the normal permission flow; `onFailure: "block"`, in recent
+   versions, changes that), and the default command timeout is 600 s. A wait longer than the timeout would thus end
+   not in a deny but in a hook that is simply gone, which for a gate is the wrong failure mode (for a
+   `keeper-propose` call the fall-through is harmless, since the command only prints "not installed", but the same
+   hook serves every other tool call, so the rule is kept absolute). Hence: the installer writes an explicit
+   `timeout` (60 s) in the hook entry; `wait_max_sec` defaults to 50 s; the rule is `hook_timeout_sec >= wait_max_sec
+   + 10` (one in-flight 5 s status poll, the 2 s poll interval, start-up); the installer refuses a combination that
+   breaks it and keeperd clamps every `--wait` to `hook_timeout_sec - 10`. A longer wait is an operator choice that
+   needs both numbers raised together. What the harness really does when a hook is killed mid-sleep is documented but
+   has not been observed on a real session (see PR #16 for the test to run).
 5. The socket is owned by `_keeper`, group `keeperclients` (the agent's user), mode 660;
    keeperd reads the peer's uid (`getpeereid`) and only answers the configured agent user.
-6. Revocation: the **Stop** button on any approval message ends every active plan, in every session, at once. It does not stop a process already started; that is stated in the message.
+6. Revocation: the **Stop** button on any approval message ends every active plan, in every session, at once. It does not stop a process already started; that is stated in the message. `/stop <id>` (12/10's text commands) ends only the one plan.
+
+## Several active plans at once (20/10)
+
+**The problem a single `s["active"]` caused in real use.** Before this, a session held at most one active plan:
+approving a new one **replaced** whatever was running. When the owner approved a small, 30-minute card while a
+broad, 300-minute one from a parallel sub-agent was still in flight, the broad plan vanished and everything that
+depended on it was refused mid-task ("the approved plan X does not cover this action") — including work that had
+nothing to do with the small card just approved. Observed in production on 20/10/2026. The fix: `active` becomes a
+list, bounded by `max_active_plans` (default 3, hard cap 5 — enforced in `Keeper.__init__`, so a tampered or
+careless config file cannot raise it past 5).
+
+**The coverage rule: one plan covers an action, whole, or it is refused — never two plans together.** An action is
+allowed when at least one active plan covers it completely, exactly as `go_gate.covers()` already decided for a
+single plan (every object of a multi-object verb matched against that plan's own targets, `script` required for
+an opaque command, and so on — none of that changed). The only thing that changed is *which* plan `check()` asks:
+instead of the one-and-only `active`, it tries every active plan in turn and accepts the first that says yes.
+
+This deliberately does **not** let two plans add up: if plan A has `actions=deploy, targets=web` and plan B has
+`actions=edit, targets=app`, neither covers `docker restart app` (A: wrong target; B: wrong category) even though
+the category is approved by A-or-B's category set and the target by B's targets — accepting that would mean a
+"union" of coverage across plans, which is exactly the kind of implicit widening the keeper exists to prevent (a
+scope the owner never saw and never approved in that combination). The one case where two plans legitimately split
+one tool call is a **compound Bash command go-gate already splits into stages** (`docker restart web && docker
+restart db`): each stage is still matched against a single plan, in full — stage 1 might be covered by plan A and
+stage 2 by plan B, but neither stage is ever covered by half of each. This is not new coverage logic; it already
+existed for a single active plan (`self.gate.CHANGES`, one tuple per stage) and continues unchanged, just checked
+per stage against every active plan instead of only one.
+
+**The cap: reached, never silently.** Approving a plan that would push the session over `max_active_plans` drops
+the **oldest** active plan (by approval time; the one just approved is never a candidate, by construction — see
+`Keeper._activate`). Both sides are told: the approval card shows, before the tap, what approving it will do
+("adds to: …", "renews: …", or the cap warning naming which plan would be dropped); the owner's confirmation names
+the dropped plan; `/plans` and the log carry a `plan-evicted` event; and the agent can always see which plans are
+currently active, in `keeper-status`'s own answer and in the reason of any later refusal (`"no active plan (ids…)
+covers it"`). There is no channel that tells the agent synchronously the instant an eviction happens — keeperd has
+no way to push to an agent that is not, at that moment, making a tool call — so the agent learns of it the same way
+it learns of expiry: the next denied call, or its own `keeper-status`.
+
+**Renewal.** A newly-approved plan whose `id` matches one already active replaces that one *in its slot* (fresh
+hash, fresh expiry) instead of adding a second entry; it never counts against the cap and never evicts anything.
+This lets an agent legitimately extend a plan it is still using without burning a slot on itself.
+
+**Compatibility.** `migrate_state()` runs on every load and turns an old `state.json`'s single `active` dict into a
+one-element list, same plan, same hash, same expiry — nothing is widened, nothing is dropped. A state already in
+the list form, or with no `active` key, passes through unchanged.
+
+**Why pending proposals stay one-at-a-time per session.** Only `active` (approved) plans needed to become a list.
+A session can still have only one *pending* (not yet approved) proposal: a second `keeper-propose` while one is
+pending overwrites it, exactly as before this change — the owner would otherwise have to track which of several
+pending cards a given button press belongs to, which the fingerprint-and-nonce binding already makes awkward by
+design (council review, 08/10: "an old button after a new proposal must not approve it").
 
 ## What changes for the attacks seen in the audits
 
@@ -258,6 +332,13 @@ shapes, not arguments. That is the same exposure as the approval cards.
 - Unit tests for keeperd (state machine, hash binding, single use, TTL, owner check), with a fake Telegram.
 - An adversarial test as the agent's user: try to write the state, call the socket with a fake approval, replay a
   callback, edit the managed settings, kill the daemon. Each must fail, and the failure must be logged.
+- `keeper-propose --wait` (v1.0): the `status` op's peer-uid gate and closed vocabulary, the ledger isolating two
+  simultaneous plans, a late click still read as expired, pruning by age, and the end-to-end wait against a real
+  socket and a real hook subprocess -- approved/rejected/expired while still waiting, the wait itself running out,
+  a daemon that is down from the start or stops answering mid-wait; the explicit hook `timeout` written by the
+  installer (idempotent, upgrades an old entry), the refusal of a `wait_max_sec` that does not fit under it, and
+  keeperd's clamp. Each guard above is mutation-checked (the
+  relevant line disabled or reordered in a scratch copy of keeperd.py): the test that exercises it fails.
 - A week in block mode on the Mac before v1.0.
 
 ## Open questions for the review

@@ -59,15 +59,22 @@ class Base(unittest.TestCase):
 
     def plan(self, scope, sid="s1", text="why"):
         """As the agent does it: a keeper-propose command, seen by keeperd in the hook's check."""
-        r = self.k.check(sid, *bash(self.propose_cmd(scope, text)))
+        return self.plan_on(self.k, scope, sid, text)
+
+    def plan_on(self, k, scope, sid="s1", text="why"):
+        """Same as plan(), against an explicit Keeper instance (e.g. one built with a non-default cfg)."""
+        r = k.check(sid, *bash(self.propose_cmd(scope, text)))
         self.assertEqual(r["decision"], "deny")                     # nothing to run
         self.assertIn("sent to the human", r["reason"])
         self.bot.send_plan(*r.pop("_notify"))
         return self.bot.buttons()
 
     def approve(self, scope, sid="s1"):
-        ok, _ = self.plan(scope, sid)
-        self.assertTrue(self.k.decide(OWNER, CHAT, ok).startswith("approved"))
+        self.approve_on(self.k, scope, sid)
+
+    def approve_on(self, k, scope, sid="s1"):
+        ok, _ = self.plan_on(k, scope, sid)
+        self.assertTrue(k.decide(OWNER, CHAT, ok).startswith("approved"))
 
     def allowed(self, tool, ti, sid="s1"):
         return self.k.check(sid, tool, ti)["decision"] == "allow"
@@ -145,7 +152,7 @@ class StateMachine(Base):
 
     def test_ttl_is_capped(self):
         self.approve("id=p1 ; targets=web ; actions=deploy ; ttl=48h")
-        self.assertEqual(self.k.status("s1")["active"]["ttl"], 240)
+        self.assertEqual(self.k.status("s1")["active"][0]["ttl"], 240)
 
     def test_reject(self):
         ok, no = self.plan("id=p1 ; targets=web ; actions=deploy")
@@ -212,6 +219,159 @@ class StateMachine(Base):
         self.assertEqual(stat.S_IMODE(os.stat(self.cfg["state_dir"]).st_mode), 0o700)
         self.assertEqual(stat.S_IMODE(os.stat(self.k.state_path).st_mode), 0o600)
         self.assertEqual(stat.S_IMODE(os.stat(self.k.log_path).st_mode), 0o600)
+
+
+class MultiPlan(Base):
+    """Several active plans in one session at once (20/10, after a 300-min plan vanished under a 30-min one): one
+    plan's approval no longer replaces another's. Coverage is still decided by ONE plan at a time, in full, never
+    by adding up pieces of two (see check()'s own comment); the cap evicts the oldest, never silently; approving
+    a plan whose id matches one already active renews it instead of piling up a second entry."""
+
+    def test_two_plans_each_cover_their_own_command(self):
+        self.approve("id=web ; targets=web ; actions=deploy")
+        self.approve("id=db ; targets=db ; actions=deploy")
+        self.assertTrue(self.allowed(*bash("docker restart web")))
+        self.assertTrue(self.allowed(*bash("docker restart db")))
+
+    def test_a_command_covered_by_only_one_of_the_two_is_allowed(self):
+        self.approve("id=web ; targets=web ; actions=deploy")
+        self.approve("id=app ; targets=app ; actions=edit")
+        self.assertTrue(self.allowed(*bash("docker restart web")))
+        self.assertFalse(self.allowed(*bash("docker restart app")))          # the edit plan does not cover deploy
+
+    def test_a_command_covered_by_neither_is_denied(self):
+        self.approve("id=web ; targets=web ; actions=deploy")
+        self.approve("id=db ; targets=db ; actions=deploy")
+        self.assertFalse(self.allowed(*bash("docker restart mail")))
+
+    def test_neither_plan_alone_covers_a_multi_object_command_no_union_of_two_plans(self):
+        """docker restart web db: covers() already requires every object of a multi-object verb to match ONE
+        plan's own targets (external audit of v0.8). Two plans that each cover one of the two objects must not
+        add up to cover the combined call -- that would be exactly the "half one plan, half another" union the
+        task rules out."""
+        self.approve("id=web ; targets=web ; actions=deploy")
+        self.approve("id=db ; targets=db ; actions=deploy")
+        self.assertFalse(self.allowed(*bash("docker restart web db")))
+
+    def test_a_compound_command_can_have_its_stages_covered_by_different_plans(self):
+        """The one exception the task names: go-gate already splits a compound Bash command into stages
+        (self.gate.CHANGES); each stage is still fully covered by ONE plan, but not necessarily the SAME one."""
+        self.approve("id=web ; targets=web ; actions=deploy")
+        self.approve("id=db ; targets=db ; actions=deploy")
+        self.assertTrue(self.allowed(*bash("docker restart web && docker restart db")))
+        self.assertFalse(self.allowed(*bash("docker restart web && docker restart mail")))
+
+    def test_cap_reached_evicts_the_oldest_and_says_so(self):
+        k = keeperd.Keeper(dict(self.cfg, max_active_plans=2), self.bot, clock=self.clock)
+        self.approve_on(k, "id=a ; targets=a ; actions=deploy")
+        self.clock.t += 60
+        self.approve_on(k, "id=b ; targets=b ; actions=deploy")
+        self.clock.t += 60
+        ok, _ = self.plan_on(k, "id=c ; targets=c ; actions=deploy")
+        out = k.decide(OWNER, CHAT, ok)
+        self.assertEqual(out.key, "ans_approved_evicted")                    # the human is told, not left guessing
+        self.assertIn("a", str(out))                                         # names the plan that was dropped
+        self.assertEqual(k.check("s1", *bash("docker restart b"))["decision"], "allow")
+        self.assertEqual(k.check("s1", *bash("docker restart c"))["decision"], "allow")
+        r = k.check("s1", *bash("docker restart a"))
+        self.assertEqual(r["decision"], "deny")
+        self.assertIn("b", r["reason"])                                      # the agent can see what is still active
+        self.assertIn("c", r["reason"])
+        events = []
+        with open(k.log_path) as f:
+            events = [json.loads(x) for x in f]
+        self.assertIn("plan-evicted", [e["event"] for e in events])          # a lifecycle event of its own, never silent
+
+    def test_cap_is_hard_capped_regardless_of_config(self):
+        k = keeperd.Keeper(dict(self.cfg, max_active_plans=99), self.bot, clock=self.clock)
+        self.assertEqual(k.max_active_plans, keeperd.MAX_ACTIVE_PLANS_HARD_CAP)
+
+    def test_renewal_by_same_id_refreshes_without_adding_or_evicting(self):
+        k = keeperd.Keeper(dict(self.cfg, max_active_plans=2), self.bot, clock=self.clock)
+        self.approve_on(k, "id=a ; targets=a ; actions=deploy ; ttl=10")
+        self.approve_on(k, "id=b ; targets=b ; actions=deploy ; ttl=10")
+        self.clock.t += 9 * 60
+        self.approve_on(k, "id=a ; targets=a ; actions=deploy ; ttl=30")     # renewed just before it would expire
+        self.assertEqual(len(k.state["sessions"]["s1"]["active"]), 2)        # still 2, never 3: a renewal, not an add
+        self.clock.t += 9 * 60                                               # b's original 10 min are now well up
+        self.assertEqual(k.check("s1", *bash("docker restart b"))["decision"], "deny")
+        self.assertEqual(k.check("s1", *bash("docker restart a"))["decision"], "allow")
+
+    def test_each_plan_expires_on_its_own_schedule(self):
+        self.approve("id=a ; targets=a ; actions=deploy ; ttl=10")
+        self.clock.t += 5 * 60
+        self.approve("id=b ; targets=b ; actions=deploy ; ttl=30")
+        self.clock.t += 6 * 60                                               # a's 10 min are up; b has ~29 min left
+        self.assertFalse(self.allowed(*bash("docker restart a")))
+        self.assertTrue(self.allowed(*bash("docker restart b")))
+
+    def test_stop_one_id_leaves_the_others_active(self):
+        self.approve("id=a ; targets=a ; actions=deploy")
+        self.approve("id=b ; targets=b ; actions=deploy")
+        out = self.k.command(OWNER, CHAT, "/stop a")
+        self.assertEqual(out[0].key, "ans_stopped_one")
+        self.assertFalse(self.allowed(*bash("docker restart a")))
+        self.assertTrue(self.allowed(*bash("docker restart b")))
+
+    def test_stop_unknown_id_says_nothing_was_active(self):
+        self.approve("id=a ; targets=a ; actions=deploy")
+        out = self.k.command(OWNER, CHAT, "/stop nosuch")
+        self.assertEqual(out[0].key, "ans_nothing_active_one")
+        self.assertTrue(self.allowed(*bash("docker restart a")))
+
+    def test_stop_with_no_id_still_stops_every_plan(self):
+        self.approve("id=a ; targets=a ; actions=deploy")
+        self.approve("id=b ; targets=b ; actions=deploy")
+        self.assertEqual(self.k.command(OWNER, CHAT, "/stop")[0].key, "ans_stopped")
+        self.assertFalse(self.allowed(*bash("docker restart a")))
+        self.assertFalse(self.allowed(*bash("docker restart b")))
+
+    def test_status_and_keeper_status_list_every_active_plan(self):
+        self.approve("id=a ; targets=a ; actions=deploy ; ttl=10")
+        self.approve("id=b ; targets=b ; actions=deploy ; ttl=20")
+        r = self.k.status("s1")
+        self.assertEqual({p["id"] for p in r["active"]}, {"a", "b"})
+        text = "\n".join(self.k.command(OWNER, CHAT, "/status"))
+        self.assertIn("a", text)
+        self.assertIn("b", text)
+
+    def test_card_previews_add_then_renew_then_cap_eviction(self):
+        k = keeperd.Keeper(dict(self.cfg, max_active_plans=2, max_proposals_per_hour=10), self.bot, clock=self.clock)
+        self.approve_on(k, "id=a ; targets=a ; actions=deploy")
+        ok_b, _ = self.plan_on(k, "id=b ; targets=b ; actions=deploy")
+        self.assertEqual(self.bot.plans[-1][1]["preview"], {"kind": "add", "ids": ["a"]})
+        k.decide(OWNER, CHAT, ok_b)
+        self.plan_on(k, "id=a ; targets=a ; actions=deploy ; ttl=90")
+        self.assertEqual(self.bot.plans[-1][1]["preview"], {"kind": "renew", "id": "a"})
+        self.plan_on(k, "id=c ; targets=c ; actions=deploy")
+        self.assertEqual(self.bot.plans[-1][1]["preview"]["kind"], "evict")
+        text, _kb = keeperd.render_plan_card("en", self.bot.plans[-1][1])
+        self.assertIn("plans are already active", text)
+
+    def test_migration_from_a_single_active_plan_state_file(self):
+        old_state = {"sessions": {"s1": {"active": {"plan": {"id": "legacy", "targets": ["web"],
+                                                              "actions": ["deploy"], "ttl": 30},
+                                                      "hash": "x" * 64, "approved_at": self.clock.t,
+                                                      "expires": self.clock.t + 1800}}},
+                     "used_nonces": [], "proposals": []}
+        with open(self.k.state_path, "w") as f:
+            json.dump(old_state, f)
+        k2 = keeperd.Keeper(self.cfg, self.bot, clock=self.clock)
+        self.assertIsInstance(k2.state["sessions"]["s1"]["active"], list)
+        self.assertEqual(k2.state["sessions"]["s1"]["active"][0]["plan"]["id"], "legacy")
+        self.assertEqual(k2.check("s1", *bash("docker restart web"))["decision"], "allow")
+        self.assertEqual(k2.check("s1", *bash("docker restart mail"))["decision"], "deny")
+
+    def test_migration_does_not_widen_an_already_expired_plan(self):
+        old_state = {"sessions": {"s1": {"active": {"plan": {"id": "legacy", "targets": ["web"],
+                                                              "actions": ["deploy"], "ttl": 30},
+                                                      "hash": "x" * 64, "approved_at": self.clock.t - 3600,
+                                                      "expires": self.clock.t - 1800}}},
+                     "used_nonces": [], "proposals": []}
+        with open(self.k.state_path, "w") as f:
+            json.dump(old_state, f)
+        k2 = keeperd.Keeper(self.cfg, self.bot, clock=self.clock)
+        self.assertEqual(k2.check("s1", *bash("docker restart web"))["decision"], "deny")
 
 
 class ForgedApprovals(Base):
@@ -693,6 +853,147 @@ class InstallerEnvLock(unittest.TestCase):
             self.assertIn(" -I ", text, wrapper)
 
 
+@unittest.skipUnless(shutil.which("bash") and os.path.exists("/usr/bin/python3") and
+                     subprocess.run(["id", "nobody"], capture_output=True).returncode == 0, "needs bash, /usr/bin/python3, user nobody")
+class InstallerHookTimeout(unittest.TestCase):
+    """The hook entry carries an explicit "timeout" (seconds), and wait_max_sec in the config always fits under it:
+    Claude Code does NOT block a PreToolUse call whose hook timed out, so --wait must end before the hook is killed."""
+
+    MANAGED_REL = ("Library/Application Support/ClaudeCode/managed-settings.json" if platform.system() == "Darwin"
+                   else "etc/claude-code/managed-settings.json")
+
+    def install(self, prefix=None, *extra):
+        if prefix is None:
+            prefix = tempfile.mkdtemp(prefix="kto", dir="/tmp")
+            self.addCleanup(shutil.rmtree, prefix, ignore_errors=True)
+        r = subprocess.run(["bash", os.path.join(HERE, "install-keeper.sh"), "--agent-user", "nobody", "--owner-id", "1",
+                            "--prefix", prefix, *extra], capture_output=True, text=True, timeout=60)
+        return prefix, r
+
+    def managed(self, prefix):
+        with open(os.path.join(prefix, self.MANAGED_REL)) as f:
+            return json.load(f)                                      # raises if the installer wrote invalid JSON
+
+    def config(self, prefix):
+        with open(os.path.join(prefix, "etc", "keeper", "config.json")) as f:
+            return json.load(f)
+
+    def keeper_hooks(self, doc):
+        return [h for e in doc["hooks"]["PreToolUse"] for h in e["hooks"] if "keeper_client.py" in h.get("command", "")]
+
+    def test_default_entry_has_a_timeout_that_fits_the_default_wait(self):
+        prefix, r = self.install()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        hooks = self.keeper_hooks(self.managed(prefix))
+        self.assertEqual(len(hooks), 1)
+        self.assertEqual(hooks[0]["timeout"], 60)
+        self.assertIs(type(hooks[0]["timeout"]), int)
+        cfg = self.config(prefix)
+        self.assertEqual((cfg["hook_timeout_sec"], cfg["wait_max_sec"]), (60, 50))
+        self.assertLessEqual(cfg["wait_max_sec"] + keeperd.HOOK_TIMEOUT_MARGIN_SEC, hooks[0]["timeout"])
+
+    def test_the_shipped_defaults_are_consistent(self):
+        self.assertLessEqual(keeperd.DEFAULTS["wait_max_sec"] + keeperd.HOOK_TIMEOUT_MARGIN_SEC,
+                             keeperd.DEFAULTS["hook_timeout_sec"])
+        self.assertEqual(keeperd.effective_wait_max(keeperd.DEFAULTS), keeperd.DEFAULTS["wait_max_sec"])
+
+    def test_reinstall_is_idempotent(self):
+        prefix, _ = self.install()
+        first = self.managed(prefix)
+        _, r = self.install(prefix)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self.managed(prefix), first)                # same document: no second hook, no second deny rule
+
+    def test_reinstall_upgrades_an_old_entry_without_timeout(self):
+        prefix, _ = self.install()
+        path = os.path.join(prefix, self.MANAGED_REL)
+        doc = self.managed(prefix)
+        for h in self.keeper_hooks(doc):
+            del h["timeout"]                                         # what installs before this change wrote
+        with open(path, "w") as f:
+            json.dump(doc, f)
+        self.assertNotIn("timeout", self.keeper_hooks(self.managed(prefix))[0])
+        _, r = self.install(prefix, "--hook-timeout", "90", "--wait-max", "60")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        hooks = self.keeper_hooks(self.managed(prefix))
+        self.assertEqual([h["timeout"] for h in hooks], [90])        # updated in place, still ONE entry
+
+    def test_a_foreign_hook_is_kept_and_untouched(self):
+        prefix, _ = self.install()
+        path = os.path.join(prefix, self.MANAGED_REL)
+        doc = self.managed(prefix)
+        doc["hooks"]["PreToolUse"].append({"matcher": "Bash", "hooks": [{"type": "command", "command": "/bin/true"}]})
+        with open(path, "w") as f:
+            json.dump(doc, f)
+        self.install(prefix)
+        foreign = [h for e in self.managed(prefix)["hooks"]["PreToolUse"] for h in e["hooks"] if h["command"] == "/bin/true"]
+        self.assertEqual(foreign, [{"type": "command", "command": "/bin/true"}])
+
+    def test_a_wait_max_that_does_not_fit_is_refused_and_writes_nothing(self):
+        for args in (("--wait-max", "51"), ("--wait-max", "1800"), ("--hook-timeout", "30"),
+                     ("--hook-timeout", "600", "--wait-max", "1800")):
+            prefix, r = self.install(None, *args)
+            self.assertEqual(r.returncode, 2, args)
+            self.assertIn("hook-timeout", r.stderr)
+            self.assertFalse(os.path.exists(os.path.join(prefix, "etc", "keeper", "config.json")), args)
+
+    def test_an_operator_can_choose_a_longer_wait_with_a_longer_timeout(self):
+        prefix, r = self.install(None, "--hook-timeout", "1810", "--wait-max", "1800")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self.keeper_hooks(self.managed(prefix))[0]["timeout"], 1810)
+        self.assertEqual(self.config(prefix)["wait_max_sec"], 1800)
+
+    def test_the_boundary_is_inclusive_of_the_margin(self):
+        self.assertEqual(self.install(None, "--hook-timeout", "60", "--wait-max", "50")[1].returncode, 0)
+        self.assertEqual(self.install(None, "--hook-timeout", "59", "--wait-max", "50")[1].returncode, 2)
+
+    def test_non_numbers_are_refused(self):
+        for bad in ("abc", "-5", "5.5", "", "0x10"):
+            self.assertEqual(self.install(None, "--hook-timeout", bad)[1].returncode, 2, bad)
+            self.assertEqual(self.install(None, "--wait-max", bad)[1].returncode, 2, bad)
+
+
+class WaitClamp(Base):
+    """keeperd side: the wait never exceeds hook_timeout_sec - margin, whatever wait_max_sec says."""
+
+    def wait_of(self, **cfg):
+        self.k.cfg.update(cfg)
+        r = self.k.check("s1", *bash(self.propose_cmd("id=p1 ; actions=edit") + " --wait 999999"))
+        return r["wait"]
+
+    def test_default_cap(self):
+        self.assertEqual(self.wait_of(), 50)
+
+    def test_wait_max_above_the_hook_timeout_is_clamped(self):
+        self.assertEqual(self.wait_of(wait_max_sec=1800, hook_timeout_sec=60), 50)
+
+    def test_a_longer_hook_timeout_allows_a_longer_wait(self):
+        self.assertEqual(self.wait_of(wait_max_sec=1800, hook_timeout_sec=1810), 1800)
+
+    def test_a_hook_timeout_below_the_margin_means_no_wait_at_all(self):
+        self.assertEqual(self.wait_of(wait_max_sec=50, hook_timeout_sec=5), 0)
+
+    def test_a_small_wait_is_not_raised(self):
+        self.k.cfg.update(wait_max_sec=1800, hook_timeout_sec=60)
+        r = self.k.check("s1", *bash(self.propose_cmd("id=p1 ; actions=edit") + " --wait 7"))
+        self.assertEqual(r["wait"], 7)
+
+    def test_load_config_warns_and_validates(self):
+        path = os.path.join(self.dir, "c.json")
+        with open(path, "w") as f:
+            json.dump({"wait_max_sec": 1800}, f)
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            cfg = keeperd.load_config(path)
+        self.assertEqual(keeperd.effective_wait_max(cfg), 50)
+        self.assertIn("clamped to 50s", err.getvalue())
+        for bad in ({"wait_max_sec": "50"}, {"hook_timeout_sec": -1}, {"wait_max_sec": True}, {"hook_timeout_sec": 1.5}):
+            with open(path, "w") as f:
+                json.dump(bad, f)
+            with self.assertRaises(ValueError, msg=str(bad)):
+                keeperd.load_config(path)
+
+
 def fake_secrets():
     """Fake secrets, assembled at run time so that secret scanners stay quiet on this file."""
     return {"github": "gh" + "p_" + "A1b2C3d4E5f6G7h8I9j0" * 2, "aws": "AK" + "IA" + "ABCDEFGHIJKLMNOP",
@@ -1084,9 +1385,10 @@ class OwnerCommands(Base):
         self.assertEqual(self.command("/stop@keeper_bot")[0].key, "ans_stopped")
 
     def test_malformed_stop_variants_are_ignored_not_executed(self):
-        """decide() matches /stop case-insensitively like /summary; trailing text (even a bare suffix) is rejected."""
+        """decide() matches /stop case-insensitively like /summary; a bare suffix with no "@" or id is rejected,
+        and so is more than one word (/stop <id> takes exactly one token, see MultiPlan for the valid form)."""
         self.approve("id=p1 ; targets=web ; actions=deploy ; ttl=30")
-        for text in ("/stopx", "/stop now"):
+        for text in ("/stopx", "/stop p1 extra"):
             self.assertIsNone(self.command(text), text)
         self.assertTrue(self.allowed(*bash("docker restart web")))             # still active: none of them stopped it
         self.assertEqual(self.command("/STOP")[0].key, "ans_stopped")          # case-insensitive, same as /summary
@@ -1543,6 +1845,287 @@ class Socket(Base):
             self.assertEqual(self.hook(*bash("ls")), "allow")
         finally:
             idle.close()
+
+
+class WaitCommand(Base):
+    """`keeper-propose --wait SECONDS`: parsing and the one extra field it adds to check()'s reply. Default (no
+    --wait) is untouched -- see test_only_a_lone_keeper_propose_is_a_proposal and friends in StateMachine, which
+    already cover the no-wait path and still pass unmodified."""
+
+    def test_wait_is_recognized_and_clamped(self):
+        r = self.k.check("s1", *bash(self.propose_cmd("id=p1 ; actions=edit", "why") + " --wait 999999"))
+        self.assertEqual(r["wait"], self.k.cfg["wait_max_sec"])          # 999999 > wait_max_sec: clamped, not refused
+        self.assertEqual(r["hash"], r["_notify"][1]["hash"][:12])
+
+    def test_wait_absent_by_default(self):
+        r = self.k.check("s1", *bash(self.propose_cmd("id=p1 ; actions=edit")))
+        self.assertNotIn("wait", r)
+        self.assertNotIn("hash", r)                                      # only added alongside wait, see check()
+
+    def test_a_small_wait_is_kept_as_is(self):
+        r = self.k.check("s1", *bash(self.propose_cmd("id=p1 ; actions=edit") + " --wait 5"))
+        self.assertEqual(r["wait"], 5)
+
+    def test_malformed_wait_is_not_a_proposal(self):
+        for bad in ("abc", "-5", "5.0", "1 2", "999999999999"):
+            cmd = self.propose_cmd("id=p1 ; actions=edit") + f" --wait {bad}"
+            r = self.k.check("s1", *bash(cmd))
+            self.assertNotIn("_notify", r, bad)                          # same fallback as any other unknown option
+        self.assertEqual(self.bot.plans, [])
+
+    def test_wait_is_not_recognized_for_keeper_status(self):
+        r = self.k.check("s1", *bash("keeper-status --wait 5"))
+        self.assertNotIn("keeper status", r["reason"])                  # not the keeper-status fast path either
+        self.assertNotIn("_notify", r)
+
+    def test_wait_never_enters_the_plan_hash_or_scope(self):
+        """Security constraint: --wait is a client preference, never part of what was approved."""
+        r1 = self.k.check("s1", *bash(self.propose_cmd("id=p1 ; actions=edit", "why")))
+        h1 = r1["_notify"][1]["hash"]
+        self.bot.plans.clear()
+        self.k.session("s1").pop("pending", None)
+        r2 = self.k.check("s1", *bash(self.propose_cmd("id=p1 ; actions=edit", "why") + " --wait 42"))
+        h2 = r2["_notify"][1]["hash"]
+        self.assertEqual(h1, h2)                                         # identical plan, with or without --wait
+        self.assertNotIn("wait", r2["_notify"][1]["plan"])
+
+    def test_wait_does_not_change_the_hourly_proposal_limit(self):
+        for i in range(3):
+            r = self.k.check("s1", *bash(self.propose_cmd(f"id=p{i} ; actions=edit") + " --wait 5"))
+            self.assertIn("_notify", r, i)
+        r = self.k.check("s1", *bash(self.propose_cmd("id=p4 ; actions=edit") + " --wait 5"))
+        self.assertNotIn("_notify", r)
+        self.assertIn("more than", r["reason"])
+
+
+class PlanStatusLedger(Base):
+    """keeperd.plan_status(hash12): the read-only view keeper-propose --wait polls instead of keeper-status. Closed
+    vocabulary (pending/approved/rejected/expired only), never the plan's content, and write-only from decide() --
+    nothing reachable from the socket can make it answer anything decide() didn't already decide."""
+
+    def test_unknown_hash_is_expired_not_a_distinct_value(self):
+        """A 5th, distinguishable "unknown" would let a socket client tell "never existed" apart from "existed and
+        expired" -- an oracle for probing fingerprints. Both answer "expired"."""
+        self.assertEqual(self.k.plan_status("0" * 12), "expired")
+
+    def test_pending_then_approved(self):
+        ok, _no = self.plan("id=p1 ; actions=edit")
+        h = self.bot.plans[-1][1]["hash"][:12]
+        self.assertEqual(self.k.plan_status(h), "pending")
+        self.k.decide(OWNER, CHAT, ok)
+        self.assertEqual(self.k.plan_status(h), "approved")
+
+    def test_rejected(self):
+        ok, no = self.plan("id=p1 ; actions=edit")
+        h = self.bot.plans[-1][1]["hash"][:12]
+        self.k.decide(OWNER, CHAT, no)
+        self.assertEqual(self.k.plan_status(h), "rejected")
+
+    def test_approved_plan_keeps_reporting_approved_after_its_ttl_runs_out(self):
+        """--wait is about the HUMAN'S decision, not whether the plan is still currently active."""
+        self.approve("id=p1 ; actions=edit ; ttl=10")
+        h = self.bot.plans[-1][1]["hash"][:12]
+        self.clock.t += 11 * 60
+        self.assertFalse(self.allowed("Write", {"file_path": "/srv/app/a.py", "content": "x"}))   # no longer active...
+        self.assertEqual(self.k.plan_status(h), "approved")              # ...but it WAS approved
+
+    def test_late_click_reports_expired(self):
+        ok, _no = self.plan("id=p1 ; actions=edit")
+        h = self.bot.plans[-1][1]["hash"][:12]
+        self.clock.t += 121 * 60
+        self.k.decide(OWNER, CHAT, ok)
+        self.assertEqual(self.k.plan_status(h), "expired")
+
+    def test_expired_is_detected_live_without_any_click(self):
+        """A plan nobody ever approved or rejected still reports expired once it has aged out -- plan_status()
+        checks the age itself; it does not need decide() to have run first."""
+        self.plan("id=p1 ; actions=edit")
+        h = self.bot.plans[-1][1]["hash"][:12]
+        self.clock.t += 121 * 60
+        self.assertEqual(self.k.plan_status(h), "expired")
+        self.assertEqual(self.k.state["plan_status"], {})                # read-only: no click ever happened
+
+    def test_stop_wipes_a_pending_plan_to_expired(self):
+        self.plan("id=p1 ; actions=edit")
+        h = self.bot.plans[-1][1]["hash"][:12]
+        self.k.decide(OWNER, CHAT, "stop:all")
+        self.assertEqual(self.k.plan_status(h), "expired")
+
+    def test_two_simultaneous_plans_are_independent(self):
+        ok_a, _ = self.plan("id=a ; actions=edit", sid="A")
+        ok_b, no_b = self.plan("id=b ; actions=edit", sid="B")
+        h_a, h_b = self.bot.plans[-2][1]["hash"][:12], self.bot.plans[-1][1]["hash"][:12]
+        self.k.decide(OWNER, CHAT, ok_a)
+        self.assertEqual(self.k.plan_status(h_a), "approved")
+        self.assertEqual(self.k.plan_status(h_b), "pending")             # B untouched by A's decision
+        self.k.decide(OWNER, CHAT, no_b)
+        self.assertEqual(self.k.plan_status(h_a), "approved")            # A untouched by B's decision
+        self.assertEqual(self.k.plan_status(h_b), "rejected")
+
+    def test_status_never_returns_plan_content(self):
+        """By construction (the return value is one of 4 words, never a dict): a plan with a tell-tale id/target/
+        explanation must not appear in what plan_status() hands back."""
+        secret = "do-not-leak-this-explanation"
+        self.plan("id=tell-tale-id ; targets=tell-tale-target ; actions=edit", text=secret)
+        h = self.bot.plans[-1][1]["hash"][:12]
+        state = self.k.plan_status(h)
+        self.assertIsInstance(state, str)
+        self.assertIn(state, ("pending", "approved", "rejected", "expired"))
+        self.assertNotIn("tell-tale", state)
+        self.assertNotIn(secret, state)
+
+    def test_ledger_is_bounded_by_age(self):
+        self.approve("id=p1 ; actions=edit")
+        h = self.bot.plans[-1][1]["hash"][:12]
+        self.clock.t += keeperd.Keeper.PLAN_STATUS_RETENTION_SEC + 1
+        self.approve("id=p2 ; actions=edit")                             # any later decide() call prunes the ledger
+        self.assertNotIn(h, self.k.state["plan_status"])
+        self.assertEqual(self.k.plan_status(h), "expired")               # evicted, not "pending" forever
+
+    def test_plan_status_is_never_written_outside_decide(self):
+        """Mutation-checked: with _record_plan_status's call in the approve branch commented out, this test fails
+        (plan_status(h) comes back "pending" instead of "approved") -- confirming the ledger write really is what
+        makes decide()'s decision visible here, not some other path."""
+        self.approve("id=p1 ; actions=edit")
+        h = self.bot.plans[-1][1]["hash"][:12]
+        self.assertEqual(self.k.plan_status(h), "approved")
+        self.assertEqual(set(self.k.state["plan_status"][h]), {"state", "at"})   # never plan/scope/text
+
+
+class StatusSocketOp(Base):
+    """The real "status" op on the real socket: same peer-uid gate as "check", a closed reply shape, and a
+    malformed/missing hash refused rather than guessed at."""
+
+    def setUp(self):
+        super().setUp()
+        ready = threading.Event()
+        threading.Thread(target=keeperd.serve, args=(self.k, self.cfg, ready), daemon=True).start()
+        self.assertTrue(ready.wait(5))
+
+    def raw(self, req):
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.connect(self.cfg["socket"])
+        s.sendall((json.dumps(req) + "\n").encode())
+        out = s.makefile().readline()
+        s.close()
+        return json.loads(out)
+
+    def test_status_over_the_real_socket(self):
+        self.plan("id=p1 ; actions=edit")
+        h = self.bot.plans[-1][1]["hash"][:12]
+        self.assertEqual(self.raw({"op": "status", "hash": h}), {"state": "pending"})
+
+    def test_reply_never_carries_anything_but_the_state(self):
+        self.approve("id=p1 ; targets=secret-target ; actions=edit")
+        h = self.bot.plans[-1][1]["hash"][:12]
+        r = self.raw({"op": "status", "hash": h})
+        self.assertEqual(set(r), {"state"})
+        self.assertNotIn("secret-target", json.dumps(r))
+
+    def test_malformed_or_missing_hash_is_refused(self):
+        for bad in ({}, {"hash": "not-hex"}, {"hash": "a" * 11}, {"hash": "a" * 13}, {"hash": 12345}, {"hash": None}):
+            r = self.raw(dict({"op": "status"}, **bad))
+            self.assertEqual(r, {"error": "bad hash"}, bad)
+
+    def test_stranger_uid_is_refused_like_check(self):
+        """Mutation-checked: moving the "status" branch above the uid-authorization check in a scratch copy of
+        keeperd.py makes this test fail (a stranger uid would get a real state back instead of a refusal)."""
+        self.plan("id=p1 ; actions=edit")
+        h = self.bot.plans[-1][1]["hash"][:12]
+        self.cfg["agent_uids"] = [os.getuid() + 12345]
+        r = self.raw({"op": "status", "hash": h})
+        self.assertEqual(r, {"decision": "deny", "reason": "keeper: unknown client"})
+        self.assertIn("socket-peer-refused", self.log_events())
+
+
+class WaitForDecisionClient(Base):
+    """keeper_client.wait_for_decision(): the hook-side half of --wait, against the real socket."""
+
+    def setUp(self):
+        super().setUp()
+        sys.path.insert(0, HERE)
+        global keeper_client
+        import keeper_client
+        self._socket_env = (os.environ.get("KEEPER_TEST_MODE"), os.environ.get("KEEPER_SOCKET_FOR_TESTS"))
+        os.environ["KEEPER_TEST_MODE"] = "1"
+        os.environ["KEEPER_SOCKET_FOR_TESTS"] = self.cfg["socket"]
+        keeper_client.SOCKET = self.cfg["socket"]
+        ready = threading.Event()
+        threading.Thread(target=keeperd.serve, args=(self.k, self.cfg, ready), daemon=True).start()
+        self.assertTrue(ready.wait(5))
+
+    def tearDown(self):
+        env_mode, env_sock = self._socket_env
+        for k, v in (("KEEPER_TEST_MODE", env_mode), ("KEEPER_SOCKET_FOR_TESTS", env_sock)):
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+        super().tearDown()
+
+    def test_already_approved_returns_at_once(self):
+        self.approve("id=p1 ; actions=edit")
+        h = self.bot.plans[-1][1]["hash"][:12]
+        t0 = time.time()
+        code, state = keeper_client.wait_for_decision(h, 30)
+        self.assertEqual((code, state), (keeper_client.WAIT_APPROVED, "approved"))
+        self.assertLess(time.time() - t0, 2)                             # did not sleep through the 30s budget
+
+    def test_already_rejected_returns_at_once(self):
+        ok, no = self.plan("id=p1 ; actions=edit")
+        self.k.decide(OWNER, CHAT, no)
+        h = self.bot.plans[-1][1]["hash"][:12]
+        self.assertEqual(keeper_client.wait_for_decision(h, 30), (keeper_client.WAIT_REJECTED, "rejected"))
+
+    def test_already_expired_returns_at_once(self):
+        self.plan("id=p1 ; actions=edit")
+        h = self.bot.plans[-1][1]["hash"][:12]
+        self.clock.t += 121 * 60
+        self.assertEqual(keeper_client.wait_for_decision(h, 30), (keeper_client.WAIT_EXPIRED, "expired"))
+
+    def test_still_pending_times_out(self):
+        self.plan("id=p1 ; actions=edit")
+        h = self.bot.plans[-1][1]["hash"][:12]
+        t0 = time.time()
+        self.assertEqual(keeper_client.wait_for_decision(h, 1), (keeper_client.WAIT_STILL_PENDING, "pending"))
+        self.assertGreaterEqual(time.time() - t0, 1)
+
+    def test_approved_while_polling(self):
+        """The decision lands between two polls: the next poll (not the wait's own deadline) picks it up."""
+        ok, _no = self.plan("id=p1 ; actions=edit")
+        h = self.bot.plans[-1][1]["hash"][:12]
+
+        def approve_shortly():
+            time.sleep(keeper_client.STATUS_POLL_INTERVAL * 0.6)
+            self.k.decide(OWNER, CHAT, ok)
+        threading.Thread(target=approve_shortly).start()
+        t0 = time.time()
+        code, state = keeper_client.wait_for_decision(h, 30)
+        self.assertEqual((code, state), (keeper_client.WAIT_APPROVED, "approved"))
+        self.assertLess(time.time() - t0, 30)                            # returned on the next poll, not the deadline
+
+    def test_daemon_down_raises(self):
+        keeper_client.SOCKET = os.path.join(self.dir, "no-such.sock")
+        try:
+            with self.assertRaises(OSError):
+                keeper_client.wait_for_decision("0" * 12, 1)
+        finally:
+            keeper_client.SOCKET = self.cfg["socket"]
+
+    def test_daemon_stopped_mid_wait_raises(self):
+        """A socket that existed (propose() succeeded) but whose daemon then stopped answering: polling must stop
+        and propagate, never spin forever or silently report a decision that never happened."""
+        self.plan("id=p1 ; actions=edit")
+        h = self.bot.plans[-1][1]["hash"][:12]
+        os.unlink(self.cfg["socket"])
+        with self.assertRaises(OSError):
+            keeper_client.wait_for_decision(h, 5)
+
+    def test_hash_rejected_by_the_daemon_raises_value_error(self):
+        """A malformed hash never happens from propose()'s own output, but wait_for_decision() must not silently
+        treat the daemon's {"error": ...} reply as a state."""
+        with self.assertRaises(ValueError):
+            keeper_client.wait_for_decision("not-a-hash", 1)
 
 
 if __name__ == "__main__":
