@@ -4,6 +4,17 @@ One version scheme: **a repository tag per release**. Components have no version
 
 ## Unreleased (towards v1.0)
 
+- **keeper installer: the hook entry gets `"onFailure": "block"`, and the useless `Write(...)` deny rules go (20/10).**
+  The owner ran a real test on Claude Code 2.1.302 (a hook that sleeps 90 s with `"timeout": 60`): without `onFailure` the
+  command ran after about 67 s, i.e. a timed-out PreToolUse hook is fail-open in practice, not only in the documentation;
+  with `"onFailure": "block"` the command was blocked (71 s); a fast hook ran in 9 s. `install-keeper.sh` now writes
+  `"onFailure": "block"` next to the explicit `timeout` (a reinstall updates an existing keeper entry in place, never a
+  second one), so a hook that fails or times out denies instead of opening the door. The same run showed that Claude Code
+  ignores `Write(path)` deny rules (it prints a warning at every start; only `Edit(path)` rules match and they cover every
+  file-editing tool): the installer now writes the three `Edit(...)` rules only and removes the keeper's own old
+  `Write(...)` duplicates, leaving foreign rules alone. Tests: default entry, in-place upgrade of an old entry, edit-only
+  deny rules with legacy cleanup and a kept foreign rule; mutation-checked (each of four mutants makes them fail).
+
 Next: finish the block-mode trial (started 12/10/2026, after the end-to-end dry run of refusal, approval, expiry, replay and a Telegram outage) -- a few days of varied real work, no deadlock, an acceptable number of cards -- then v1.0.
 
 - **keeper: standing plans, for an agent nobody is watching (design: `docs/design-keeper-server.md`, written
@@ -27,6 +38,127 @@ Next: finish the block-mode trial (started 12/10/2026, after the end-to-end dry 
   `load_standing()` removed. Existing suites unmodified and green. Not run from this session: `install-keeper.sh
   --apply` on a real LXC, and a real `claude -p` headless run against a real `--settings` profile -- see the
   design doc's NOT TESTED list.
+- **go-gate: round 2 red-team on our own classifier (attacker mode, authorised, 19/10) -- two real bypasses found
+  and fixed by whitelist, not blacklist; the F4 "unbalanced" question from PR #11 revisited.**
+  - **MCP method write-verb check was a blacklist, and a blacklist of "dangerous" verbs can never be complete.**
+    `get_and_archive_repo`, `list_and_close_issue`, `find_and_merge_duplicates`, `get_and_lock_thread`,
+    `search_and_block_user`, `get_and_overwrite_file`, `list_and_add_label`, `get_and_ban_member`,
+    `get_and_disable_webhook`, `get_and_publish_draft`, `get_and_wipe_cache`, `get_and_clear_history` and the
+    single run-on word `getandarchiveitem` all classified as **read** on main: `mcp_writes()`'s `MCP_WRITE` list
+    (delete/remove/create/update/...) never included archive, merge, close, lock, overwrite, add, ban, disable,
+    publish, wipe or clear -- every one of them changes state, and `mcp__github__merge_pull_request`, a real tool
+    in this very session's own MCP server list, is such a verb. Fixed by `mcp_is_read_verb()`: for a method that
+    splits into separate words (the overwhelming majority of real MCP tool names -- every one of the 94 real names
+    this project has checked uses `_` or camelCase), the verb after and/then/or must now be ON `MCP_SAFE_VERBS`, a
+    short whitelist, not merely absent from a blacklist. The leading verb is left exactly as `MCP_READ` already
+    judged it (itself whitelist-shaped: it requires the method to START WITH a recognised read verb or phrase).
+    The one case that keeps a blacklist, by necessity: a method with no separator at all (`getandarchiveitem`)
+    cannot be split into words with any confidence, and an exact whitelist there breaks real, already-tested reads
+    (`getstatuses`, `searchrepositories` -- "or" sits inside "repositories" with nothing to do with a connector),
+    so it falls back to `MCP_WRITE_WIDE`, the old blacklist widened to the same newly-found verbs. Both bypasses
+    and the no-regression cases are in `go-gate/test_disguise.py` (`MCP_UNLISTED_WRITE_VERB`,
+    `MCP_SAFE_SINGLE_WORD_WITH_OR`); mutation-checked by diffing classification against the pre-fix code (each
+    case flips from read to change/opaque, and no previously-passing case regresses).
+  - **`docker exec`'s own flag table was missing two real, value-taking flags.** `--env-file` and `--detach-keys`
+    were not in the by-hand list of flags assumed to take a separate value, so an unrecognised flag was silently
+    treated as taking none, and the parse stopped one token too early: `docker exec --env-file x.env cat bash -c
+    "rm -rf /data"` classified as **read**, because the shift landed the classifier on the CONTAINER NAME (which
+    the agent can itself choose, with an earlier `docker run --name cat ...`) instead of on `bash -c "rm -rf
+    /data"`, the command the container actually runs. Fixed with a closed, authoritative flag table
+    (`DOCKER_EXEC_FLAGS` -- `docker exec` is a small, stable CLI, unlike an arbitrary shell command, so a complete
+    table is realistic here in a way it never is for awk/sed programs or shell commands in general): an
+    unrecognised flag now makes the call **opaque** instead of being assumed to take zero arguments. Grouped short
+    booleans (`-it`, `-dit`) and the `=` form of every flag keep classifying normally.
+    `go-gate/test_disguise.py`'s `DOCKER_EXEC_FLAG_PARSING` / `DOCKER_EXEC_SAFE_FLAGS`; mutation-checked the same
+    way.
+  - **The "unbalanced" question from PR #11, revisited.** The oracle corpus (`go-gate/test_balance_oracle.py`) now
+    covers 427 generated commands (up from the 355 of PR #11 -- the corpus itself grew in the meantime, not from
+    this round). Recomputing the disagreement table: **2 of 427** are still the already-known, still-open false
+    positive (the `$'...'` ANSI-C gap -- `gate_says_unbalanced()` flags a syntactically valid ANSI-C-quoted string
+    as unbalanced; unchanged since PR #11, not fixed here, see NON CORRIGÉS below). A separate **6 of 427** are
+    cases where the narrow oracle helper (`gate_says_unbalanced()`, which checks `scan()`'s own balanced flag at
+    the top level only) disagrees with `real_valid()` -- all 6 are the `bash; pct exec 100 -- sh -c "echo c'est
+    ...; <payload>"` family already identified on 15/10 (a second, independent genuine trap in the same log
+    family): the bare leading `bash` statement (no `-c`) is classified `opaque` directly by `classify_bash()`
+    regardless of what the oracle's narrow helper says about the rest of the line, so the real pipeline was never
+    at risk -- confirmed again here, no new fix needed, same conclusion as 15/10. **0 of 427** are a real
+    unbalanced command that the actual `classify_bash()` pipeline (not the narrow oracle helper) fails to flag.
+  - **What was tried and rejected:** widening the leading-verb check itself to a free substring search (instead of
+    requiring it to START the method) would have reopened exactly the `mcp__x__y_search` case PR #11's own test
+    already pins to "change" ("only a prefix naming the server goes") -- kept as `MCP_READ` already was.
+- **go-gate: a `dir:` grant also requires the working directory to be inside it (owner decision, 20/10).** A command
+  that changes something and is covered through a `dir:` target must also run with its effective working directory
+  (`go_gate.CWD`, followed through the command's own `cd`/`pushd`/`popd` per stage, symlinks followed) inside one of the
+  plan's `dir:` targets and not under a protected path; an unknown or unresolvable cwd is refused. Plans without `dir:`
+  targets, plain-target matches (also in a mixed plan) and file tools are unchanged. Over-refusal is accepted (for
+  example `docker compose -f <abs path>` started from another directory); the refusal says to run it from inside the
+  directory or use `cd <dir> && ...`. Tests: cwd inside, outside, unknown, equal to the dir, symlink, protected,
+  `cd` and subshell chains, the message; five new mutants of the mutation check.
+- **go-gate: a `dir:` target now covers an action only when *every* path in it is inside (independent review of PR
+  #15, 19/10).** The first version of `dir:` matched like any target: one word of the action under the directory was
+  enough, so with `targets=dir:/opt/stacks/news` the action `cp /opt/stacks/news/x /etc/cron.d/y` was covered although
+  it writes outside it. `coverage_gap()` now collects every path the action names -- path-like words, the value of
+  `--opt=PATH` / `-CPATH`, redirection targets (`>`, `>>`, `2>`, `&>`), and the file arguments of file-writing commands
+  (`cp`, `mv`, `tee`, `rm`, `install`, `tar`, `dd of=` ...), also inside a quoted `bash -c` or `ssh` command -- and
+  requires each to resolve (symlinks and `..` followed) inside one of the plan's `dir:` targets or to match another
+  target of the plan, with none protected (`is_protected()` / `is_keeper_protected()`). It fails closed on what it
+  cannot judge (variables, command substitutions, escapes, a wildcard before the last component, remote `host:path`),
+  and never covers a stage that runs elsewhere (`ssh`, `scp`, `pct`, `docker exec/run`, `kubectl`): remote work needs
+  plain targets. **Plain, non-`dir:` targets behave exactly as before** (any one matching word covers), including in a
+  plan that mixes both kinds. A relative `dir:` target is no longer a grant. The refusal names the offending paths and,
+  for a `dir:` plan, says that every path must be inside.
+- **go-gate: relative paths are resolved against the agent's cwd for `dir:` matching.** `real()` resolved a relative
+  word against the daemon's own cwd, unrelated to where the agent runs. They now use `go_gate.CWD` (the hook input's
+  cwd), followed through the command's own `cd`/`pushd`/`popd` per stage (`STAGE_CWD`); with no cwd, or one that cannot
+  be resolved statically, a relative path cannot be judged and is not covered.
+- **keeper: the "requested after a refusal" note expires after 10 minutes.** It was stored on the session and shown on
+  the next proposal's card, once, however unrelated and however much later. It is now timestamped and dropped when
+  older than 10 minutes (state written without a timestamp is dropped too).
+- **Tests.** `DirAllPaths` (cp/mv/ln/install, `tee`, every redirection form, `--target-directory`/`-t`/`-C`/`of=`,
+  `ssh`/`pct`/`docker exec`/`bash -c` nesting, symlinks pointing out, `..` inside a path, go-gate and keeper protected
+  paths, unjudgeable paths, wildcards, a mixed command with one path in and one out, file tools judged on their file,
+  plain targets unchanged), `DirRelativePaths` (including a relative `..` escape and a daemon cwd that differs from the
+  agent's), 3 keeper tests for the expiry, and `DirRuleMutation`: it breaks 8 parts of the rule one at a time in a copy
+  of `go_gate.py` and requires the `dir:` tests to fail on each (and to pass on an unmodified copy).
+- **go-gate + keeper: the refusal says what a plan does not cover, instead of just that it does not (19/10).** A
+  dozen cards in one real day traced back to the same cause: a plan covered the intent, but a temp filename, a
+  quoted path, or an action word (`pull`, `rm`, `git commit`) was not cited word-for-word, and the old reason
+  ("the approved plan 'X' does not cover this {cat} action") never said which — so the owner approved a card,
+  watched it get refused again on the next slightly different word, and proposed another. `go_gate.py`'s
+  `coverage_gap()` is `covers()`'s logic, unchanged, turned into a diagnostic: it returns the missing action
+  category (and what the plan does allow) or the specific path/filename/host-looking words in the command that none
+  of the plan's targets cover (and what its targets are), instead of a plain yes/no. `describe_gap()` turns that
+  into the extra clause both `go_gate.py`'s `on_pre_tool()` and `keeperd.py`'s `check()` now append to their deny
+  reason. `candidate_targets()` picks the target-like words (a path, a filename with an extension, a hostname, an
+  IPv4) and runs each one through the existing `safe_words()`/`redact()` masking before it is ever returned, so
+  nothing secret-shaped reaches the reason, a log, or a Telegram card. No protection changed: `covers()` is now
+  `coverage_gap(...) is None`, same control flow, same order of checks (category, the `script` carve-outs for
+  exec-dirs and git's exec surface, then targets), just with the first blocking reason kept instead of discarded.
+  **keeperd** also carries the gap, once, onto the *next* proposal's card when it follows a refusal in the same
+  session (`Keeper.check()` stores it as `last_gap` on the session; `propose()` consumes it; `render_plan_card()`
+  shows it as "Requested after a refusal: …") — context for the owner without a new kind of disclosure, since it is
+  the exact same sanitised text the agent already reads, never the raw command.
+- **go-gate + keeper: `targets=dir:<path>` (K-dir, 19/10), an explicit, visible subtree grant.** A target is
+  normally one path/file/host, matched whole-word; a literal path target already covered its own sub-paths as a
+  side effect (K7's "a prefix covers its sub-paths, kept on purpose"), silently. `dir:<path>` makes that choice
+  explicit instead: the plan's own author has to write `dir:`, and `render_plan_card()` shows a warning line for it
+  (next to the existing ones for `script`/`delete`/no-targets), so the owner is never approving "everything under
+  this directory" without seeing that in the card. Refused outright — never matches anything, as if the target were
+  missing — for `/`, the agent's home, go-gate's protected paths (`is_protected()`) and the keeper's own
+  (`is_keeper_protected()`: `/etc/keeper`, `/var/lib/keeper`, `/opt/agent-guardrails`, the managed-settings file),
+  checked both against the declared directory itself and against every matched token, so a broader grant
+  (`dir:/etc`) cannot launder a path that resolves inside one of those. Matching resolves symlinks and `..` through
+  the same `real()` every other path check here already uses, so a token that resolves outside the granted
+  directory (a literal `..`, a symlink inside it pointing out) is judged on where it actually points and is not
+  covered; see `docs/design-keeper.md` ("`dir:<path>` targets") for the TOCTOU compromise this accepts, the same
+  class already open for every path check, not a new one. 10 new tests (`go-gate/test_go_gate.py`'s
+  `DirPrefixTarget`): a valid prefix, a look-alike sibling (`news` vs `newsletter`/`news-backup`), a `..` escape, a
+  symlink escape, both protected-path guards (including the broad-`dir:`-reaches-`/etc/keeper` case), `/` and home
+  refused, no wildcard/empty prefix, and the pre-existing bare-path behaviour left untouched -- plus 4 more for
+  `coverage_gap()`/`describe_gap()` itself and one each for the deny message in go-gate's own hook and in keeperd,
+  including the carried-once card context (`test_go_gate.py`'s `Scope`/`Hook`, `keeper/test_keeper.py`'s
+  `StateMachine`). Mutation-checked: 2 deliberate reverts (`describe_gap()` gutted to `""`; the per-token protected
+  re-check dropped from the `dir:` match loop) each turned exactly the test built for it red.
 - **keeper: the hook entry gets an explicit `timeout`, and `--wait` is kept under it (independent review of PR #16,
   19/10).** `--wait` keeps the PreToolUse hook process blocked, but the installer registered the hook with no
   `timeout`, and `wait_max_sec` defaulted to 1800 s. Per the Claude Code hooks documentation, command hooks default to

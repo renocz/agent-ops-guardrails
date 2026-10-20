@@ -101,6 +101,61 @@ class StateMachine(Base):
         self.assertFalse(self.allowed(*bash("docker restart db web")))          # every object must be in scope
         self.assertFalse(self.allowed(*bash("git push origin main")))           # category not approved
 
+    def test_deny_reason_names_what_is_missing(self):
+        self.approve("id=p1 ; targets=web ; actions=deploy ; ttl=30")
+        r = self.k.check("s1", *bash("docker compose -f /opt/stacks/db/compose.yml restart"))
+        self.assertIn("targets not covered: /opt/stacks/db/compose.yml", r["reason"])
+        self.assertIn("plan targets: web", r["reason"])
+        r2 = self.k.check("s1", *bash("git push origin web"))
+        self.assertIn("missing action 'git'", r2["reason"])
+        self.assertIn("plan actions: deploy", r2["reason"])
+
+    def test_deny_reason_lists_why_each_active_plan_fails_to_cover(self):
+        # several active plans (PR #17): the refusal explains EVERY plan's gap, not only one of them
+        self.approve("id=pa ; targets=web ; actions=deploy ; ttl=30")
+        self.approve("id=pb ; targets=db ; actions=git ; ttl=30")
+        r = self.k.check("s1", *bash("docker compose -f /opt/stacks/cache/compose.yml restart"))
+        self.assertEqual(r["decision"], "deny")
+        self.assertIn("plan 'pa': targets not covered: /opt/stacks/cache/compose.yml", r["reason"])
+        self.assertIn("plan 'pb': missing action 'deploy'", r["reason"])
+        # one active plan that DOES cover the action is enough: no refusal at all
+        self.assertTrue(self.allowed(*bash("docker restart web")))
+
+    def test_denial_context_is_surfaced_once_on_the_next_proposal_card(self):
+        self.approve("id=p1 ; targets=web ; actions=deploy ; ttl=30")
+        self.k.check("s1", *bash("docker compose -f /opt/stacks/db/compose.yml restart"))
+        ok, _no = self.plan("id=p2 ; targets=db ; actions=deploy")
+        _sid, p = self.bot.plans[-1]
+        self.assertIn("/opt/stacks/db/compose.yml", p["context"])
+        text, _kb = keeperd.render_plan_card("en", p)
+        self.assertIn("Requested after a refusal", text)
+        self.assertIn("/opt/stacks/db/compose.yml", text)
+        # consumed: a later, unrelated proposal in the same session does not carry stale context
+        self.k.decide(OWNER, CHAT, ok)
+        ok2, _no2 = self.plan("id=p3 ; targets=db ; actions=deploy")
+        self.assertNotIn("context", self.bot.plans[-1][1])
+
+    def test_denial_context_expires_after_ten_minutes(self):
+        self.approve("id=p1 ; targets=web ; actions=deploy ; ttl=60")
+        self.k.check("s1", *bash("docker compose -f /opt/stacks/db/compose.yml restart"))
+        self.clock.t += 11 * 60                                   # an unrelated proposal much later
+        self.plan("id=p2 ; targets=db ; actions=deploy")
+        self.assertNotIn("context", self.bot.plans[-1][1])
+        self.assertNotIn("last_gap", self.k.session("s1"))        # and it is gone, not kept for a third card
+
+    def test_denial_context_still_shown_just_inside_the_window(self):
+        self.approve("id=p1 ; targets=web ; actions=deploy ; ttl=60")
+        self.k.check("s1", *bash("docker compose -f /opt/stacks/db/compose.yml restart"))
+        self.clock.t += 9 * 60
+        self.plan("id=p2 ; targets=db ; actions=deploy")
+        self.assertIn("/opt/stacks/db/compose.yml", self.bot.plans[-1][1]["context"])
+
+    def test_denial_context_without_a_timestamp_is_dropped(self):   # state written by an earlier version
+        self.approve("id=p1 ; targets=web ; actions=deploy ; ttl=60")
+        self.k.session("s1")["last_gap"] = "targets not covered: /opt/stacks/db/compose.yml"
+        self.plan("id=p2 ; targets=db ; actions=deploy")
+        self.assertNotIn("context", self.bot.plans[-1][1])
+
     def test_plan_expires(self):
         self.approve("id=p1 ; targets=web ; actions=deploy ; ttl=30")
         self.clock.t += 31 * 60
@@ -847,6 +902,41 @@ class InstallerHookTimeout(unittest.TestCase):
         cfg = self.config(prefix)
         self.assertEqual((cfg["hook_timeout_sec"], cfg["wait_max_sec"]), (60, 50))
         self.assertLessEqual(cfg["wait_max_sec"] + keeperd.HOOK_TIMEOUT_MARGIN_SEC, hooks[0]["timeout"])
+
+    def test_hook_entry_blocks_when_it_times_out_or_fails(self):
+        # measured on Claude Code 2.1.302: without onFailure=block a timed-out PreToolUse hook lets the call run
+        prefix, r = self.install()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        hooks = self.keeper_hooks(self.managed(prefix))
+        self.assertEqual([h.get("onFailure") for h in hooks], ["block"])
+
+    def test_reinstall_adds_onfailure_to_an_old_entry_in_place(self):
+        prefix, _ = self.install()
+        path = os.path.join(prefix, self.MANAGED_REL)
+        doc = self.managed(prefix)
+        for h in self.keeper_hooks(doc):
+            h.pop("onFailure", None)                                 # what installs before this change wrote
+        with open(path, "w") as f:
+            json.dump(doc, f)
+        _, r = self.install(prefix)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        hooks = self.keeper_hooks(self.managed(prefix))
+        self.assertEqual([h.get("onFailure") for h in hooks], ["block"])   # updated in place, still ONE entry
+
+    def test_deny_rules_are_edit_only_and_old_write_duplicates_are_removed(self):
+        prefix, _ = self.install()
+        deny = self.managed(prefix)["permissions"]["deny"]
+        self.assertTrue(deny and all(x.startswith("Edit(") for x in deny), deny)
+        self.assertEqual(len(deny), 3)
+        path = os.path.join(prefix, self.MANAGED_REL)
+        doc = self.managed(prefix)
+        doc["permissions"]["deny"] += [x.replace("Edit(", "Write(", 1) for x in deny] + ["Write(/some/other/path/**)"]
+        with open(path, "w") as f:
+            json.dump(doc, f)
+        _, r = self.install(prefix)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        after = self.managed(prefix)["permissions"]["deny"]
+        self.assertEqual(sorted(after), sorted(deny) + ["Write(/some/other/path/**)"])   # ours removed, a foreign rule kept
 
     def test_the_shipped_defaults_are_consistent(self):
         self.assertLessEqual(keeperd.DEFAULTS["wait_max_sec"] + keeperd.HOOK_TIMEOUT_MARGIN_SEC,
