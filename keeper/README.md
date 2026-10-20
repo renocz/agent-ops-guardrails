@@ -15,10 +15,36 @@ state, replay a GO or remove the hook. The keeper moves the approval out of the 
   keeperd answers that command itself in the hook's check, with the session id Claude Code gave the hook, so the
   command never runs. keeperd then sends the plan to you on the keeper bot:
   - the first lines are generated from the scope;
-  - ⚠️ lines appear for `script`, `delete` or a plan without targets;
+  - ⚠️ lines appear for `script`, `delete`, a plan without targets, or a target written `dir:<path>` (see below);
+  - if this proposal follows a refusal in the same session, one more line says what the plan that refused it did not
+    cover, so you see why a new card showed up without having to ask the agent;
   - the agent's text comes after.
 
   You get three buttons: Approve, Reject, and Stop, which ends every active plan.
+- **A refusal tells the agent what is missing**, not just that it was refused: the action category the active plan
+  lacks (and what it does allow), or the specific path/filename/host words in the command that none of its targets
+  cover (and what its targets are). This is what the agent reads, never you directly — but it is also what shortens
+  the back-and-forth that used to cost a round trip (and a card) per missing word. Anything secret-shaped is masked
+  out the same way the log already masks it.
+- **`targets=dir:<path>`** grants the whole subtree under `<path>`, explicitly: a target is normally a single
+  path/file/host, matched whole-word (see go-gate's own README for the matching rules); `dir:` is the one way to
+  widen that to "and everything under it", and it always shows on the card as the warning above so you are not
+  approving a subtree without knowing it. It is refused outright (never matches anything, as if the target were
+  missing) for `/`, your home directory, go-gate's own state/hooks/settings, and the keeper's own paths
+  (`/etc/keeper`, `/opt/agent-guardrails`, its managed-settings file) — even if you declare it, even if a token the
+  agent writes resolves inside one of those through a broader `dir:` (say `dir:/etc`).
+  A `dir:` target is also stricter than a plain one about *what the action touches*: it covers an action only when
+  **every** path in it (path-like words, `--opt=PATH`, redirections, the file arguments of `cp`/`mv`/`tee`/`rm`/…,
+  including inside a quoted `bash -c`) is inside a `dir:` target of the plan, symlinks and `..` followed, relative
+  paths resolved against the agent's own cwd. `cp /opt/stacks/news/x /etc/cron.d/y` is refused under
+  `dir:/opt/stacks/news`. A path that cannot be judged (a variable, a remote `host:path`) is not covered, and a
+  command that runs elsewhere (`ssh`, `pct`, `docker exec`) is never covered by a `dir:` target. Plain targets are
+  unchanged (any one matching word covers). A `dir:` grant also requires the working directory to be inside it: a
+  command that changes something must run with its effective cwd (followed through its own `cd`) inside one of the
+  plan's `dir:` targets, or it is refused with "run it from inside <dir>" / "use `cd <dir> && ...`". Details in
+  go-gate's README.
+- The "Requested after a refusal" line on a card is shown only if the refusal was less than 10 minutes before the
+  proposal; an older one is dropped, so an unrelated card never carries it.
 - An approval is a button press, received by keeperd from Telegram. It is checked against the owner id and the chat,
   is bound to that plan's fingerprint, works once only, and must come within 2 h. The plan then stays active for its
   TTL: 1 h by default, 4 h at most. Anything the agent writes in its conversation approves nothing.
@@ -173,6 +199,13 @@ Still open:
   check and the run.
 - Output filtering (secret-guard) still runs in the agent's process.
 - A stronger design runs every change in an isolated executor under another user. That is the direction for v2.
+- **`dir:<path>` is resolved through symlinks (`real()`, following the existing TOCTOU/symlink limits above) at
+  check time, against the path as it is right then.** A symlink the agent plants inside a granted directory after
+  you approve the plan, pointing outside it, is itself a write that needs its own approval first (the same
+  reasoning as the git safe-repo symlink limit above); a symlink already there when you approve is what you are
+  approving, same as any other path in the plan. The compromise: this buys a plain, auditable "cover this whole
+  subtree" grant without a second class of path logic, at the cost of trusting what `real()` reports at the moment
+  of the call, no more and no less than every other path check in go-gate already does.
 
 ## Emergency rollback
 
@@ -208,6 +241,16 @@ cover:
   approve/reject/mode are never reachable as a typed command; the "/" menu registration (chat-scoped, non-fatal);
 - the French and English messages (every key in both languages, the English card unchanged), the startup line by mode,
   and `keeper-summary`;
+- the deny reason naming the missing action or the missing targets, with the plan's own actions/targets alongside,
+  and never anything secret-shaped; the refusal's context carried once onto the next proposal's card, and not onto
+  one after that, and not at all when the refusal is more than 10 minutes old;
+- `dir:<path>` targets: every path of the action must be inside (one inside plus one outside is refused: `cp`, `tee`,
+  redirections, `--target-directory`, `ssh`/`bash -c` nesting, symlinks pointing out, relative paths against the
+  agent's cwd), a command that changes something must also run from inside a `dir:` target (inside, outside, unknown,
+  `cd` in the command, symlink, protected), with a mutation check of that rule; a valid prefix covers its subtree, a look-alike sibling and a
+  `..`/symlink escape do not, and
+  neither does `/`, the home directory, go-gate's own protected paths, or the keeper's own (`/etc/keeper`,
+  `/opt/agent-guardrails`), even through a broader `dir:` that would otherwise reach them.
 - `keeper-propose --wait`: the `status` op's closed vocabulary (pending/approved/rejected/expired, never the plan
   itself) and its peer-uid gate, two plans tracked independently, a late click still counted as expired, the
   ledger pruned by age, and the hook's own `wait_for_decision()` against a real socket (approved/rejected/expired

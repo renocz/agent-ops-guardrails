@@ -190,6 +190,54 @@ Still open, and stated so a reader does not over-trust the gate:
   Until it is fixed: do not declare `--safe-git-repo` on a tree where the agent can create symlinks and you have not
   reviewed what they point at, and read any plan that writes inside a safe repo before approving it: creating the
   symlink there is the step that opens this gap.
+- **`dir:<path>` targets (K-dir, 19/10).** A plan target is normally one path/file/host, matched whole-word (K7) —
+  the operational pain this fixes: a plan written for `targets=web` got refused by an unrelated temp filename or a
+  quoted path one character off from what the plan actually named, and the old refusal reason never said which, so
+  the owner saw a card, approved it, got refused again on the next slightly different path, and so on — "a dozen
+  cards in a day" from one real intent. `dir:<path>` lets a plan explicitly grant a whole subtree instead of one
+  path, shown as such on the approval card (a warning line, like `script`/`delete`/no-targets already get), so the
+  owner is never approving a subtree without seeing that they are. It is refused outright — never matches anything,
+  as if the target were simply missing — for `/`, the agent's home, go-gate's own protected paths
+  (`~/.claude/go-gate`, hooks, settings, secret-guard's config) and the keeper's own system paths (`/etc/keeper`,
+  `/var/lib/keeper`, `/opt/agent-guardrails`, the managed-settings file), and this is checked twice: once against the
+  declared `<path>` itself, and once per matched token, so a broader grant (`dir:/etc`) cannot launder a path that
+  resolves inside one of those (`/etc/keeper/config.json`) just because the declared root is not itself inside one.
+  Matching goes through the same symlink/`..` resolution (`real()`, i.e. `os.path.realpath`) as every other path
+  check here, so a token that resolves outside the granted directory — a literal `..`, or a symlink planted inside it
+  pointing out — is judged on where it actually points, not on its text, and is not covered. The compromise accepted
+  for this: `real()` is evaluated at check time, against the filesystem as it is right then, so a symlink an
+  already-approved plan's own `edit`/`script` actions let the agent plant *after* approval, inside the granted
+  directory, pointing outside it, changes what the grant reaches from that point on — the same TOCTOU class already
+  open for every path check in go-gate (see below), not a new one; planting that symlink is itself a write that
+  needed its own approval first, same reasoning as the safe-git-repo symlink limit above. `dir:` adds no new
+  classifier logic and no new way to reach `script`/`delete` coverage.
+
+  **Every path, not any one (round 2, 19/10).** The first version matched like a plain target: one word of the action
+  under the directory was enough, so `cp <inside> /etc/cron.d/y` was covered by `dir:<inside's parent>` while writing
+  outside it. A plain target keeps that any-one-word rule (it is a name the human recognises in the action, and
+  changing it would bring back the "dozen cards a day" problem); a `dir:` target is a statement about where the action
+  may act, so it now has to hold for all of it. `coverage_gap()` collects every path the action names (path-like
+  words; `--opt=PATH`, `-CPATH`; redirection targets; every file argument of a file-writing command, bare names
+  included because they land in the cwd; quotes only separate words, so a path inside `ssh host "cp a b"` or
+  `bash -c '...'` is seen) and requires each to resolve inside a `dir:` target of the plan, or to match another target
+  of the plan, with none protected. It fails closed where a path cannot be judged: variables, substitutions, escapes,
+  a wildcard before the last component, a remote `host:path`, a relative path with no known cwd. A stage that runs
+  elsewhere (`ssh`, `scp`, `pct`, `docker exec/run`, `kubectl`) is not covered at all: the local filesystem cannot
+  vouch for another machine's symlinks, so remote work is planned with plain targets. Relative paths are resolved
+  against the agent's cwd (`go_gate.CWD`, from the hook input, followed through the command's own `cd`/`pushd`/`popd`
+  for each stage), not the daemon's, which is unrelated to where the agent runs. Limits that remain: the judgement is
+  on the text of the command (a program that computes a path at run time is a `script`, covered by the `script`
+  rules, not by this one), and words that merely look like paths (`s/a/b/`, `application/json`) are over-refused.
+  **The working directory must also be inside the grant (20/10).** A command that changes something and is covered
+  through a `dir:` target must also run with its effective working directory (the same `go_gate.CWD` followed per stage
+  through `cd`/`pushd`/`popd`, `STAGE_CWD`) inside one of the plan's `dir:` targets, symlinks followed, and not under a
+  protected path. An unknown or unresolvable cwd fails closed. The rule applies only when the match relies on a `dir:`
+  target: a plan without `dir:` targets, and a match through a plain target of a mixed plan, keep their behaviour.
+  File tools (no command text) are unchanged. The accepted cost is over-refusal, such as `docker compose -f <abs path>`
+  started from another directory or a `cd` inside a subshell (not followed); the refusal tells the agent to run it from
+  inside the directory or to use `cd <dir> && ...`.
+- **A refusal's note expires (round 2).** The "requested after a refusal" line kept on the session was shown on the next
+  proposal's card however much later and however unrelated; it now carries a timestamp and is dropped after 10 minutes.
 - **TOCTOU on files.** `python3 script.py` is judged on the file keeperd reads; the file can change before it runs.
 - **A process started under an approved plan keeps running after the plan ends.** The keeper gates tool calls, not
   the processes they spawn.

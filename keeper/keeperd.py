@@ -57,6 +57,8 @@ MESSAGES = {
         "warn_script": "⚠️ script: the agent may run ANY program during this plan.",
         "warn_delete": "⚠️ delete: the agent may delete files.",
         "warn_no_targets": "⚠️ no targets: the actions apply to everything.",
+        "warn_dir_prefix": "⚠️ {dirs}: covers everything under that directory, not just one path.",
+        "card_context": "Requested after a refusal: the active plan does not cover {gap}.",
         "card_stop_note": "Stop ends the plan; it does not stop a process already started.",
         "card_explain": "The agent's explanation:",
         "btn_approve": "✅ Approve",
@@ -131,6 +133,8 @@ MESSAGES = {
         "warn_script": "⚠️ script : l'agent peut lancer N'IMPORTE QUEL programme pendant ce plan.",
         "warn_delete": "⚠️ delete : l'agent peut supprimer des fichiers.",
         "warn_no_targets": "⚠️ aucune cible : les actions s'appliquent à tout.",
+        "warn_dir_prefix": "⚠️ {dirs} : couvre tout le contenu de ce répertoire, pas un seul chemin.",
+        "card_context": "Demandé après un refus : le plan actif ne couvre pas {gap}.",
         "card_stop_note": "Arrêter met fin au plan ; cela n'interrompt pas un processus déjà lancé.",
         "card_explain": "Explication de l'agent :",
         "btn_approve": "✅ Approuver",
@@ -249,11 +253,17 @@ def render_plan_card(lang, p):
         warn += t(lang, "warn_delete") + "\n"
     if not plan["targets"]:
         warn += t(lang, "warn_no_targets") + "\n"
+    dirs = [tg for tg in plan["targets"] if tg.lower().startswith("dir:")]
+    if dirs:                                             # K-dir: a subtree grant must be visible, never silent
+        warn += t(lang, "warn_dir_prefix", dirs=", ".join(dirs)) + "\n"
     head = "\n".join([t(lang, "card_head"), t(lang, "card_plan", id=plan.get("id") or "-"),
                       t(lang, "card_targets", targets=", ".join(plan["targets"]) or t(lang, "card_any")),
                       t(lang, "card_actions", actions=", ".join(plan["actions"])),
                       t(lang, "card_duration", ttl=plan["ttl"]), t(lang, "card_fingerprint", fp=h)]) + "\n"
-    head += warn + t(lang, "card_stop_note") + "\n———\n" + t(lang, "card_explain") + "\n"
+    head += warn
+    if p.get("context"):                                 # this proposal follows a refusal (item 2): say what of it
+        head += t(lang, "card_context", gap=p["context"]) + "\n"
+    head += t(lang, "card_stop_note") + "\n———\n" + t(lang, "card_explain") + "\n"
     kb = {"inline_keyboard": [[{"text": t(lang, "btn_approve"), "callback_data": f"approve:{h}:{p['nonce']}"},
                                {"text": t(lang, "btn_reject"), "callback_data": f"reject:{h}:{p['nonce']}"}],
                               [{"text": t(lang, "btn_stop"), "callback_data": "stop:all"}]]}
@@ -540,6 +550,7 @@ def render_summary(lang, st, days, mode):
 # existing log(), no free text, kept small by only firing on the slow path. Measures where a delay could sit:
 # waiting for keeper.lock, a single Telegram api() call, and the end-to-end handling of one update.
 # ---------------------------------------------------------------------------------------------------------------
+LAST_GAP_TTL_S = 600                   # a refusal's "what the plan lacks" is shown on the next card only within 10 min
 LOCK_WAIT_LOG_THRESHOLD = 1.0          # log keeper-lock-wait only once the wait itself is user-visible
 API_SLOW_LOG_THRESHOLD = 2.0           # log telegram-api-slow only when an api() call is this slow (or failed)
 UPDATE_SLOW_LOG_THRESHOLD = 5.0        # tally()'s own "slow" counter: telegram-update is logged for every update
@@ -619,13 +630,19 @@ class Keeper:
         body = json.dumps({"text": text, "scope": plan}, sort_keys=True)
         phash = hashlib.sha256(body.encode()).hexdigest()
         nonce = secrets.token_hex(8)
-        # Requirement 6: the card must say, BEFORE approval, what approving this plan will do to the plans already
-        # active in this session. Purely advisory -- decide() recomputes the real outcome at approval time, since
-        # the active list can change between now and then (another approval, an expiry).
+        # Requirement 6 (multi-plans): the card must say, BEFORE approval, what approving this plan will do to the plans
+        # already active in this session. Purely advisory -- decide() recomputes the real outcome at approval time.
         preview = self._preview_outcome(self.session(sid).get("active") or [], plan)
         pending = {"plan": plan, "text": (text or "")[:3000], "hash": phash, "nonce": nonce, "proposed_at": now,
                    "preview": preview}
-        self.session(sid)["pending"] = pending
+        s = self.session(sid)
+        last = s.pop("last_gap", None)        # this proposal may follow a refusal; say what of it, once
+        # ...but only if the refusal is recent: a refusal from an hour ago has nothing to do with this plan, and
+        # showing it on an unrelated card would send the human to read the wrong thing. A bare string (state written
+        # by an earlier version, no timestamp) is dropped the same way.
+        if isinstance(last, dict) and now - float(last.get("at", 0)) <= LAST_GAP_TTL_S and last.get("text"):
+            pending["context"] = last["text"]
+        s["pending"] = pending
         self.state["proposals"] = recent + [now]
         self.save()
         self.log({"event": "proposed", "session": sid, "plan": plan.get("id"), "hash": phash[:12]})
@@ -715,16 +732,26 @@ class Keeper:
         used = []
         for k, d, st in items:
             cat = self.gate.category(tool, tool_input, k, d)
-            match = next((a for a in active if self.gate.covers(a["plan"], tool, tool_input, cat, st)), None)
+            match, gaps = None, []
+            for a_ in active:                       # one plan must cover the item ENTIRELY; the gaps explain why none did
+                g_ = self.gate.coverage_gap(a_["plan"], tool, tool_input, cat, st)
+                if g_ is None:
+                    match = a_
+                    break
+                gaps.append((a_, g_))
             if match is None:
-                ids = [a["plan"].get("id") or "-" for a in active]
+                ids = [a_["plan"].get("id") or "-" for a_ in active]
                 self.log({"event": "denied" if self.cfg["mode"] == "block" else "would-deny", "session": sid,
                           "tool": tool, "category": cat, "shape": command_shape(tool, st, cat), "plans": ids})
                 if self.cfg["mode"] != "block":
                     return {"decision": "allow", "reason": ""}
                 if active:
-                    why = (f"keeper: this is a change ({cat}); no active plan ({', '.join(ids)}) covers it. Propose "
-                           "a plan with keeper-propose, or check keeper-status.")
+                    detail_gap = "; ".join(f"plan '{a_['plan'].get('id') or '-'}': {self.gate.describe_gap(g_, a_['plan'])}"
+                                           for a_, g_ in gaps)
+                    why = (f"keeper: this is a change ({cat}); no active plan covers it: {detail_gap}. Propose a plan "
+                           "with keeper-propose, or check keeper-status.")
+                    s["last_gap"] = {"text": detail_gap[:500], "at": self.now()}   # next proposal's card, once, if recent
+                    self.save()
                 else:
                     why = (f"keeper: this is a change ({cat}) and no approved plan covers it. Propose a plan with "
                            "keeper-propose; the human approves it on the keeper bot.")

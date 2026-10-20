@@ -1,5 +1,5 @@
 """Offline tests for go_gate.py: the classifier, the GO parsing, the scope and the hook decisions."""
-import json, os, subprocess, sys, tempfile, time, unittest
+import json, os, shutil, subprocess, sys, tempfile, time, unittest
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import go_gate as g
@@ -250,6 +250,7 @@ def run_hook(event, gate_dir):
     out = json.loads(r.stdout) if r.stdout.strip() else {}
     run_hook.context = out.get("hookSpecificOutput", {}).get("additionalContext")
     run_hook.notice = out.get("systemMessage")
+    run_hook.reason = out.get("hookSpecificOutput", {}).get("permissionDecisionReason")
     return r.returncode, out.get("hookSpecificOutput", {}).get("permissionDecision", "allow")
 
 
@@ -420,6 +421,601 @@ class Scope(unittest.TestCase):
                                  "ls /opt/stacks/web/compose.yml"))
         self.assertFalse(g.covers(p2, "Bash", {"command": "ls /opt/stacks/webx"}, "deploy", "ls /opt/stacks/webx"))
 
+    def test_coverage_gap_names_the_missing_action(self):
+        plan = {"targets": ["web"], "actions": ["deploy"]}
+        gap = g.coverage_gap(plan, "Bash", {"command": "git push origin web"}, "git", "git push origin web")
+        self.assertEqual(gap, {"category": "git"})
+        self.assertIn("missing action 'git'", g.describe_gap(gap, plan))
+        self.assertIn("plan actions: deploy", g.describe_gap(gap, plan))
+        self.assertEqual(g.describe_gap(None, plan), "")             # covered: nothing to say
+
+    def test_coverage_gap_names_target_like_words_not_covered(self):          # the operational pain this fixes
+        plan = {"targets": ["web"], "actions": ["deploy"]}
+        cmd = "docker compose -f /opt/stacks/news/docker-compose.yml restart news.example.com"
+        gap = g.coverage_gap(plan, "Bash", {"command": cmd}, "deploy", cmd)
+        self.assertEqual(gap["targets"], ["/opt/stacks/news/docker-compose.yml", "news.example.com"])
+        text = g.describe_gap(gap, plan)
+        self.assertIn("/opt/stacks/news/docker-compose.yml", text)
+        self.assertIn("news.example.com", text)
+        self.assertIn("plan targets: web", text)
+        self.assertNotIn("-f", text)                      # a bare flag is never named as a missing target
+
+    def test_candidate_targets_never_returns_secret_shaped_text(self):
+        plan = {"targets": ["web"], "actions": ["deploy"]}
+        secret = "verysecretpassword12345"
+        cmd = f"curl https://user:{secret}@api.example.com/deploy.php"
+        gap = g.coverage_gap(plan, "Bash", {"command": cmd}, "deploy", cmd)
+        joined = " ".join(gap["targets"])
+        self.assertNotIn(secret, joined)
+
+    def test_coverage_gap_still_flags_the_exec_dir_and_git_surface_carveouts(self):    # no protection reduced
+        plan = {"targets": [], "actions": ["edit"]}
+        cmd = "echo x > ~/bin/cat"
+        gap = g.coverage_gap(plan, "Bash", {"command": cmd}, "edit", cmd)
+        self.assertEqual(gap["category"], "script")
+        cmd2 = "git config core.fsmonitor /tmp/x"
+        gap2 = g.coverage_gap(plan, "Bash", {"command": cmd2}, "edit", cmd2)
+        self.assertEqual(gap2["category"], "script")
+
+
+class DirPrefixTarget(unittest.TestCase):
+    """K-dir (19/10): `dir:<path>` is an explicit, opt-in subtree grant. Never an implicit one (a bare path keeps
+    its pre-existing prefix behaviour, exercised above), never a protected path, never `/` or the home directory."""
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp(prefix="dirtarget-")
+
+    def tearDown(self):
+        shutil.rmtree(self.root, ignore_errors=True)
+
+    def _plan(self, path):
+        return {"targets": [f"dir:{path}"], "actions": ["deploy"]}
+
+    def test_valid_prefix_covers_the_subtree(self):
+        sub = os.path.join(self.root, "news")
+        os.makedirs(sub)
+        file = os.path.join(sub, "docker-compose.yml")
+        old, g.CWD = g.CWD, sub                                         # a change must also run from inside the dir
+        try:
+            self.assertTrue(g.covers(self._plan(sub), "Bash", {"command": f"restart {file}"}, "deploy", f"restart {file}"))
+            nested = os.path.join(sub, "sub", "x")
+            self.assertTrue(g.covers(self._plan(sub), "Bash", {"command": f"restart {nested}"}, "deploy", f"restart {nested}"))
+        finally:
+            g.CWD = old
+
+    def test_lookalike_sibling_is_not_covered(self):              # "news" must not cover "newsletter"
+        sub = os.path.join(self.root, "news")
+        os.makedirs(sub)
+        sibling = os.path.join(self.root, "newsletter", "x")
+        self.assertFalse(g.covers(self._plan(sub), "Bash", {"command": f"restart {sibling}"}, "deploy",
+                                  f"restart {sibling}"))
+
+    def test_dotdot_escape_is_not_covered(self):
+        sub = os.path.join(self.root, "news")
+        os.makedirs(sub)
+        escape = os.path.join(sub, "..", "..", "etc", "passwd")
+        self.assertFalse(g.covers(self._plan(sub), "Bash", {"command": f"cat {escape}"}, "deploy", f"cat {escape}"))
+
+    def test_symlink_escape_is_not_covered(self):
+        sub = os.path.join(self.root, "news")
+        outside = os.path.join(self.root, "outside")
+        os.makedirs(sub)
+        os.makedirs(outside)
+        secretfile = os.path.join(outside, "secret")
+        wtext(secretfile, "x")
+        link = os.path.join(sub, "escape")
+        os.symlink(outside, link)
+        via_link = os.path.join(link, "secret")
+        self.assertFalse(g.covers(self._plan(sub), "Bash", {"command": f"cat {via_link}"}, "deploy",
+                                  f"cat {via_link}"))
+
+    def test_protected_path_is_never_granted_by_dir_prefix(self):
+        env = dict(os.environ, GO_GATE_DIR=self.root)
+        old = os.environ.get("GO_GATE_DIR")
+        os.environ["GO_GATE_DIR"] = self.root
+        try:
+            target = os.path.join(self.root, "state.json")
+            self.assertFalse(g.covers(self._plan(self.root), "Bash", {"command": f"echo x > {target}"}, "deploy",
+                                      f"echo x > {target}"))
+        finally:
+            if old is None:
+                os.environ.pop("GO_GATE_DIR")
+            else:
+                os.environ["GO_GATE_DIR"] = old
+
+    def test_keeper_own_paths_are_never_granted_by_dir_prefix(self):
+        self.assertTrue(g.is_keeper_protected("/etc/keeper/config.json"))
+        self.assertTrue(g.is_keeper_protected("/opt/agent-guardrails/lib/go_gate.py"))
+        self.assertFalse(g.covers(self._plan("/etc"), "Bash", {"command": "cat /etc/keeper/config.json"}, "deploy",
+                                  "cat /etc/keeper/config.json"))
+
+    def test_root_and_home_are_too_broad_to_grant(self):
+        self.assertFalse(g.covers(self._plan("/"), "Bash", {"command": "rm -rf /x"}, "deploy", "rm -rf /x"))
+        self.assertFalse(g.covers(self._plan("~"), "Bash", {"command": "rm -rf ~/x"}, "deploy", "rm -rf ~/x"))
+
+    def test_disguised_filename_does_not_match_a_sibling_prefix(self):
+        sub = os.path.join(self.root, "news")
+        os.makedirs(sub)
+        disguise = os.path.join(self.root, "news-backup", "x")           # textually starts with "news", not a sub-path
+        self.assertFalse(g.covers(self._plan(sub), "Bash", {"command": f"restart {disguise}"}, "deploy",
+                                  f"restart {disguise}"))
+
+    def test_no_wildcard_no_empty_prefix(self):
+        self.assertFalse(g.target_matches("dir:", ["/opt/x"]))
+        self.assertFalse(g.target_matches("dir:/opt/*", ["/opt/x"]))
+
+    def test_bare_path_without_dir_marker_is_unaffected(self):            # the pre-existing, non-explicit behaviour
+        sub = os.path.join(self.root, "news")
+        os.makedirs(sub)
+        file = os.path.join(sub, "x")
+        plan = {"targets": [sub], "actions": ["deploy"]}
+        self.assertTrue(g.covers(plan, "Bash", {"command": f"restart {file}"}, "deploy", f"restart {file}"))
+
+
+def decide(plan, cmd, cwd):
+    """What the hook decides for a Bash command run in `cwd`, without the subprocess: classify() it as the hook does
+    (so the command's own `cd`s are followed), then ask coverage_gap() for every change in it. None = covered, the
+    command is not a change at all, or the first gap."""
+    old = g.CWD
+    g.CWD = cwd
+    try:
+        g.classify("Bash", {"command": cmd})
+        for k, d, st in list(g.CHANGES):
+            cat = g.category("Bash", {"command": cmd}, k, d)
+            gap = g.coverage_gap(plan, "Bash", {"command": cmd}, cat, st)
+            if gap:
+                return gap
+        return None
+    finally:
+        g.CWD = old
+
+
+class DirTree(unittest.TestCase):
+    """A scratch tree OUTSIDE the scratch-write exemption (those are never changes), so the gate really judges it:
+        root/news          the dir: target
+        root/other         a sibling outside it
+        root/news/link     a symlink inside news that points to root/other
+    """
+
+    def setUp(self):
+        self.root = os.path.realpath(tempfile.mkdtemp(prefix="dirtree-", dir=HERE))
+        self.news = os.path.join(self.root, "news")
+        self.other = os.path.join(self.root, "other")
+        os.makedirs(self.news)
+        os.makedirs(self.other)
+        os.symlink(self.other, os.path.join(self.news, "link"))
+        self.plan = {"targets": [f"dir:{self.news}"], "actions": ["edit", "delete", "deploy", "script", "git", "api"]}
+        self.old_cwd = os.getcwd()
+
+    def tearDown(self):
+        os.chdir(self.old_cwd)
+        shutil.rmtree(self.root, ignore_errors=True)
+
+    def covered(self, cmd, cwd=None):
+        return decide(self.plan, cmd, cwd or self.news) is None
+
+
+class DirAllPaths(DirTree):
+    """K-dir, round 2: a `dir:` target covers an action only when EVERY path in it is inside the directory. Plain
+    targets keep the any-one-token rule they always had (last tests)."""
+
+    def test_reported_case_cp_from_inside_to_outside(self):
+        plan = {"targets": ["dir:/opt/stacks/news"], "actions": ["edit"]}
+        cmd = "cp /opt/stacks/news/x /etc/cron.d/y"
+        gap = g.coverage_gap(plan, "Bash", {"command": cmd}, "edit", cmd)
+        self.assertIsNotNone(gap)
+        text = g.describe_gap(gap, plan)
+        self.assertIn("/etc/cron.d/y", text)
+        self.assertNotIn("/opt/stacks/news/x,", text)                      # the covered path is not blamed
+        self.assertIn("every path", text)
+        cmd2 = "cp /opt/stacks/news/x /opt/stacks/news/y"
+        old, g.CWD = g.CWD, "/opt/stacks/news"                              # the cwd rule: run from inside the dir
+        try:
+            self.assertIsNone(g.coverage_gap(plan, "Bash", {"command": cmd2}, "edit", cmd2))
+        finally:
+            g.CWD = old
+
+    def test_cp_mv_ln_install_with_one_path_outside(self):
+        n, o = self.news, self.other
+        for cmd in (f"cp {n}/a {o}/b", f"cp {o}/a {n}/b", f"mv {n}/a /etc/b", f"ln -s {n}/a {o}/l",
+                    f"install -m 755 {n}/a {o}/b", f"rsync -a {n}/ {o}/", f"cp -r {n} {o}", f"touch {n}/a {o}/b"):
+            self.assertFalse(self.covered(cmd), cmd)
+        for cmd in (f"cp {n}/a {n}/b", f"mv {n}/a {n}/sub/b", f"ln -s {n}/a {n}/l", f"install -m 755 {n}/a {n}/b",
+                    f"rm -f {n}/a {n}/b", f"mkdir -p {n}/x/y"):
+            self.assertTrue(self.covered(cmd), cmd)
+
+    def test_mixed_command_one_inside_one_outside(self):
+        n, o = self.news, self.other
+        self.assertFalse(self.covered(f"cp {n}/a {n}/b {o}/c"))
+        self.assertFalse(self.covered(f"mv {n}/a {n}/b; rm {o}/c"))                 # second statement
+        self.assertFalse(self.covered(f"cp {n}/a {n}/b && cp {n}/b {o}/c"))
+        self.assertFalse(self.covered(f"echo ok | tee {n}/a | tee {o}/b"))          # second pipeline stage
+        self.assertTrue(self.covered(f"cp {n}/a {n}/b && cp {n}/b {n}/c"))
+
+    def test_tee_targets(self):
+        n, o = self.news, self.other
+        self.assertTrue(self.covered(f"echo x | tee {n}/a"))
+        self.assertTrue(self.covered(f"echo x | tee -a {n}/a {n}/b"))
+        self.assertFalse(self.covered(f"echo x | tee {n}/a {o}/b"))
+        self.assertFalse(self.covered(f"echo x | tee -a {o}/b"))
+        self.assertFalse(self.covered(f"echo x | tee {n}/a /etc/cron.d/y"))
+        self.assertFalse(self.covered("echo x | tee out.txt", cwd=self.other))         # a bare name lands in the cwd
+        self.assertTrue(self.covered("echo x | tee out.txt", cwd=self.news))
+
+    def test_redirections(self):
+        n, o = self.news, self.other
+        self.assertTrue(self.covered(f"echo x > {n}/a"))
+        self.assertFalse(self.covered(f"echo x > {o}/a"))
+        self.assertFalse(self.covered(f"echo x >> {o}/a"))
+        self.assertFalse(self.covered(f"cat {n}/a > {o}/b"))                            # one inside, one outside
+        self.assertFalse(self.covered(f"cat {n}/a >{o}/b"))                             # no space
+        self.assertFalse(self.covered(f"cat {n}/a 1>{o}/b"))
+        self.assertFalse(self.covered(f"cat {n}/a &> {o}/b"))
+        self.assertFalse(self.covered(f"cat {n}/a >| {o}/b"))
+        self.assertFalse(self.covered(f"cat {n}/a > '{o}/b'"))                          # quoted target
+        self.assertFalse(self.covered(f"echo x > out.txt", cwd=self.other))             # bare redirect target
+        self.assertTrue(self.covered(f"echo x > out.txt", cwd=self.news))
+        self.assertTrue(self.covered(f"echo x > {n}/a 2>&1"))                           # fd duplication is no file
+        self.assertTrue(self.covered(f"echo x > {n}/a 2>/dev/null"))                    # a null sink is fine
+        self.assertFalse(self.covered(f"echo x > {n}/a 2>{o}/err"))
+
+    def test_target_directory_style_flags(self):
+        n, o = self.news, self.other
+        self.assertFalse(self.covered(f"cp --target-directory={o} {n}/a"))
+        self.assertFalse(self.covered(f"cp --target-directory {o} {n}/a"))
+        self.assertFalse(self.covered(f"cp -t {o} {n}/a"))
+        self.assertFalse(self.covered(f"tar -xf {n}/a.tgz -C {o}"))
+        self.assertFalse(self.covered(f"tar -xf {n}/a.tgz -C{o}"))
+        self.assertFalse(self.covered(f"dd if={n}/a of={o}/b"))
+        self.assertFalse(self.covered(f"git -C {o} commit -m x"))
+        self.assertFalse(self.covered(f"git --work-tree={o} checkout ."))
+        self.assertFalse(self.covered(f"docker compose --project-directory={o} up -d"))
+        self.assertTrue(self.covered(f"tar -xf {n}/a.tgz -C {n}/out"))
+        self.assertTrue(self.covered(f"dd if={n}/a of={n}/b"))
+        self.assertTrue(self.covered(f"git -C {n} commit -m x"))
+
+    def test_nested_in_ssh_pct_docker_exec_and_bash_c(self):
+        n, o = self.news, self.other
+        # a path inside the quoted remote command is seen like any other
+        self.assertFalse(self.covered(f"ssh host 'cp {n}/a /etc/cron.d/y'"))
+        self.assertFalse(self.covered(f'ssh host "cp {n}/a /etc/cron.d/y"'))
+        self.assertFalse(self.covered(f"ssh host \"pct exec 100 -- cp {n}/a /etc/cron.d/y\""))
+        self.assertFalse(self.covered(f"docker exec web cp {n}/a /etc/cron.d/y"))
+        self.assertFalse(self.covered(f"bash -c 'cp {n}/a {o}/b'"))
+        self.assertFalse(self.covered(f"sh -c \"cd {n} && cp a {o}/b\""))
+        # ... and a command that runs elsewhere is not judged by local symlinks at all: not covered even when
+        # every path looks inside
+        self.assertFalse(self.covered(f"ssh host 'cp {n}/a {n}/b'"))
+        self.assertFalse(self.covered(f"pct exec 100 -- cp {n}/a {n}/b"))
+        self.assertFalse(self.covered(f"docker exec web cp {n}/a {n}/b"))
+        self.assertFalse(self.covered(f"docker run --rm -v {n}:/data alpine rm /data/a"))
+        self.assertFalse(self.covered(f"scp {n}/a host:/etc/y"))
+        self.assertFalse(self.covered(f"scp host:/etc/y {n}/a"))
+        self.assertFalse(self.covered(f"rsync -a {n}/ host:/srv/x/"))
+        self.assertTrue(self.covered(f"bash -c 'cp {n}/a {n}/b'"))                      # local nesting is fine
+        self.assertTrue(self.covered(f"docker compose -f {n}/compose.yml up -d"))
+
+    def test_remote_denial_says_why(self):
+        cmd = f"ssh host 'cp {self.news}/a {self.news}/b'"
+        gap = decide(self.plan, cmd, self.news)
+        self.assertIn("elsewhere", g.describe_gap(gap, self.plan))
+
+    def test_symlink_pointing_out_is_followed(self):
+        n, o = self.news, self.other
+        wtext(os.path.join(o, "f"), "x")
+        os.symlink(os.path.join(o, "f"), os.path.join(n, "linkfile"))
+        for cmd in (f"cp {n}/a {n}/link/b", f"rm {n}/link/f", f"echo x > {n}/link/f", f"echo x > {n}/linkfile",
+                    f"tee {n}/linkfile", f"cp {n}/a {n}/link", f"mv {n}/link/f {n}/f", f"rm -r {n}/link/",
+                    f"cp {n}/a {n}/./link/../link/b"):
+            self.assertFalse(self.covered(cmd), cmd)
+        self.assertFalse(self.covered(f"rm {n}/link"))      # conservative: judged on where the link points, not on the link
+
+    def test_dotdot_inside_the_path(self):
+        n, o = self.news, self.other
+        self.assertFalse(self.covered(f"cp {n}/a {n}/../other/b"))
+        self.assertFalse(self.covered(f"cp {n}/sub/../../other/a {n}/b"))
+        self.assertTrue(self.covered(f"cp {n}/sub/../a {n}/b"))
+
+    def test_protected_paths_are_never_covered(self):
+        gate = os.path.join(self.root, "gate")
+        os.makedirs(gate)
+        old = os.environ.get("GO_GATE_DIR")
+        os.environ["GO_GATE_DIR"] = gate
+        try:
+            plan = {"targets": [f"dir:{self.root}"], "actions": ["edit"]}
+            self.assertIsNone(decide(plan, f"cp {self.news}/a {self.other}/b", self.news))     # the root is a fine grant
+            self.assertIsNotNone(decide(plan, f"cp {self.news}/a {gate}/state.json", self.news))
+            self.assertIsNotNone(decide(plan, f"echo x > {gate}/config.json", self.news))
+            os.symlink(gate, os.path.join(self.news, "gl"))
+            self.assertIsNotNone(decide(plan, f"echo x > {self.news}/gl/state.json", self.news))
+            self.assertIsNotNone(decide(plan, "echo x > gl/state.json", self.news))
+        finally:
+            if old is None:
+                os.environ.pop("GO_GATE_DIR")
+            else:
+                os.environ["GO_GATE_DIR"] = old
+
+    def test_keeper_and_settings_paths_are_never_covered(self):
+        plan = {"targets": ["dir:/etc", f"dir:{self.news}"], "actions": ["edit"]}
+        for cmd in (f"cp {self.news}/a /etc/keeper/config.json", "echo x > /etc/keeper/state.json",
+                    f"cp {self.news}/a /opt/agent-guardrails/lib/go_gate.py",
+                    f"cp {self.news}/a ~/.claude/settings.json", f"echo x >> ~/.claude/hooks/go-gate.py"):
+            self.assertIsNotNone(decide(plan, cmd, self.news), cmd)
+
+    def test_paths_that_cannot_be_judged_fail_closed(self):
+        n = self.news
+        for cmd in (f"cp {n}/a $DEST", f"cp {n}/a {n}/$NAME", f"cp {n}/a $(echo /etc/y)", f"cp {n}/a `echo /etc/y`",
+                    f"cp {n}/a {n}/b\\ c", f"cp {n}/a ${{HOME}}/b", f"cp {n}/a {n}/*/x", f"rm {n}/{{a,../other/b}}",
+                    "rm /*", f"rm {n}/../*", f"cp {n}/a host:/etc/y", f"echo x > $OUT"):
+            self.assertFalse(self.covered(cmd), cmd)
+
+    def test_wildcard_in_the_last_component_stays_inside(self):
+        n = self.news
+        self.assertTrue(self.covered(f"rm {n}/*.log"))
+        self.assertTrue(self.covered(f"rm -f {n}/sub/?.tmp"))
+        self.assertTrue(self.covered("rm *.log", cwd=self.news))
+        self.assertFalse(self.covered("rm *.log", cwd=self.other))
+
+    def test_null_sinks_and_web_addresses_are_not_paths_on_this_machine(self):
+        n = self.news
+        self.assertTrue(self.covered(f"curl -s https://example.com/a/b -o {n}/out"))
+        self.assertTrue(self.covered(f"cp {n}/a {n}/b 2>/dev/null"))
+        self.assertFalse(self.covered(f"curl -s file:///etc/passwd -o {n}/out"))        # file:// IS a path
+
+    def test_file_tools_are_judged_on_their_file_not_their_content(self):
+        n = self.news
+        content = "see /etc/passwd, a/b and https://example.com/x for details"
+        ok = g.coverage_gap(self.plan, "Write", {"file_path": f"{n}/notes.md", "content": content}, "edit", None)
+        self.assertIsNone(ok)
+        out = g.coverage_gap(self.plan, "Write", {"file_path": f"{self.other}/notes.md", "content": content}, "edit", None)
+        self.assertIsNotNone(out)
+        link = g.coverage_gap(self.plan, "Edit", {"file_path": f"{n}/link/x", "old_string": "a", "new_string": "b"},
+                              "edit", None)
+        self.assertIsNotNone(link)
+
+    def test_no_path_inside_a_dir_target_is_not_covered(self):
+        self.assertFalse(self.covered("docker compose restart web"))
+        self.assertFalse(self.covered(f"cp /etc/hosts {self.other}/h"))
+
+    def test_plain_targets_keep_the_any_one_token_rule(self):
+        """The documented difference: only dir: targets got stricter."""
+        n = self.news
+        plain = {"targets": [n], "actions": ["edit"]}
+        self.assertIsNone(decide(plain, f"cp {n}/a {self.other}/b", self.news))        # as before: one token matches
+        named = {"targets": ["web"], "actions": ["deploy", "edit"]}
+        self.assertIsNone(decide(named, "docker restart web", self.news))
+        self.assertIsNone(decide(named, "cp /etc/a web", self.news))
+        mixed = {"targets": [f"dir:{n}", "web"], "actions": ["edit", "deploy"]}
+        self.assertIsNone(decide(mixed, "docker restart web", self.news))              # the plain target still works
+        self.assertIsNone(decide(mixed, f"cp {n}/a {n}/b", self.news))
+        self.assertIsNotNone(decide(mixed, f"cp {n}/a {self.other}/b", self.news))     # the dir: rule is not diluted
+        self.assertIsNone(decide(mixed, f"cp {n}/a web", self.news))                   # a path matching ANOTHER target
+
+    def test_many_dirs_each_path_in_any_of_them(self):
+        extra = os.path.join(self.root, "extra")
+        os.makedirs(extra)
+        plan = {"targets": [f"dir:{self.news}", f"dir:{extra}"], "actions": ["edit"]}
+        self.assertIsNone(decide(plan, f"cp {self.news}/a {extra}/b", self.news))
+        self.assertIsNotNone(decide(plan, f"cp {self.news}/a {self.other}/b", self.news))
+
+
+class DirRuleMutation(unittest.TestCase):
+    """Mutation check: break each part of the dir: rule in a COPY of go_gate.py and run the dir: tests against it --
+    every mutant must be caught by at least one failing test, or the tests are not guarding that part."""
+
+    MUTANTS = {
+        "any-one-path (the old rule)": ("bad = [p for p, v in verdicts if not v]", "bad = []"),
+        "daemon cwd for relative paths": ("    return STAGE_CWD.get(text, CWD) if text is not None else CWD",
+                                          "    return os.getcwd()"),
+        "no symlink following": ("        r = os.path.realpath(probe)\n    except (OSError, ValueError):\n        return 0",
+                                 "        r = os.path.normpath(probe)\n    except (OSError, ValueError):\n        return 0"),
+        "protected paths allowed": ("    if is_protected(r) or is_keeper_protected(r):\n        return 0\n    if any(r == b",
+                                    "    if any(r == b"),
+        "cwd rule switched off": ("        if text is not None:\n            where = cwd_outside_dirs(",
+                                  "        if False:\n            where = cwd_outside_dirs("),
+        "unknown cwd allowed": ('    if cwd is None or cwd is _CWD_UNKNOWN or not os.path.isabs(str(cwd)):\n        return {"cwd": "unknown"',
+                                '    if False:\n        return {"cwd": "unknown"'),
+        "cwd symlink not followed": ("        r = os.path.realpath(str(cwd))", "        r = os.path.normpath(str(cwd))"),
+        "protected cwd allowed": ("    if is_protected(r) or is_keeper_protected(r) or not any(r == b or",
+                                  "    if not any(r == b or"),
+        "cwd prefix lookalike": ("not any(r == b or r.startswith(b + os.sep) for b in bases):\n        return {\"cwd\": \"outside\"",
+                                 "not any(r == b or r.startswith(b) for b in bases):\n        return {\"cwd\": \"outside\""),
+        "remote stages judged locally": ("    if remote:\n        return [safe_words", "    if False:\n        return [safe_words"),
+        "redirect targets ignored": ("    for m in REDIRECT.finditer(text):", "    for m in []:"),
+        "file-command words ignored": ("            if base in FILE_CMDS:", "            if False:"),
+        "variables judged by their text": ('    if any(c in p for c in "$`\\\\!"):\n        return 0', "    if False:\n        return 0"),
+    }
+
+    def run_suite(self, tmp):
+        env = dict(os.environ, PYTHONDONTWRITEBYTECODE="1")
+        r = subprocess.run([sys.executable, "-m", "unittest", "test_go_gate.DirAllPaths", "test_go_gate.DirRelativePaths",
+                            "test_go_gate.DirCwdRule"],
+                           cwd=os.path.join(tmp, "go-gate"), capture_output=True, text=True, env=env)
+        return r.returncode
+
+    def make_copy(self, tmp, mutate=None):
+        os.makedirs(os.path.join(tmp, "go-gate"))
+        os.makedirs(os.path.join(tmp, "secret-guard"))
+        src = rtext(os.path.join(HERE, "go_gate.py"))
+        if mutate:
+            old, new = mutate
+            self.assertIn(old, src, "the mutation no longer applies: update this test with the code")
+            src = src.replace(old, new, 1)
+        wtext(os.path.join(tmp, "go-gate", "go_gate.py"), src)
+        shutil.copy(os.path.join(HERE, "test_go_gate.py"), os.path.join(tmp, "go-gate", "test_go_gate.py"))
+        shutil.copy(os.path.join(HERE, "..", "secret-guard", "secret_guard.py"), os.path.join(tmp, "secret-guard"))
+
+    def test_unmodified_copy_passes(self):                        # the harness itself works
+        tmp = tempfile.mkdtemp(prefix=".mutation-", dir=HERE)         # outside the scratch-write exemption
+        try:
+            self.make_copy(tmp)
+            self.assertEqual(self.run_suite(tmp), 0)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_every_mutant_is_caught(self):
+        for name, mutation in self.MUTANTS.items():
+            tmp = tempfile.mkdtemp(prefix=".mutation-", dir=HERE)
+            try:
+                self.make_copy(tmp, mutation)
+                self.assertNotEqual(self.run_suite(tmp), 0, f"mutant survived: {name}")
+            finally:
+                shutil.rmtree(tmp, ignore_errors=True)
+
+
+class DirRelativePaths(DirTree):
+    """Relative paths are resolved against the AGENT's cwd (the hook input's), never against the daemon's."""
+
+    def test_relative_paths_inside_the_agents_cwd_are_covered(self):
+        self.assertTrue(self.covered("touch notes.md"))
+        self.assertTrue(self.covered("cp ./a.txt sub/b.txt"))
+        self.assertTrue(self.covered("echo hi > out.log"))
+
+    def test_relative_dotdot_escape_is_not_covered(self):
+        self.assertFalse(self.covered("touch ../x"))
+        self.assertFalse(self.covered("cp a.txt ../other/b.txt"))
+        self.assertFalse(self.covered("echo hi > ../other/out.log"))
+        self.assertFalse(self.covered("touch sub/../../x"))
+
+    def test_relative_path_is_judged_against_the_agents_cwd_not_the_daemons(self):
+        os.chdir(self.news)                                   # the daemon sits INSIDE the dir ...
+        self.assertFalse(self.covered("touch x", cwd=self.other))      # ... but the agent runs in a sibling
+        self.assertFalse(self.covered("touch x", cwd=self.root))
+        os.chdir(self.other)                                  # and the other way round
+        self.assertTrue(self.covered("touch x", cwd=self.news))
+        self.assertFalse(self.covered("touch news/x", cwd=self.root))      # in-dir path, but the cwd is outside it
+
+    def test_relative_symlink_escape_is_not_covered(self):
+        self.assertFalse(self.covered("touch link/x"))
+        self.assertFalse(self.covered("cp a.txt ./link/b.txt"))
+
+    def test_unknown_cwd_fails_closed_for_a_relative_path(self):
+        self.assertFalse(self.covered("touch x", cwd="<unset>"))
+        old, g.CWD = g.CWD, None
+        try:
+            gap = g.coverage_gap(self.plan, "Bash", {"command": "touch x"}, "edit", "touch x")
+            self.assertIsNotNone(gap)
+        finally:
+            g.CWD = old
+        self.assertFalse(self.covered(f"touch {self.news}/x", cwd="<unset>"))  # nor does an absolute path pass without one
+
+    def test_a_cd_in_the_same_command_moves_the_cwd(self):
+        self.assertFalse(self.covered(f"cd {self.other} && touch x"))          # starts inside, `cd`s out
+        self.assertFalse(self.covered("cd .. && touch x"))
+        self.assertTrue(self.covered(f"cd {self.news} && touch x", cwd=self.root))
+        self.assertFalse(self.covered("cd \"$SOMEWHERE\" && touch x"))         # a cd that cannot be resolved
+
+    def test_relative_dir_target_is_not_a_grant(self):
+        plan = {"targets": ["dir:news"], "actions": ["edit"]}
+        self.assertIsNotNone(decide(plan, f"touch {self.news}/x", self.root))
+
+
+class DirCwdRule(DirTree):
+    """K-dir, round 3 (20/10): a command that changes something and relies on a `dir:` grant must also run with its
+    effective working directory (the hook's, followed through the command's own cd/pushd/popd) inside the dir."""
+
+    def test_cwd_inside_outside_unknown(self):
+        cmd = f"touch {self.news}/x"                                   # every path inside: only the cwd differs
+        self.assertIsNone(decide(self.plan, cmd, self.news))
+        self.assertIsNone(decide(self.plan, cmd, os.path.join(self.news, "sub")))
+        self.assertIsNotNone(decide(self.plan, cmd, self.other))
+        self.assertIsNotNone(decide(self.plan, cmd, self.root))
+        self.assertIsNotNone(decide(self.plan, cmd, "/"))
+        self.assertIsNotNone(decide(self.plan, cmd, None))             # unknown: fail closed
+        self.assertIsNotNone(decide(self.plan, cmd, "relative/dir"))
+        self.assertIsNotNone(decide(self.plan, cmd, "<unset>"))
+
+    def test_cwd_equal_to_the_dir_and_lookalike_sibling(self):
+        self.assertIsNone(decide(self.plan, f"touch {self.news}/x", self.news))
+        look = self.news + "letter"
+        os.makedirs(look)
+        self.assertIsNotNone(decide(self.plan, f"touch {self.news}/x", look))
+
+    def test_cwd_symlink_pointing_out(self):
+        link = os.path.join(self.news, "link")                         # inside news textually, real dir is `other`
+        self.assertIsNotNone(decide(self.plan, f"touch {self.news}/x", link))
+
+    def test_cwd_under_a_protected_path(self):
+        gate = os.path.join(self.root, "gate")
+        os.makedirs(gate)
+        old = os.environ.get("GO_GATE_DIR")
+        os.environ["GO_GATE_DIR"] = gate
+        try:
+            plan = {"targets": [f"dir:{self.root}"], "actions": ["edit"]}
+            self.assertIsNone(decide(plan, f"touch {self.news}/x", self.news))
+            self.assertIsNotNone(decide(plan, f"touch {self.news}/x", gate))
+        finally:
+            if old is None:
+                os.environ.pop("GO_GATE_DIR")
+            else:
+                os.environ["GO_GATE_DIR"] = old
+
+    def test_cd_inside_the_command_moves_the_cwd(self):
+        n, o = self.news, self.other
+        self.assertIsNone(decide(self.plan, f"cd {n} && touch {n}/x", self.root))
+        self.assertIsNone(decide(self.plan, f"cd {n}; touch {n}/x", self.root))
+        self.assertIsNone(decide(self.plan, f"cd {n}\ntouch {n}/x", self.root))
+        self.assertIsNotNone(decide(self.plan, f"cd {o} && touch {n}/x", n))
+        self.assertIsNotNone(decide(self.plan, f"cd {o}; touch {n}/x", n))
+        self.assertIsNotNone(decide(self.plan, f"cd {o} && cd {n} && cd .. && touch {n}/x", n))
+        self.assertIsNone(decide(self.plan, f"cd {o} && cd {n} && touch {n}/x", self.root))
+        self.assertIsNotNone(decide(self.plan, f"cd {n} && cd .. && touch {n}/x", n))
+        self.assertIsNotNone(decide(self.plan, f"cd \"$X\" && touch {n}/x", n))     # unresolvable cd: unknown
+        self.assertIsNotNone(decide(self.plan, f"touch {n}/x && cd {o} && touch {n}/y", n))   # second one is outside
+        self.assertIsNotNone(decide(self.plan, f"cd {n}/link && touch {n}/x", n))     # cd through a symlink out
+
+    def test_subshell_and_chains(self):
+        n, o = self.news, self.other
+        self.assertIsNotNone(decide(self.plan, f"(cd {o} && touch {n}/x)", n))
+        self.assertIsNone(decide(self.plan, f"(cd {n} && touch {n}/x)", n))
+        self.assertIsNotNone(decide(self.plan, f"(cd {n} && touch {n}/x)", self.root))    # over-refusal: not followed
+        self.assertIsNotNone(decide(self.plan, f"(cd {n} && touch {n}/x); touch {n}/y", self.root))   # cd stays in ( )
+        self.assertIsNotNone(decide(self.plan, f"echo hi | (cd {o} && tee {n}/x)", n))
+        self.assertIsNotNone(decide(self.plan, f"true && cd {o} || touch {n}/x", n))
+
+    def test_plain_targets_and_plans_without_dir_are_unchanged(self):
+        n, o = self.news, self.other
+        plain = {"targets": [n], "actions": ["edit"]}
+        self.assertIsNone(decide(plain, f"touch {n}/x", o))                          # no dir: target, any cwd
+        self.assertIsNone(decide(plain, f"touch {n}/x", None))
+        named = {"targets": ["web"], "actions": ["deploy"]}
+        self.assertIsNone(decide(named, "docker restart web", o))
+        mixed = {"targets": [f"dir:{n}", "web"], "actions": ["edit", "deploy"]}
+        self.assertIsNone(decide(mixed, "docker restart web", o))                    # matched by the plain target
+        self.assertIsNotNone(decide(mixed, f"touch {n}/x", o))                       # relies on the dir: target
+        self.assertIsNone(decide(mixed, f"touch {n}/x", n))
+
+    def test_file_tools_have_no_cwd(self):
+        gap = g.coverage_gap(self.plan, "Write", {"file_path": f"{self.news}/x.txt"}, "edit")
+        self.assertIsNone(gap)                                                       # not a command: unchanged
+
+    def test_refusal_message(self):
+        plan = {"targets": ["dir:/opt/stacks/news"], "actions": ["edit"]}      # a short path: shown as written
+        gap = decide(plan, "touch /opt/stacks/news/x", "/srv")
+        text = g.describe_gap(gap, plan)
+        self.assertIn("also runs from inside the directory", text)
+        self.assertIn("working directory is outside every dir: target", text)
+        self.assertIn("run it from inside /opt/stacks/news", text)
+        self.assertIn("use `cd /opt/stacks/news && ...`", text)
+        self.assertNotIn("/srv", text)                                               # the cwd itself is not echoed
+        unknown = g.describe_gap(decide(plan, "touch /opt/stacks/news/x", None), plan)
+        self.assertIn("working directory is not known", unknown)
+        self.assertIn("run it from inside /opt/stacks/news", unknown)
+
+    def test_refusal_message_with_a_masked_long_path(self):
+        long = "/opt/stacks/news2026-archive-backup-01"                              # 20+ chars with a digit: masked
+        plan = {"targets": [f"dir:{long}"], "actions": ["edit"]}
+        text = g.describe_gap(decide(plan, f"touch {long}/x", "/srv"), plan)
+        self.assertIn("run it from inside a dir: target of the plan", text)
+        self.assertNotIn("<…>", text)
+
+    def test_docker_compose_from_elsewhere_is_refused(self):
+        plan = {"targets": [f"dir:{self.news}"], "actions": ["deploy"]}
+        cmd = f"docker compose -f {self.news}/docker-compose.yml up -d"
+        self.assertIsNotNone(decide(plan, cmd, self.other))
+        self.assertIsNone(decide(plan, cmd, self.news))
+        self.assertIsNone(decide(plan, f"cd {self.news} && {cmd}", self.other))
+
 
 class Hook(unittest.TestCase):
     def setUp(self):
@@ -588,6 +1184,16 @@ class Hook(unittest.TestCase):
         self.prompt(telegram("GO"))
         self.assertEqual(self.act("docker restart web"), "allow")
         self.assertEqual(self.act("docker restart db web"), "deny")   # GG-07
+
+    def test_deny_reason_names_what_is_missing(self):
+        self.propose("Scope: id=p1 ; targets=web ; actions=deploy ; ttl=30")
+        self.prompt(telegram("GO"))
+        self.assertEqual(self.act("docker compose -f /opt/stacks/db/compose.yml restart"), "deny")
+        self.assertIn("targets not covered: /opt/stacks/db/compose.yml", run_hook.reason)
+        self.assertIn("plan targets: web", run_hook.reason)
+        self.assertEqual(self.act("git push origin web"), "deny")
+        self.assertIn("missing action 'git'", run_hook.reason)
+        self.assertIn("plan actions: deploy", run_hook.reason)
 
     def test_gate_state_cannot_be_written_through_a_link(self):
         link = os.path.join(tempfile.mkdtemp(), "x.json")
