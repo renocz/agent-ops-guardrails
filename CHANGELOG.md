@@ -6,6 +6,14 @@ One version scheme: **a repository tag per release**. Components have no version
 
 Next: finish the block-mode trial (started 12/10/2026, after the end-to-end dry run of refusal, approval, expiry, replay and a Telegram outage) -- a few days of varied real work, no deadlock, an acceptable number of cards -- then v1.0.
 
+- **snapshot-gate: the fake `zfs`/`vgs`/`lvs`/`lvcreate`/`lvremove` run on stock macOS and under dash (20/10).**
+  Running the suite on a Mac (system Python 3.9, `/bin/bash` 3.2) made 3 tests of `test_fakebin_subprocess.py`
+  fail ("bad array subscript": a negative array subscript needs bash 4.3+). It was a fixture-only defect:
+  `lib/backends.py` was not involved and the Linux CI passed. The fakes are now `#!/bin/sh` with POSIX constructs
+  only. A new `FixturesPortableAcrossShells` test runs every fake through each of dash, bash and sh found on the
+  machine, a new `shell-portability` CI job runs `checkbashisms` and `shellcheck --shell=sh` on them (not yet run
+  on GitHub), and `docs/snapshot-gate-real-disk-testing.md` now says which steps run on a Mac and which need a
+  Linux host with real ZFS/LVM.
 - **snapshot-gate: tested against real zfs/vgs/lvs/lvcreate/lvremove processes for the first time (19/10).**
   No ZFS pool or LVM volume group could be created in the sandbox this ran in: no loadable kernel modules at
   all (ZFS is always out-of-tree) and no device-mapper kernel driver (`lvcreate` fails even though `pvcreate`/
