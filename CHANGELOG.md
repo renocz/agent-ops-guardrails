@@ -40,6 +40,42 @@ Next: finish the block-mode trial (started 12/10/2026, after the end-to-end dry 
   from the start or stops answering mid-wait, and that the default (no `--wait`) behaves exactly as before.
   Mutation-checked: the approve-branch ledger write disabled, and the `status` op's peer-uid check reordered past
   it, each in a scratch copy -- the relevant test fails both times.
+- **keeper: several plans can be active in one session at once (production incident, 20/10).** `s["active"]` was a
+  single plan per session: approving a new one replaced it outright, so approving a small 30-minute card while a
+  parallel sub-agent's broad 300-minute plan was still running threw the broad plan away mid-task, refusing work
+  that had nothing to do with the small card just approved ("the approved plan X does not cover this action"). It
+  is now a list, bounded by `max_active_plans` (config key, default 3, hard cap 5 enforced in `Keeper.__init__`
+  regardless of what the config file says).
+  - **Coverage stays single-plan.** An action is allowed when at least one active plan covers it whole --
+    `go_gate.covers()` itself is unchanged, and `check()` never adds up the targets or actions of two different
+    plans to approve something neither covers alone (that would be exactly the implicit scope-widening the keeper
+    exists to prevent). The one exception: a compound Bash command go-gate already splits into stages can have
+    different stages covered by different plans, each still in full -- this already existed for a single active
+    plan and is unchanged, just checked against every active plan instead of only one.
+  - **The cap evicts the oldest, never silently.** Past `max_active_plans`, approving a new plan drops the oldest
+    active one (the plan just approved is never a candidate, by construction). The approval card says what
+    approving it will do *before* the tap ("adds to: …", "renews: …", or which plan the cap would drop); the
+    confirmation names the dropped plan; `/plans` and the log get a `plan-evicted` event; the agent sees the
+    current active ids in `keeper-status` and in any later refusal's reason.
+  - **Renewal.** Approving a plan whose `id` matches one already active replaces it in place (fresh hash, fresh
+    expiry) instead of adding a second entry, and never counts against the cap or evicts anything.
+  - **`/stop <id>`** ends only the named plan (active or pending), in every session; `/stop` with no id still ends
+    everything, unchanged. `/status` and `keeper-status` list every active plan of a session, never just one.
+  - **Compatibility:** `migrate_state()` turns an old `state.json`'s single `active` dict into a one-element list
+    on load, same plan, same hash, same expiry -- nothing it already granted is widened or dropped.
+  - 16 new tests (`keeper/test_keeper.py`, class `MultiPlan`): two plans each covering a different command; a
+    command covered by only one; by neither; the multi-object "no union of two plans" case and its compound-command
+    exception; the cap evicting the oldest with a logged, told-to-both-sides message; a hard cap of 5 regardless of
+    config; renewal by id; independent expiry per plan; `/stop`, `/stop <id>` and the unknown-id case; `/status`
+    and `keeper-status` listing every plan; the card's preview line through add/renew/evict; migration from an old
+    `state.json`, including one holding an already-expired plan. Mutation-checked (disabling the cap guard, letting
+    two plans' coverage union instead of requiring one to cover whole, and disabling the migration, each in a
+    scratch copy): every one of those breaks exactly the test meant to catch it. The existing 138 keeper tests,
+    `test_block_dryrun.py`'s 30, and every other suite in the repo (council, secret-guard, go-gate, leak-check)
+    stayed green, unmodified.
+  - `docs/block-mode-dry-run.md` gets a third checklist part (two proposals) exercising this by hand: a second
+    plan must not throw away the first, `/status` must list both, and `/stop <id>` must end only the one named.
+
 - **README, CHANGELOG and the IT-leaders pages: made the status lines true again (owner review of PR #13, 17/10).**
   The README and this changelog's intro still said the keeper "runs in observe mode" with block mode as "the next
   step" -- stale since 12/10, when block mode started after its end-to-end dry run. Both now say the real state:

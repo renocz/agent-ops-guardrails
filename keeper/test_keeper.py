@@ -59,15 +59,22 @@ class Base(unittest.TestCase):
 
     def plan(self, scope, sid="s1", text="why"):
         """As the agent does it: a keeper-propose command, seen by keeperd in the hook's check."""
-        r = self.k.check(sid, *bash(self.propose_cmd(scope, text)))
+        return self.plan_on(self.k, scope, sid, text)
+
+    def plan_on(self, k, scope, sid="s1", text="why"):
+        """Same as plan(), against an explicit Keeper instance (e.g. one built with a non-default cfg)."""
+        r = k.check(sid, *bash(self.propose_cmd(scope, text)))
         self.assertEqual(r["decision"], "deny")                     # nothing to run
         self.assertIn("sent to the human", r["reason"])
         self.bot.send_plan(*r.pop("_notify"))
         return self.bot.buttons()
 
     def approve(self, scope, sid="s1"):
-        ok, _ = self.plan(scope, sid)
-        self.assertTrue(self.k.decide(OWNER, CHAT, ok).startswith("approved"))
+        self.approve_on(self.k, scope, sid)
+
+    def approve_on(self, k, scope, sid="s1"):
+        ok, _ = self.plan_on(k, scope, sid)
+        self.assertTrue(k.decide(OWNER, CHAT, ok).startswith("approved"))
 
     def allowed(self, tool, ti, sid="s1"):
         return self.k.check(sid, tool, ti)["decision"] == "allow"
@@ -101,7 +108,7 @@ class StateMachine(Base):
 
     def test_ttl_is_capped(self):
         self.approve("id=p1 ; targets=web ; actions=deploy ; ttl=48h")
-        self.assertEqual(self.k.status("s1")["active"]["ttl"], 240)
+        self.assertEqual(self.k.status("s1")["active"][0]["ttl"], 240)
 
     def test_reject(self):
         ok, no = self.plan("id=p1 ; targets=web ; actions=deploy")
@@ -168,6 +175,159 @@ class StateMachine(Base):
         self.assertEqual(stat.S_IMODE(os.stat(self.cfg["state_dir"]).st_mode), 0o700)
         self.assertEqual(stat.S_IMODE(os.stat(self.k.state_path).st_mode), 0o600)
         self.assertEqual(stat.S_IMODE(os.stat(self.k.log_path).st_mode), 0o600)
+
+
+class MultiPlan(Base):
+    """Several active plans in one session at once (20/10, after a 300-min plan vanished under a 30-min one): one
+    plan's approval no longer replaces another's. Coverage is still decided by ONE plan at a time, in full, never
+    by adding up pieces of two (see check()'s own comment); the cap evicts the oldest, never silently; approving
+    a plan whose id matches one already active renews it instead of piling up a second entry."""
+
+    def test_two_plans_each_cover_their_own_command(self):
+        self.approve("id=web ; targets=web ; actions=deploy")
+        self.approve("id=db ; targets=db ; actions=deploy")
+        self.assertTrue(self.allowed(*bash("docker restart web")))
+        self.assertTrue(self.allowed(*bash("docker restart db")))
+
+    def test_a_command_covered_by_only_one_of_the_two_is_allowed(self):
+        self.approve("id=web ; targets=web ; actions=deploy")
+        self.approve("id=app ; targets=app ; actions=edit")
+        self.assertTrue(self.allowed(*bash("docker restart web")))
+        self.assertFalse(self.allowed(*bash("docker restart app")))          # the edit plan does not cover deploy
+
+    def test_a_command_covered_by_neither_is_denied(self):
+        self.approve("id=web ; targets=web ; actions=deploy")
+        self.approve("id=db ; targets=db ; actions=deploy")
+        self.assertFalse(self.allowed(*bash("docker restart mail")))
+
+    def test_neither_plan_alone_covers_a_multi_object_command_no_union_of_two_plans(self):
+        """docker restart web db: covers() already requires every object of a multi-object verb to match ONE
+        plan's own targets (external audit of v0.8). Two plans that each cover one of the two objects must not
+        add up to cover the combined call -- that would be exactly the "half one plan, half another" union the
+        task rules out."""
+        self.approve("id=web ; targets=web ; actions=deploy")
+        self.approve("id=db ; targets=db ; actions=deploy")
+        self.assertFalse(self.allowed(*bash("docker restart web db")))
+
+    def test_a_compound_command_can_have_its_stages_covered_by_different_plans(self):
+        """The one exception the task names: go-gate already splits a compound Bash command into stages
+        (self.gate.CHANGES); each stage is still fully covered by ONE plan, but not necessarily the SAME one."""
+        self.approve("id=web ; targets=web ; actions=deploy")
+        self.approve("id=db ; targets=db ; actions=deploy")
+        self.assertTrue(self.allowed(*bash("docker restart web && docker restart db")))
+        self.assertFalse(self.allowed(*bash("docker restart web && docker restart mail")))
+
+    def test_cap_reached_evicts_the_oldest_and_says_so(self):
+        k = keeperd.Keeper(dict(self.cfg, max_active_plans=2), self.bot, clock=self.clock)
+        self.approve_on(k, "id=a ; targets=a ; actions=deploy")
+        self.clock.t += 60
+        self.approve_on(k, "id=b ; targets=b ; actions=deploy")
+        self.clock.t += 60
+        ok, _ = self.plan_on(k, "id=c ; targets=c ; actions=deploy")
+        out = k.decide(OWNER, CHAT, ok)
+        self.assertEqual(out.key, "ans_approved_evicted")                    # the human is told, not left guessing
+        self.assertIn("a", str(out))                                         # names the plan that was dropped
+        self.assertEqual(k.check("s1", *bash("docker restart b"))["decision"], "allow")
+        self.assertEqual(k.check("s1", *bash("docker restart c"))["decision"], "allow")
+        r = k.check("s1", *bash("docker restart a"))
+        self.assertEqual(r["decision"], "deny")
+        self.assertIn("b", r["reason"])                                      # the agent can see what is still active
+        self.assertIn("c", r["reason"])
+        events = []
+        with open(k.log_path) as f:
+            events = [json.loads(x) for x in f]
+        self.assertIn("plan-evicted", [e["event"] for e in events])          # a lifecycle event of its own, never silent
+
+    def test_cap_is_hard_capped_regardless_of_config(self):
+        k = keeperd.Keeper(dict(self.cfg, max_active_plans=99), self.bot, clock=self.clock)
+        self.assertEqual(k.max_active_plans, keeperd.MAX_ACTIVE_PLANS_HARD_CAP)
+
+    def test_renewal_by_same_id_refreshes_without_adding_or_evicting(self):
+        k = keeperd.Keeper(dict(self.cfg, max_active_plans=2), self.bot, clock=self.clock)
+        self.approve_on(k, "id=a ; targets=a ; actions=deploy ; ttl=10")
+        self.approve_on(k, "id=b ; targets=b ; actions=deploy ; ttl=10")
+        self.clock.t += 9 * 60
+        self.approve_on(k, "id=a ; targets=a ; actions=deploy ; ttl=30")     # renewed just before it would expire
+        self.assertEqual(len(k.state["sessions"]["s1"]["active"]), 2)        # still 2, never 3: a renewal, not an add
+        self.clock.t += 9 * 60                                               # b's original 10 min are now well up
+        self.assertEqual(k.check("s1", *bash("docker restart b"))["decision"], "deny")
+        self.assertEqual(k.check("s1", *bash("docker restart a"))["decision"], "allow")
+
+    def test_each_plan_expires_on_its_own_schedule(self):
+        self.approve("id=a ; targets=a ; actions=deploy ; ttl=10")
+        self.clock.t += 5 * 60
+        self.approve("id=b ; targets=b ; actions=deploy ; ttl=30")
+        self.clock.t += 6 * 60                                               # a's 10 min are up; b has ~29 min left
+        self.assertFalse(self.allowed(*bash("docker restart a")))
+        self.assertTrue(self.allowed(*bash("docker restart b")))
+
+    def test_stop_one_id_leaves_the_others_active(self):
+        self.approve("id=a ; targets=a ; actions=deploy")
+        self.approve("id=b ; targets=b ; actions=deploy")
+        out = self.k.command(OWNER, CHAT, "/stop a")
+        self.assertEqual(out[0].key, "ans_stopped_one")
+        self.assertFalse(self.allowed(*bash("docker restart a")))
+        self.assertTrue(self.allowed(*bash("docker restart b")))
+
+    def test_stop_unknown_id_says_nothing_was_active(self):
+        self.approve("id=a ; targets=a ; actions=deploy")
+        out = self.k.command(OWNER, CHAT, "/stop nosuch")
+        self.assertEqual(out[0].key, "ans_nothing_active_one")
+        self.assertTrue(self.allowed(*bash("docker restart a")))
+
+    def test_stop_with_no_id_still_stops_every_plan(self):
+        self.approve("id=a ; targets=a ; actions=deploy")
+        self.approve("id=b ; targets=b ; actions=deploy")
+        self.assertEqual(self.k.command(OWNER, CHAT, "/stop")[0].key, "ans_stopped")
+        self.assertFalse(self.allowed(*bash("docker restart a")))
+        self.assertFalse(self.allowed(*bash("docker restart b")))
+
+    def test_status_and_keeper_status_list_every_active_plan(self):
+        self.approve("id=a ; targets=a ; actions=deploy ; ttl=10")
+        self.approve("id=b ; targets=b ; actions=deploy ; ttl=20")
+        r = self.k.status("s1")
+        self.assertEqual({p["id"] for p in r["active"]}, {"a", "b"})
+        text = "\n".join(self.k.command(OWNER, CHAT, "/status"))
+        self.assertIn("a", text)
+        self.assertIn("b", text)
+
+    def test_card_previews_add_then_renew_then_cap_eviction(self):
+        k = keeperd.Keeper(dict(self.cfg, max_active_plans=2, max_proposals_per_hour=10), self.bot, clock=self.clock)
+        self.approve_on(k, "id=a ; targets=a ; actions=deploy")
+        ok_b, _ = self.plan_on(k, "id=b ; targets=b ; actions=deploy")
+        self.assertEqual(self.bot.plans[-1][1]["preview"], {"kind": "add", "ids": ["a"]})
+        k.decide(OWNER, CHAT, ok_b)
+        self.plan_on(k, "id=a ; targets=a ; actions=deploy ; ttl=90")
+        self.assertEqual(self.bot.plans[-1][1]["preview"], {"kind": "renew", "id": "a"})
+        self.plan_on(k, "id=c ; targets=c ; actions=deploy")
+        self.assertEqual(self.bot.plans[-1][1]["preview"]["kind"], "evict")
+        text, _kb = keeperd.render_plan_card("en", self.bot.plans[-1][1])
+        self.assertIn("plans are already active", text)
+
+    def test_migration_from_a_single_active_plan_state_file(self):
+        old_state = {"sessions": {"s1": {"active": {"plan": {"id": "legacy", "targets": ["web"],
+                                                              "actions": ["deploy"], "ttl": 30},
+                                                      "hash": "x" * 64, "approved_at": self.clock.t,
+                                                      "expires": self.clock.t + 1800}}},
+                     "used_nonces": [], "proposals": []}
+        with open(self.k.state_path, "w") as f:
+            json.dump(old_state, f)
+        k2 = keeperd.Keeper(self.cfg, self.bot, clock=self.clock)
+        self.assertIsInstance(k2.state["sessions"]["s1"]["active"], list)
+        self.assertEqual(k2.state["sessions"]["s1"]["active"][0]["plan"]["id"], "legacy")
+        self.assertEqual(k2.check("s1", *bash("docker restart web"))["decision"], "allow")
+        self.assertEqual(k2.check("s1", *bash("docker restart mail"))["decision"], "deny")
+
+    def test_migration_does_not_widen_an_already_expired_plan(self):
+        old_state = {"sessions": {"s1": {"active": {"plan": {"id": "legacy", "targets": ["web"],
+                                                              "actions": ["deploy"], "ttl": 30},
+                                                      "hash": "x" * 64, "approved_at": self.clock.t - 3600,
+                                                      "expires": self.clock.t - 1800}}},
+                     "used_nonces": [], "proposals": []}
+        with open(self.k.state_path, "w") as f:
+            json.dump(old_state, f)
+        k2 = keeperd.Keeper(self.cfg, self.bot, clock=self.clock)
+        self.assertEqual(k2.check("s1", *bash("docker restart web"))["decision"], "deny")
 
 
 class ForgedApprovals(Base):
@@ -1181,9 +1341,10 @@ class OwnerCommands(Base):
         self.assertEqual(self.command("/stop@keeper_bot")[0].key, "ans_stopped")
 
     def test_malformed_stop_variants_are_ignored_not_executed(self):
-        """decide() matches /stop case-insensitively like /summary; trailing text (even a bare suffix) is rejected."""
+        """decide() matches /stop case-insensitively like /summary; a bare suffix with no "@" or id is rejected,
+        and so is more than one word (/stop <id> takes exactly one token, see MultiPlan for the valid form)."""
         self.approve("id=p1 ; targets=web ; actions=deploy ; ttl=30")
-        for text in ("/stopx", "/stop now"):
+        for text in ("/stopx", "/stop p1 extra"):
             self.assertIsNone(self.command(text), text)
         self.assertTrue(self.allowed(*bash("docker restart web")))             # still active: none of them stopped it
         self.assertEqual(self.command("/STOP")[0].key, "ans_stopped")          # case-insensitive, same as /summary

@@ -36,6 +36,28 @@ state, replay a GO or remove the hook. The keeper moves the approval out of the 
   `/opt/agent-guardrails/lib/` (root, 644) and runs as `/usr/bin/env -i /usr/bin/python3 -I`.
 - If keeperd is down, the hook lets reads through and refuses changes.
 
+## Several plans active at once
+
+A session can hold more than one approved plan at the same time (20/10): approving a small, narrow plan while a
+broad one is still running no longer throws the broad one away. Design and the exact rule: `docs/design-keeper.md`.
+In short:
+
+- An action is allowed when **at least one** active plan covers it, whole — never by adding up the targets or
+  actions of two different plans. A compound Bash command (`a && b`) is the one exception: go-gate already splits
+  it into stages, and each stage can be covered by a different plan, but still only one, in full.
+- The config key `max_active_plans` (default 3, hard cap 5 regardless of what the config file says) bounds how many
+  plans one session can hold. Approving past the cap **replaces the oldest active plan** — never silently: the
+  approval card says so before you tap Approve ("⚠️ N plans are already active: approving this drops the oldest,
+  …"), the confirmation names which plan was dropped, and `/plans` lists it as a lifecycle event of its own.
+- Approving a plan whose `id` matches one already active **renews** it (fresh TTL, same slot) instead of adding a
+  second entry, and never counts against the cap.
+- `/stop` still ends every active and pending plan everywhere, like before. `/stop <id>` ends only the plan with
+  that id (active or pending), in every session — plans are not scoped to a session, see "Known limits" below.
+- `/status` and `keeper-status` list **every** active plan of a session (id, expiration, targets, actions), never
+  more than one.
+- An old `state.json` (one active plan per session, not a list) is upgraded automatically on the next start; nothing
+  it already granted is widened or lost.
+
 ## Install
 
 ```sh
@@ -62,9 +84,10 @@ attempt (text starting with `/`) from anyone else is ignored and logged without 
 through the socket, so the agent can never see it. All five also show up in Telegram's "/" menu for this chat (never
 in a global menu a stranger who finds the bot could see).
 
-- **`/stop`** — revokes every active and pending plan right now, across every session, exactly like the card's own
-  "Stop everything" button (they share the same code). Answers "stopped" or "nothing active".
-- **`/status`** — mode (block/observe); for each session with an active plan, its id, actions, targets and the time
+- **`/stop [id]`** — with no id, revokes every active and pending plan right now, across every session, exactly like
+  the card's own "Stop everything" button (they share the same code). With an id, revokes only the plan with that
+  id. Answers "stopped" / "nothing active", or "stopped: plan `id`" / "nothing was active for plan `id`".
+- **`/status`** — mode (block/observe); for each session, every active plan's id, actions, targets and the time
   left; how many proposals are pending; proposals made in the last rolling hour against `max_proposals_per_hour`.
   Read-only, and never the agent's free-form explanation or the raw command.
 - **`/plans [n]`** — the last `n` plan events (default 5, max 20): proposed, approved, rejected, expired, revoked,

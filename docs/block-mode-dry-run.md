@@ -139,6 +139,31 @@ steps below, then turn it back on.
   created: steps a and d never actually run the command, and every other step (b, c, this one) touches that same
   single path, never a new one.
 
+## Part 3 — several plans at once (2 proposals), at least an hour after Part 2
+
+### g. Approving a second plan does not throw away the first
+
+This is the exact regression this feature fixes: before it, approving a new plan replaced whatever was already
+active, so a parallel task relying on the first plan would suddenly start getting refused for no reason it caused.
+
+- Propose and approve a plan: *"Propose a plan to run `touch ~/dry-run-marker`, scope: id=g1,
+  targets=dry-run-marker, actions=edit,delete, ttl=10 minutes."*
+- Ask the agent: *"Run `touch ~/dry-run-marker`."* → allowed.
+- Propose a second, unrelated plan: *"Propose a plan to run `ls`, scope: id=g2, targets=dry-run-other,
+  actions=edit, ttl=10 minutes."* Before you tap Approve, read the card: it should say it **adds to** the active
+  plans (naming `g1`), not replace it. Approve it.
+- Send `/status`: both `g1` and `g2` should be listed, each with its own targets and time left — never just one.
+- Ask the agent: *"Run `touch ~/dry-run-marker`."* → still allowed. `g1` never stopped covering anything when
+  `g2` was approved.
+- **Cleanup, while `g1` is still active (no extra proposal):** ask the agent to run `rm ~/dry-run-marker`. It
+  should succeed — `g1`'s scope covers `delete` too.
+- Send `/stop g1`: answers "stopped: plan g1".
+- Ask the agent: *"Run `touch ~/dry-run-marker`."* → refused (`g1` is gone).
+- Send `/status`: `g2` should still be listed as active; `g1` should not.
+- Send `/stop` (no id, no proposal needed): ends `g2` too, leaving nothing active for the next session.
+- Failure → rollback: approving `g2` made `g1` stop covering its own scope; `/status` ever showed only one of the
+  two while both were active; `/stop g1` also ended `g2`; the card for `g2` did not mention `g1` at all.
+
 ## Not part of this manual pass
 
 Two more scenarios from the dry run are machine-internal and already covered by the automated tests
