@@ -1299,6 +1299,12 @@ def coverage_gap(plan, tool, tool_input, cat, text=None):
             if note:
                 gap["why"] = note
             return gap
+        # K-dir, round 3 (20/10): the match relied on a `dir:` target, so a command (text is not None) must also run
+        # from inside one. A plain-target match (the branch above was skipped) keeps its behaviour.
+        if text is not None:
+            where = cwd_outside_dirs(dir_targets, _stage_cwd(text))
+            if where:
+                return where
     # External audit of v0.8 (07/10): `docker restart db web` passed with targets=web. For verbs that take several
     # objects, every object must match a target.
     for objs in multi_objects(text or ""):
@@ -1357,6 +1363,13 @@ def describe_gap(gap, plan):
         why = f" ({gap['why']})" if gap.get("why") else ""
         return f"missing action '{gap['category']}'{why}; plan actions: {allowed}"
     have = ", ".join(plan.get("targets") or []) or "none"
+    if "cwd" in gap:
+        dirs = gap.get("dirs") or []
+        first = dirs[0] if dirs else "<dir>"
+        state = "is not known" if gap["cwd"] == "unknown" else "is outside every dir: target"
+        return (f"a dir: target covers a command that changes something only when it also runs from inside the "
+                f"directory, and the working directory {state}; run it from inside {', '.join(dirs) or '<dir>'} "
+                f"(use `cd {first} && ...`); plan targets: {have}")
     missing = ", ".join(gap.get("targets") or []) or "no path, filename or host recognised in the command"
     note = f" ({gap['why']})" if gap.get("why") else ""
     return f"targets not covered: {missing}{note}; plan targets: {have}"
@@ -1568,6 +1581,25 @@ def _judge_path(p, cwd, bases, plain_targets):
     if any(r == b or r.startswith(b + os.sep) for b in bases):
         return 2
     return 1 if any(target_matches(t, [orig]) for t in plain_targets) else 0
+
+
+def cwd_outside_dirs(dir_targets, cwd):
+    """K-dir, round 3: a command that changes something and relies on a `dir:` grant must also run with its effective
+    working directory (`cwd`: the hook input's, followed through the command's own cd/pushd/popd) inside one of the
+    plan's dir: targets. Returns None when it does, else a gap dict {"cwd": reason, "dirs": [the dir: bases]}. Fails
+    closed: an unknown, relative or unresolvable cwd, one that resolves (symlinks followed) outside every dir: target,
+    or one under a protected path, is a gap."""
+    bases = [b for b in (_dir_base(t.strip("'\"")[4:]) for t in dir_targets) if b]
+    dirs = [safe_words(b, 80) for b in bases][:8]
+    if cwd is None or cwd is _CWD_UNKNOWN or not os.path.isabs(str(cwd)):
+        return {"cwd": "unknown", "dirs": dirs}
+    try:
+        r = os.path.realpath(str(cwd))
+    except (OSError, ValueError):
+        return {"cwd": "unknown", "dirs": dirs}
+    if is_protected(r) or is_keeper_protected(r) or not any(r == b or r.startswith(b + os.sep) for b in bases):
+        return {"cwd": "outside", "dirs": dirs}
+    return None
 
 
 def dir_paths_gap(dir_targets, plain_targets, tool_input, text, tokens):
