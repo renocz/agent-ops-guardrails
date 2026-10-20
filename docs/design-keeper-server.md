@@ -1,8 +1,9 @@
 # Design: covering the server (keeper v1.0, part 2), draft for review
 
-Status: draft, 20/10/2026, written before any code in this PR. The keeper so far assumes the laptop: a non-root
-agent, file permissions that protect it, a human on Telegram. On the server none of that holds. This note designs
-the gap, states what is implemented in this PR and what is deliberately left as a question for the owner.
+Status: draft 2, 20/10/2026 — the three open questions of draft 1 were decided by the owner directly on PR #18
+([comment](https://github.com/renocz/agent-ops-guardrails/pull/18#issuecomment-6299989493)) and are folded in below.
+The keeper so far assumes the laptop: a non-root agent, file permissions that protect it, a human on Telegram. On
+the server none of that holds. This note designs the gap, and states what is implemented in this PR.
 
 ## Why this is a separate design, not an extension of docs/design-keeper.md
 
@@ -88,10 +89,27 @@ host-level verbs through named sudoers lines, not a wildcard. Anything wider goe
 That migration touches a running system with ~40 containers; it needs the owner's own container names, the real
 service units, and a maintenance window, none of which exist in this cloud session. §5 below designs how to stage
 it (observe before block, a reversible dry run in a throwaway container) so that when the owner does it, nothing
-here has to be re-invented. **This is the first point that needs the owner's decision, not this PR's guess:
-whether to build the Docker-proxy kit as a new, generic component of this repository (next to `snapshot-gate/` and
-`oncall/`) in a follow-up PR, and which host-level verbs the sudoers allowlist should actually name** — that list
-is operational knowledge (which arr container, which LXC ids) this design cannot invent.
+here has to be re-invented. **Decided by the owner** (PR #18 review comment, 20/10/2026, verified on the PR itself —
+[comment](https://github.com/renocz/agent-ops-guardrails/pull/18#issuecomment-6299989493)): the Docker-proxy kit
+goes **into this repository**, in a **separate PR**, following the `snapshot-gate/`/`oncall/` model, not left
+outside the repo or folded into this one. Still open, because it is operational knowledge this design cannot
+invent: which host-level verbs the sudoers allowlist in that separate PR should actually name (which arr container,
+which LXC ids).
+
+**User topology: decided by the owner** (same PR #18 comment as above). Not one shared user for all three server
+agents as this draft had left open, and not three separate ones either: **two non-root Unix users**.
+
+- The **update timer** (it replaces the Claude Code binary itself — arguably the most sensitive of the three, since
+  a compromised update could plant anything in what every other agent later runs) gets its **own, separate** user.
+- The **interactive assistant and the morning (standing-plan) systemd job share one common non-root user**, told
+  apart from each other by `KEEPER_ACTOR`/standing plans (§2) exactly as this PR already builds it, not by a Unix
+  user boundary between them.
+
+Both users join `keeperclients` so the one shared `keeperd` (§3) can reach either socket peer; §5's parent-directory
+and socket-group setup already generalizes to more than one agent uid (`agent_uids` in the config is already a list,
+not a single value — see `keeperd.DEFAULTS`). Nothing in this PR's standing-plans code assumes one user: coverage is
+keyed by the plan's id and the request's `actor`, never by which Unix uid made the call, so this topology needs no
+code change here, only the real `useradd`s and `keeperclients` membership on the real host (§5).
 
 ---
 
@@ -191,8 +209,9 @@ against a real `claude -p` and a real systemd unit, which this session cannot ru
   authentication problem, which is a different, larger design than this PR's scope, and would need its own threat
   model before it could claim the same guarantee.
 
-**Recommendation: A.** Keep one `keeperd` per machine, now including LXC 100. The three server agents share it
-(their standing plans and actor tags, §2, are what tells them apart, not three daemons). This is the option that
+**Recommendation: A.** Keep one `keeperd` per machine, now including LXC 100. All three server agents share it,
+whatever Unix user each runs under (§1's decided topology, above) — standing plans and actor tags, §2, are what
+tells them apart, not separate daemons. This is the option that
 needs no new trust mechanism beyond what `peer_uid()` already proves, and it matches the one sentence already in
 `docs/design-keeper.md`'s failure modes that anticipated this: "the server is out of scope for v1 until its agent
 runs as a normal user (root in the container could become `_keeper`)" — read literally, that sentence already
@@ -206,9 +225,12 @@ forever, until someone notices." Recommend: the daily `/summary` explicitly repo
 actor that had a scheduled run (inferred from the systemd timer's own log, out of this repo's reach, or more
 simply: an expected-vs-seen count the morning script itself could report into the summary) and no corresponding
 `standing-used`/`allowed`/`denied` event that day. This is a reporting addition, not a change to the fail-closed
-rule itself — the gate still denies by default, but silence stops being invisible. **Not implemented in this PR**
-(it needs the real systemd timer's own signal to compare against, which does not exist in this session); flagged
-here so it is not forgotten once §1 and §5 are done on the real host.
+rule itself — the gate still denies by default, but silence stops being invisible. **Known limitation, not a
+question**: the owner decided (PR #18 review comment, 20/10/2026 —
+[comment](https://github.com/renocz/agent-ops-guardrails/pull/18#issuecomment-6299989493)) that this stays a todo,
+deliberately **not implemented** until there is a real systemd timer to signal from — building it against a guess
+at that signal would be worse than not building it. Revisit once §1 and §5 are done on the real host and a real
+timer exists to compare against.
 
 ---
 
@@ -265,10 +287,9 @@ general:
   needs no change — but it is worth restating because a privileged LXC's root can, from the Proxmox host, be
   re-mounted or have its ownership altered from outside the container's own view of "root-owned"; that is explicitly
   **out of scope** (§6: a human with Proxmox host access is not the threat model here).
-- **The socket's group, `keeperclients`, must include the actual agent user(s) on this host**, which on LXC 100 is
-  not one user but potentially three identities if the owner chooses to separate the interactive assistant from the
-  cron jobs (§1/§3 recommend one shared non-root user instead, with standing plans and actor tags telling the three
-  apart — simpler, one group to manage, consistent with "one daemon per host").
+- **The socket's group, `keeperclients`, must include both agent users decided in §1**: the shared user (interactive
+  assistant + morning job) and the update timer's own separate user — `agent_uids` in the config already takes a
+  list, so this needs no code change, only adding both uids to the group and the config at install time.
 - **No `launchd` equivalent problem on Linux** — the systemd branch already exists and is exercised in CI
   (`--prefix` mode only; never `--apply` in CI, by design, since that needs root and real users). The one thing CI
   cannot exercise is `--apply` itself, which is why the staged rollout below matters.
@@ -363,15 +384,20 @@ this document's length):
 - Telegram with a real bot token and a real chat (as for the original keeper, every test here uses a fake local
   Telegram or no Telegram at all).
 
-## Open questions for the owner (see also the final report)
+## Owner decisions (resolved; were open questions in the first draft of this PR)
 
-1. §1: build the Docker-proxy kit as a new, generic repo component (next to `snapshot-gate/`, `oncall/`), in a
-   follow-up PR, or handle it outside this repo? And which host-level verbs does the sudoers allowlist actually need
-   to name?
-2. §3's degraded-mode reporting (a missed standing-plan run going noticed, not just silently fail-closed) needs a
-   signal from the real systemd timers this session does not have. Worth a follow-up once §1/§5 are done, or is
-   "check `/summary` manually some mornings" good enough?
-3. Is one shared non-root agent user for all three server agents (assistant, morning timer, update timer) — told
-   apart by `KEEPER_ACTOR`/standing plans rather than by separate Unix users — the right model, or does the owner
-   want the update timer (which needs to replace the Claude Code binary, arguably the most sensitive of the three)
-   kept on a different user entirely?
+Posted directly on the PR, verified via the GitHub API rather than relayed:
+[comment](https://github.com/renocz/agent-ops-guardrails/pull/18#issuecomment-6299989493) (`renocz`, OWNER,
+20/10/2026, "validated by the owner in chat on 20/10/2026 at 19:21 UTC").
+
+1. **The Docker-proxy kit from §1 goes into this repository, as a separate PR**, following the `snapshot-gate/`/
+   `oncall/` model — not handled outside the repo, not folded into this PR. Still genuinely open within that future
+   PR: the exact host-level verbs the sudoers allowlist should name, which is operational knowledge (container/LXC
+   ids) this design cannot supply.
+2. **§3's degraded-mode reporting stays a todo**, deliberately not implemented until a real systemd timer exists to
+   signal from — not reopened as a question each time this doc is revisited.
+3. **User topology: two non-root users, not one, not three** — the update timer separate (it replaces the binary
+   itself); the interactive assistant and the morning job share one user, distinguished by `KEEPER_ACTOR` (§1, §5).
+
+No open questions remain from this PR's first draft. Anything found once §1/§5 are actually carried out on the real
+host belongs in a follow-up, not a guess made here.
