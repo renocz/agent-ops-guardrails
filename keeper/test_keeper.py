@@ -110,6 +110,17 @@ class StateMachine(Base):
         self.assertIn("missing action 'git'", r2["reason"])
         self.assertIn("plan actions: deploy", r2["reason"])
 
+    def test_deny_reason_lists_why_each_active_plan_fails_to_cover(self):
+        # several active plans (PR #17): the refusal explains EVERY plan's gap, not only one of them
+        self.approve("id=pa ; targets=web ; actions=deploy ; ttl=30")
+        self.approve("id=pb ; targets=db ; actions=git ; ttl=30")
+        r = self.k.check("s1", *bash("docker compose -f /opt/stacks/cache/compose.yml restart"))
+        self.assertEqual(r["decision"], "deny")
+        self.assertIn("plan 'pa': targets not covered: /opt/stacks/cache/compose.yml", r["reason"])
+        self.assertIn("plan 'pb': missing action 'deploy'", r["reason"])
+        # one active plan that DOES cover the action is enough: no refusal at all
+        self.assertTrue(self.allowed(*bash("docker restart web")))
+
     def test_denial_context_is_surfaced_once_on_the_next_proposal_card(self):
         self.approve("id=p1 ; targets=web ; actions=deploy ; ttl=30")
         self.k.check("s1", *bash("docker compose -f /opt/stacks/db/compose.yml restart"))
