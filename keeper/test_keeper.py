@@ -903,6 +903,41 @@ class InstallerHookTimeout(unittest.TestCase):
         self.assertEqual((cfg["hook_timeout_sec"], cfg["wait_max_sec"]), (60, 50))
         self.assertLessEqual(cfg["wait_max_sec"] + keeperd.HOOK_TIMEOUT_MARGIN_SEC, hooks[0]["timeout"])
 
+    def test_hook_entry_blocks_when_it_times_out_or_fails(self):
+        # measured on Claude Code 2.1.302: without onFailure=block a timed-out PreToolUse hook lets the call run
+        prefix, r = self.install()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        hooks = self.keeper_hooks(self.managed(prefix))
+        self.assertEqual([h.get("onFailure") for h in hooks], ["block"])
+
+    def test_reinstall_adds_onfailure_to_an_old_entry_in_place(self):
+        prefix, _ = self.install()
+        path = os.path.join(prefix, self.MANAGED_REL)
+        doc = self.managed(prefix)
+        for h in self.keeper_hooks(doc):
+            h.pop("onFailure", None)                                 # what installs before this change wrote
+        with open(path, "w") as f:
+            json.dump(doc, f)
+        _, r = self.install(prefix)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        hooks = self.keeper_hooks(self.managed(prefix))
+        self.assertEqual([h.get("onFailure") for h in hooks], ["block"])   # updated in place, still ONE entry
+
+    def test_deny_rules_are_edit_only_and_old_write_duplicates_are_removed(self):
+        prefix, _ = self.install()
+        deny = self.managed(prefix)["permissions"]["deny"]
+        self.assertTrue(deny and all(x.startswith("Edit(") for x in deny), deny)
+        self.assertEqual(len(deny), 3)
+        path = os.path.join(prefix, self.MANAGED_REL)
+        doc = self.managed(prefix)
+        doc["permissions"]["deny"] += [x.replace("Edit(", "Write(", 1) for x in deny] + ["Write(/some/other/path/**)"]
+        with open(path, "w") as f:
+            json.dump(doc, f)
+        _, r = self.install(prefix)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        after = self.managed(prefix)["permissions"]["deny"]
+        self.assertEqual(sorted(after), sorted(deny) + ["Write(/some/other/path/**)"])   # ours removed, a foreign rule kept
+
     def test_the_shipped_defaults_are_consistent(self):
         self.assertLessEqual(keeperd.DEFAULTS["wait_max_sec"] + keeperd.HOOK_TIMEOUT_MARGIN_SEC,
                              keeperd.DEFAULTS["hook_timeout_sec"])
