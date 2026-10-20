@@ -475,9 +475,13 @@ class DirPrefixTarget(unittest.TestCase):
         sub = os.path.join(self.root, "news")
         os.makedirs(sub)
         file = os.path.join(sub, "docker-compose.yml")
-        self.assertTrue(g.covers(self._plan(sub), "Bash", {"command": f"restart {file}"}, "deploy", f"restart {file}"))
-        nested = os.path.join(sub, "sub", "x")
-        self.assertTrue(g.covers(self._plan(sub), "Bash", {"command": f"restart {nested}"}, "deploy", f"restart {nested}"))
+        old, g.CWD = g.CWD, sub                                         # a change must also run from inside the dir
+        try:
+            self.assertTrue(g.covers(self._plan(sub), "Bash", {"command": f"restart {file}"}, "deploy", f"restart {file}"))
+            nested = os.path.join(sub, "sub", "x")
+            self.assertTrue(g.covers(self._plan(sub), "Bash", {"command": f"restart {nested}"}, "deploy", f"restart {nested}"))
+        finally:
+            g.CWD = old
 
     def test_lookalike_sibling_is_not_covered(self):              # "news" must not cover "newsletter"
         sub = os.path.join(self.root, "news")
@@ -605,7 +609,11 @@ class DirAllPaths(DirTree):
         self.assertNotIn("/opt/stacks/news/x,", text)                      # the covered path is not blamed
         self.assertIn("every path", text)
         cmd2 = "cp /opt/stacks/news/x /opt/stacks/news/y"
-        self.assertIsNone(g.coverage_gap(plan, "Bash", {"command": cmd2}, "edit", cmd2))
+        old, g.CWD = g.CWD, "/opt/stacks/news"                              # the cwd rule: run from inside the dir
+        try:
+            self.assertIsNone(g.coverage_gap(plan, "Bash", {"command": cmd2}, "edit", cmd2))
+        finally:
+            g.CWD = old
 
     def test_cp_mv_ln_install_with_one_path_outside(self):
         n, o = self.news, self.other
@@ -803,6 +811,15 @@ class DirRuleMutation(unittest.TestCase):
                                  "        r = os.path.normpath(probe)\n    except (OSError, ValueError):\n        return 0"),
         "protected paths allowed": ("    if is_protected(r) or is_keeper_protected(r):\n        return 0\n    if any(r == b",
                                     "    if any(r == b"),
+        "cwd rule switched off": ("        if text is not None:\n            where = cwd_outside_dirs(",
+                                  "        if False:\n            where = cwd_outside_dirs("),
+        "unknown cwd allowed": ('    if cwd is None or cwd is _CWD_UNKNOWN or not os.path.isabs(str(cwd)):\n        return {"cwd": "unknown"',
+                                '    if False:\n        return {"cwd": "unknown"'),
+        "cwd symlink not followed": ("        r = os.path.realpath(str(cwd))", "        r = os.path.normpath(str(cwd))"),
+        "protected cwd allowed": ("    if is_protected(r) or is_keeper_protected(r) or not any(r == b or",
+                                  "    if not any(r == b or"),
+        "cwd prefix lookalike": ("not any(r == b or r.startswith(b + os.sep) for b in bases):\n        return {\"cwd\": \"outside\"",
+                                 "not any(r == b or r.startswith(b) for b in bases):\n        return {\"cwd\": \"outside\""),
         "remote stages judged locally": ("    if remote:\n        return [safe_words", "    if False:\n        return [safe_words"),
         "redirect targets ignored": ("    for m in REDIRECT.finditer(text):", "    for m in []:"),
         "file-command words ignored": ("            if base in FILE_CMDS:", "            if False:"),
@@ -811,7 +828,8 @@ class DirRuleMutation(unittest.TestCase):
 
     def run_suite(self, tmp):
         env = dict(os.environ, PYTHONDONTWRITEBYTECODE="1")
-        r = subprocess.run([sys.executable, "-m", "unittest", "test_go_gate.DirAllPaths", "test_go_gate.DirRelativePaths"],
+        r = subprocess.run([sys.executable, "-m", "unittest", "test_go_gate.DirAllPaths", "test_go_gate.DirRelativePaths",
+                            "test_go_gate.DirCwdRule"],
                            cwd=os.path.join(tmp, "go-gate"), capture_output=True, text=True, env=env)
         return r.returncode
 
@@ -865,7 +883,7 @@ class DirRelativePaths(DirTree):
         self.assertFalse(self.covered("touch x", cwd=self.root))
         os.chdir(self.other)                                  # and the other way round
         self.assertTrue(self.covered("touch x", cwd=self.news))
-        self.assertTrue(self.covered("touch news/x", cwd=self.root))
+        self.assertFalse(self.covered("touch news/x", cwd=self.root))      # in-dir path, but the cwd is outside it
 
     def test_relative_symlink_escape_is_not_covered(self):
         self.assertFalse(self.covered("touch link/x"))
@@ -879,7 +897,7 @@ class DirRelativePaths(DirTree):
             self.assertIsNotNone(gap)
         finally:
             g.CWD = old
-        self.assertTrue(self.covered(f"touch {self.news}/x", cwd="<unset>"))   # an absolute path needs no cwd
+        self.assertFalse(self.covered(f"touch {self.news}/x", cwd="<unset>"))  # nor does an absolute path pass without one
 
     def test_a_cd_in_the_same_command_moves_the_cwd(self):
         self.assertFalse(self.covered(f"cd {self.other} && touch x"))          # starts inside, `cd`s out
@@ -890,6 +908,113 @@ class DirRelativePaths(DirTree):
     def test_relative_dir_target_is_not_a_grant(self):
         plan = {"targets": ["dir:news"], "actions": ["edit"]}
         self.assertIsNotNone(decide(plan, f"touch {self.news}/x", self.root))
+
+
+class DirCwdRule(DirTree):
+    """K-dir, round 3 (20/10): a command that changes something and relies on a `dir:` grant must also run with its
+    effective working directory (the hook's, followed through the command's own cd/pushd/popd) inside the dir."""
+
+    def test_cwd_inside_outside_unknown(self):
+        cmd = f"touch {self.news}/x"                                   # every path inside: only the cwd differs
+        self.assertIsNone(decide(self.plan, cmd, self.news))
+        self.assertIsNone(decide(self.plan, cmd, os.path.join(self.news, "sub")))
+        self.assertIsNotNone(decide(self.plan, cmd, self.other))
+        self.assertIsNotNone(decide(self.plan, cmd, self.root))
+        self.assertIsNotNone(decide(self.plan, cmd, "/"))
+        self.assertIsNotNone(decide(self.plan, cmd, None))             # unknown: fail closed
+        self.assertIsNotNone(decide(self.plan, cmd, "relative/dir"))
+        self.assertIsNotNone(decide(self.plan, cmd, "<unset>"))
+
+    def test_cwd_equal_to_the_dir_and_lookalike_sibling(self):
+        self.assertIsNone(decide(self.plan, f"touch {self.news}/x", self.news))
+        look = self.news + "letter"
+        os.makedirs(look)
+        self.assertIsNotNone(decide(self.plan, f"touch {self.news}/x", look))
+
+    def test_cwd_symlink_pointing_out(self):
+        link = os.path.join(self.news, "link")                         # inside news textually, real dir is `other`
+        self.assertIsNotNone(decide(self.plan, f"touch {self.news}/x", link))
+
+    def test_cwd_under_a_protected_path(self):
+        gate = os.path.join(self.root, "gate")
+        os.makedirs(gate)
+        old = os.environ.get("GO_GATE_DIR")
+        os.environ["GO_GATE_DIR"] = gate
+        try:
+            plan = {"targets": [f"dir:{self.root}"], "actions": ["edit"]}
+            self.assertIsNone(decide(plan, f"touch {self.news}/x", self.news))
+            self.assertIsNotNone(decide(plan, f"touch {self.news}/x", gate))
+        finally:
+            if old is None:
+                os.environ.pop("GO_GATE_DIR")
+            else:
+                os.environ["GO_GATE_DIR"] = old
+
+    def test_cd_inside_the_command_moves_the_cwd(self):
+        n, o = self.news, self.other
+        self.assertIsNone(decide(self.plan, f"cd {n} && touch {n}/x", self.root))
+        self.assertIsNone(decide(self.plan, f"cd {n}; touch {n}/x", self.root))
+        self.assertIsNone(decide(self.plan, f"cd {n}\ntouch {n}/x", self.root))
+        self.assertIsNotNone(decide(self.plan, f"cd {o} && touch {n}/x", n))
+        self.assertIsNotNone(decide(self.plan, f"cd {o}; touch {n}/x", n))
+        self.assertIsNotNone(decide(self.plan, f"cd {o} && cd {n} && cd .. && touch {n}/x", n))
+        self.assertIsNone(decide(self.plan, f"cd {o} && cd {n} && touch {n}/x", self.root))
+        self.assertIsNotNone(decide(self.plan, f"cd {n} && cd .. && touch {n}/x", n))
+        self.assertIsNotNone(decide(self.plan, f"cd \"$X\" && touch {n}/x", n))     # unresolvable cd: unknown
+        self.assertIsNotNone(decide(self.plan, f"touch {n}/x && cd {o} && touch {n}/y", n))   # second one is outside
+        self.assertIsNotNone(decide(self.plan, f"cd {n}/link && touch {n}/x", n))     # cd through a symlink out
+
+    def test_subshell_and_chains(self):
+        n, o = self.news, self.other
+        self.assertIsNotNone(decide(self.plan, f"(cd {o} && touch {n}/x)", n))
+        self.assertIsNone(decide(self.plan, f"(cd {n} && touch {n}/x)", n))
+        self.assertIsNotNone(decide(self.plan, f"(cd {n} && touch {n}/x)", self.root))    # over-refusal: not followed
+        self.assertIsNotNone(decide(self.plan, f"(cd {n} && touch {n}/x); touch {n}/y", self.root))   # cd stays in ( )
+        self.assertIsNotNone(decide(self.plan, f"echo hi | (cd {o} && tee {n}/x)", n))
+        self.assertIsNotNone(decide(self.plan, f"true && cd {o} || touch {n}/x", n))
+
+    def test_plain_targets_and_plans_without_dir_are_unchanged(self):
+        n, o = self.news, self.other
+        plain = {"targets": [n], "actions": ["edit"]}
+        self.assertIsNone(decide(plain, f"touch {n}/x", o))                          # no dir: target, any cwd
+        self.assertIsNone(decide(plain, f"touch {n}/x", None))
+        named = {"targets": ["web"], "actions": ["deploy"]}
+        self.assertIsNone(decide(named, "docker restart web", o))
+        mixed = {"targets": [f"dir:{n}", "web"], "actions": ["edit", "deploy"]}
+        self.assertIsNone(decide(mixed, "docker restart web", o))                    # matched by the plain target
+        self.assertIsNotNone(decide(mixed, f"touch {n}/x", o))                       # relies on the dir: target
+        self.assertIsNone(decide(mixed, f"touch {n}/x", n))
+
+    def test_file_tools_have_no_cwd(self):
+        gap = g.coverage_gap(self.plan, "Write", {"file_path": f"{self.news}/x.txt"}, "edit")
+        self.assertIsNone(gap)                                                       # not a command: unchanged
+
+    def test_refusal_message(self):
+        plan = {"targets": ["dir:/opt/stacks/news"], "actions": ["edit"]}      # a short path: shown as written
+        gap = decide(plan, "touch /opt/stacks/news/x", "/srv")
+        text = g.describe_gap(gap, plan)
+        self.assertIn("also runs from inside the directory", text)
+        self.assertIn("working directory is outside every dir: target", text)
+        self.assertIn("run it from inside /opt/stacks/news", text)
+        self.assertIn("use `cd /opt/stacks/news && ...`", text)
+        self.assertNotIn("/srv", text)                                               # the cwd itself is not echoed
+        unknown = g.describe_gap(decide(plan, "touch /opt/stacks/news/x", None), plan)
+        self.assertIn("working directory is not known", unknown)
+        self.assertIn("run it from inside /opt/stacks/news", unknown)
+
+    def test_refusal_message_with_a_masked_long_path(self):
+        long = "/opt/stacks/news2026-archive-backup-01"                              # 20+ chars with a digit: masked
+        plan = {"targets": [f"dir:{long}"], "actions": ["edit"]}
+        text = g.describe_gap(decide(plan, f"touch {long}/x", "/srv"), plan)
+        self.assertIn("run it from inside a dir: target of the plan", text)
+        self.assertNotIn("<…>", text)
+
+    def test_docker_compose_from_elsewhere_is_refused(self):
+        plan = {"targets": [f"dir:{self.news}"], "actions": ["deploy"]}
+        cmd = f"docker compose -f {self.news}/docker-compose.yml up -d"
+        self.assertIsNotNone(decide(plan, cmd, self.other))
+        self.assertIsNone(decide(plan, cmd, self.news))
+        self.assertIsNone(decide(plan, f"cd {self.news} && {cmd}", self.other))
 
 
 class Hook(unittest.TestCase):

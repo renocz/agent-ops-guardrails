@@ -1365,10 +1365,10 @@ def describe_gap(gap, plan):
     have = ", ".join(plan.get("targets") or []) or "none"
     if "cwd" in gap:
         dirs = gap.get("dirs") or []
-        first = dirs[0] if dirs else "<dir>"
+        first = dirs[0] if dirs else "<the dir: target>"
         state = "is not known" if gap["cwd"] == "unknown" else "is outside every dir: target"
         return (f"a dir: target covers a command that changes something only when it also runs from inside the "
-                f"directory, and the working directory {state}; run it from inside {', '.join(dirs) or '<dir>'} "
+                f"directory, and the working directory {state}; run it from inside {', '.join(dirs) or 'a dir: target of the plan'} "
                 f"(use `cd {first} && ...`); plan targets: {have}")
     missing = ", ".join(gap.get("targets") or []) or "no path, filename or host recognised in the command"
     note = f" ({gap['why']})" if gap.get("why") else ""
@@ -1590,7 +1590,7 @@ def cwd_outside_dirs(dir_targets, cwd):
     closed: an unknown, relative or unresolvable cwd, one that resolves (symlinks followed) outside every dir: target,
     or one under a protected path, is a gap."""
     bases = [b for b in (_dir_base(t.strip("'\"")[4:]) for t in dir_targets) if b]
-    dirs = [safe_words(b, 80) for b in bases][:8]
+    dirs = [w for w in (safe_words(b, 80) for b in bases) if w and w != "<…>" and "<…>" not in w][:8]
     if cwd is None or cwd is _CWD_UNKNOWN or not os.path.isabs(str(cwd)):
         return {"cwd": "unknown", "dirs": dirs}
     try:
