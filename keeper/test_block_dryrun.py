@@ -579,5 +579,73 @@ class LongPollHygiene(DryRunBase):
         self.assertTrue(self.wait_for(lambda: self.fake.state.sent, timeout=5.0))
 
 
+class WaitForApproval(DryRunBase):
+    """keeper-propose --wait SECONDS, end to end: the real hook subprocess (keeper_client.py's hook(), not just
+    wait_for_decision() in isolation) blocks on the SAME socket it already used for "check", polling the new
+    "status" op, and the SINGLE Bash tool call it answers tells the agent what happened -- approved, rejected,
+    expired, or the wait itself running out -- instead of the agent having to re-run keeper-status itself."""
+
+    def hook_async(self, tool, ti):
+        """self.hook() blocks for the whole wait: run it on a thread so the test can click/advance the clock
+        while it is still waiting, then join it for the result."""
+        result = {}
+        def run():
+            result["decision"], result["reason"] = self.hook(tool, ti)
+        th = threading.Thread(target=run)
+        th.start()
+        return th, result
+
+    def test_approved_while_the_hook_is_still_waiting(self):
+        cmd = self.propose_cmd("id=p1 ; targets=web ; actions=deploy ; ttl=20") + " --wait 15"
+        th, result = self.hook_async(*bash(cmd))
+        self.assertTrue(self.wait_for(lambda: self.fake.state.sent))        # the card reached Telegram
+        ok, _no = self.pending_card_data()
+        self.deliver_click(ok)
+        th.join(20)
+        self.assertFalse(th.is_alive())
+        self.assertEqual(result["decision"], "deny")                        # the propose Bash call still never ran
+        self.assertIn("was approved", result["reason"])
+        self.assertEqual(self.hook(*bash("docker restart web"))[0], "allow")  # the actual approval is in effect
+
+    def test_rejected_while_the_hook_is_still_waiting(self):
+        cmd = self.propose_cmd("id=p1 ; targets=web ; actions=deploy") + " --wait 15"
+        th, result = self.hook_async(*bash(cmd))
+        self.assertTrue(self.wait_for(lambda: self.fake.state.sent))
+        _ok, no = self.pending_card_data()
+        self.deliver_click(no)
+        th.join(20)
+        self.assertEqual(result["decision"], "deny")
+        self.assertIn("was rejected", result["reason"])
+
+    def test_expired_is_noticed_within_one_poll_not_the_full_budget(self):
+        """The pending proposal's own age limit passes while the hook is waiting -- plan_status() finds that
+        itself, without anyone clicking anything, so the hook returns in roughly one poll interval, not the full
+        15s --wait budget."""
+        cmd = self.propose_cmd("id=p1 ; actions=edit") + " --wait 15"
+        th, result = self.hook_async(*bash(cmd))
+        self.assertTrue(self.wait_for(lambda: self.fake.state.sent))
+        self.clock_t[0] += (self.cfg["pending_max_age_min"] + 1) * 60
+        t0 = time.time()
+        th.join(20)
+        self.assertFalse(th.is_alive())
+        self.assertLess(time.time() - t0, 10)                               # well under the 15s budget
+        self.assertEqual(result["decision"], "deny")
+        self.assertIn("expired before a decision", result["reason"])
+
+    def test_wait_runs_out_while_still_pending(self):
+        cmd = self.propose_cmd("id=p1 ; actions=edit") + " --wait 2"
+        decision, reason = self.hook(*bash(cmd))                            # nobody ever decides: just let it run out
+        self.assertEqual(decision, "deny")
+        self.assertIn("still waiting", reason)
+        self.assertIn("after 2s", reason)
+
+    def test_default_behaviour_is_unchanged_without_wait(self):
+        """No --wait: the hook must return immediately, exactly as before this feature existed."""
+        t0 = time.time()
+        reason = self.propose("id=p1 ; actions=edit")
+        self.assertLess(time.time() - t0, 5)
+        self.assertIn("sent to the human", reason)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -10,7 +10,7 @@ this file), changes are refused.
 The agent proposes a plan with `keeper-propose --scope "id=… ; targets=… ; actions=… ; ttl=…" --text "why"`: keeperd
 answers that command in the check itself (with the session id Claude Code gave this hook), so it never runs.
 """
-import importlib.util, json, os, socket, sys
+import importlib.util, json, os, socket, sys, time
 
 SOCKETS = ("/opt/agent-guardrails/run/keeper.sock", "/run/keeper/keeper.sock")       # macOS, Linux (install-keeper.sh)
 # Safe only because install-keeper.sh runs this file (and the keeper-propose/keeper-status wrappers) with
@@ -36,6 +36,35 @@ def ask(req, timeout=10):
         return json.loads(buf)
     finally:
         s.close()
+
+
+STATUS_POLL_INTERVAL = 2       # how often "status" is re-asked while waiting
+STATUS_ASK_TIMEOUT = 5         # per-poll socket timeout; independent of the total wait budget
+
+# keeper-propose --wait exit codes (used by wait_for_decision's return value; see hook()'s deny() reasons for what
+# the agent reads). 1 and 2 are left alone: hook() already uses 2 for "unreadable hook input".
+WAIT_APPROVED, WAIT_REJECTED, WAIT_EXPIRED, WAIT_STILL_PENDING = 0, 3, 4, 5
+
+
+def wait_for_decision(hash12, wait_seconds):
+    """Poll keeperd's "status" op (same socket, by fingerprint only) until the plan `hash12` is decided or
+    `wait_seconds` elapses. Never approves or rejects anything itself -- it only reads what decide() already
+    decided on the daemon side, the same way a human re-running keeper-status would have. Raises (OSError,
+    ValueError) exactly like ask() if keeperd becomes unreachable mid-wait; the caller handles that the same way
+    it already handles a daemon that was down from the start."""
+    deadline = time.monotonic() + max(0, wait_seconds)
+    while True:
+        resp = ask({"op": "status", "hash": hash12}, timeout=STATUS_ASK_TIMEOUT)
+        if "state" not in resp:                                 # e.g. {"error": "bad hash"}: never guess a state
+            raise ValueError(resp.get("error") or "status: no state in the daemon's reply")
+        state = resp["state"]
+        if state != "pending":
+            return {"approved": WAIT_APPROVED, "rejected": WAIT_REJECTED,
+                     "expired": WAIT_EXPIRED}.get(state, WAIT_EXPIRED), state
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return WAIT_STILL_PENDING, "pending"
+        time.sleep(min(STATUS_POLL_INTERVAL, remaining))
 
 
 def local_kind(tool, tool_input, cwd=None):
@@ -92,6 +121,21 @@ def hook():
              "Tell the user; reads still work.")
     if out.get("decision") == "allow":
         sys.exit(0)
+    wait_s, h = out.get("wait"), out.get("hash")
+    if wait_s and h:
+        try:
+            code, state = wait_for_decision(h, wait_s)
+        except (OSError, ValueError) as e:
+            deny(f"keeper: plan sent to the human for approval (fingerprint {h}), but the keeper daemon became "
+                 f"unreachable while waiting ({type(e).__name__}). Nothing was run; check again once it answers.")
+        reason = {
+            WAIT_APPROVED: f"keeper: plan {h} was approved. Nothing was run; retry the actions now.",
+            WAIT_REJECTED: f"keeper: plan {h} was rejected. Nothing was run.",
+            WAIT_EXPIRED: f"keeper: plan {h} expired before a decision was made. Nothing was run; propose again.",
+            WAIT_STILL_PENDING: (f"keeper: still waiting for a decision on plan {h} after {wait_s}s. Nothing was "
+                                  "run; check again or propose again with a longer --wait."),
+        }[code]
+        deny(reason)
     deny(out.get("reason") or "keeper: refused")
 
 

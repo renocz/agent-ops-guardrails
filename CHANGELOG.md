@@ -6,6 +6,40 @@ One version scheme: **a repository tag per release**. Components have no version
 
 Next: finish the block-mode trial (started 12/10/2026, after the end-to-end dry run of refusal, approval, expiry, replay and a Telegram outage) -- a few days of varied real work, no deadlock, an acceptable number of cards -- then v1.0.
 
+- **keeper: the hook entry gets an explicit `timeout`, and `--wait` is kept under it (independent review of PR #16,
+  19/10).** `--wait` keeps the PreToolUse hook process blocked, but the installer registered the hook with no
+  `timeout`, and `wait_max_sec` defaulted to 1800 s. Per the Claude Code hooks documentation, command hooks default to
+  600 s and a PreToolUse hook that times out does NOT block the tool call: the call continues through the normal
+  permission flow. A wait longer than the timeout would therefore have ended in a fail-open outcome instead of a deny.
+  `install-keeper.sh` now writes `"timeout": 60` into the hook entry (`--hook-timeout N`), a reinstall updates an
+  existing keeper entry in place (an old one without timeout is upgraded, never duplicated), and `wait_max_sec` drops
+  to 50 s (`--wait-max N`, config key `wait_max_sec`). Rule, documented in `keeper/README.md` and the design: hook
+  timeout >= `wait_max_sec` + 10 s. The installer refuses a combination that breaks it (nothing is written) and
+  keeperd, which reads the new config key `hook_timeout_sec`, clamps every `--wait` to `hook_timeout_sec - 10` and
+  warns at start-up if the configured `wait_max_sec` does not fit. An operator who wants a longer wait raises both
+  numbers. Tested: valid JSON with the timeout, idempotent reinstall, upgrade of an old entry, refusal and boundary,
+  the clamp; mutation-checked on the clamp, the installer's refusal and the in-place upgrade. Not verified: what Claude
+  Code does in a real session when a hook exceeds its timeout (documented, not observed).
+- **keeper: `keeper-propose --wait SECONDS`, so the agent's session learns a plan was decided without re-running
+  its own command (owner decision, 19/10).** Until now, the only way to find out a plan had been approved was
+  for the agent to run `keeper-status` again and read its own reply. `--wait` (default: no wait, exactly the prior
+  behaviour) makes the SAME Bash tool call that proposed the plan stay blocked -- on the same Unix socket, no new
+  channel -- until a human decides or `wait_max_sec` (50s by default, see the next entry) passes, then returns one of four outcomes
+  in its (still denied; nothing ever runs) reason: approved, rejected, expired before a decision, or the wait
+  itself running out while still pending. Nothing about what counts as approved changes: `decide()` is untouched,
+  and the new, read-only `status` socket op it feeds only ever reports what `decide()` already wrote, by the
+  plan's fingerprint, never its text or scope, through the same peer-uid gate as every other op. Its own
+  vocabulary is deliberately closed to four words (pending/approved/rejected/expired) -- a fingerprint keeperd
+  never saw answers "expired" too, so there is no fifth, distinguishable "unknown" a socket client could use to
+  probe for live fingerprints. The wait polls rather than holds keeperd's lock, so a session waiting on its own
+  proposal cannot block a button press, another session's check, or `/stop`. `keeper-propose`'s hourly limit,
+  hash, nonce and replay protection are all unchanged; `--wait` is parsed and clamped on the hook side only, and
+  never enters the plan's fingerprint. Tested (`test_keeper.py`, `test_block_dryrun.py`): approved, rejected,
+  expired (both a late click and the daemon noticing on its own, with nobody clicking anything), the wait running
+  out while still pending, two simultaneous plans tracked independently, an unknown plan, a daemon that is down
+  from the start or stops answering mid-wait, and that the default (no `--wait`) behaves exactly as before.
+  Mutation-checked: the approve-branch ledger write disabled, and the `status` op's peer-uid check reordered past
+  it, each in a scratch copy -- the relevant test fails both times.
 - **README, CHANGELOG and the IT-leaders pages: made the status lines true again (owner review of PR #13, 17/10).**
   The README and this changelog's intro still said the keeper "runs in observe mode" with block mode as "the next
   step" -- stale since 12/10, when block mode started after its end-to-end dry run. Both now say the real state:
