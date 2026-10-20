@@ -6,6 +6,27 @@ One version scheme: **a repository tag per release**. Components have no version
 
 Next: finish the block-mode trial (started 12/10/2026, after the end-to-end dry run of refusal, approval, expiry, replay and a Telegram outage) -- a few days of varied real work, no deadlock, an acceptable number of cards -- then v1.0.
 
+- **keeper: standing plans, for an agent nobody is watching (design: `docs/design-keeper-server.md`, written
+  first, before any code here -- the keeper's own precondition, "the agent must not be root," is false on the
+  server, where three agents run as root and two of them act with no human reading a Telegram card at the time).**
+  A standing plan is an exact, literal allowlist of commands (`standing_plans` in `/etc/keeper/config.json`),
+  never created or widened through the socket or Telegram -- there is no code path from agent input to it at all,
+  only a root edit to the config file followed by a restart. A call is covered only if it is character-for-
+  character equal to one of the listed commands (no prefix, no pattern, no category/targets abstraction like an
+  ordinary plan); `expires_at` is mandatory and clamped to at most 45 days from now regardless of what the config
+  says. A match skips the classifier entirely (logged as `standing-used`), is listed on both `keeper-status` and
+  `/status`, and `/stop <id>` disables one at once, persisted. A new, optional `actor` field on the socket's
+  `check` op -- set only by a root-owned hook command line (a distinct `--settings` profile per systemd unit),
+  never by the agent's own session -- lets a proposal from a configured `unattended_actors` tag stay recorded
+  (still visible in `/plans`/`/summary`) without ever pushing a Telegram card, and skips `--wait` (nobody is there
+  to decide). Any other actor, or none, behaves exactly as before. 13 new tests in `test_keeper.py` plus 4
+  end-to-end ones in `test_block_dryrun.py` (the real `keeper_client.py` subprocess, over the real socket,
+  carrying `KEEPER_ACTOR`); mutation-checked (same method as PR #14/#15 -- a manual revert in a throwaway copy,
+  run against the real test file): the exact-match guard widened to a substring check, a crafted payload trying to
+  smuggle its own `standing_plans`/`actor` into `Keeper.standing`, and the per-entry `try/except` in
+  `load_standing()` removed. Existing suites unmodified and green. Not run from this session: `install-keeper.sh
+  --apply` on a real LXC, and a real `claude -p` headless run against a real `--settings` profile -- see the
+  design doc's NOT TESTED list.
 - **keeper: the hook entry gets an explicit `timeout`, and `--wait` is kept under it (independent review of PR #16,
   19/10).** `--wait` keeps the PreToolUse hook process blocked, but the installer registered the hook with no
   `timeout`, and `wait_max_sec` defaulted to 1800 s. Per the Claude Code hooks documentation, command hooks default to
