@@ -4,6 +4,17 @@ One version scheme: **a repository tag per release**. Components have no version
 
 ## Unreleased (towards v1.0)
 
+- **keeper installer: the hook entry gets `"onFailure": "block"`, and the useless `Write(...)` deny rules go (20/10).**
+  The owner ran a real test on Claude Code 2.1.302 (a hook that sleeps 90 s with `"timeout": 60`): without `onFailure` the
+  command ran after about 67 s, i.e. a timed-out PreToolUse hook is fail-open in practice, not only in the documentation;
+  with `"onFailure": "block"` the command was blocked (71 s); a fast hook ran in 9 s. `install-keeper.sh` now writes
+  `"onFailure": "block"` next to the explicit `timeout` (a reinstall updates an existing keeper entry in place, never a
+  second one), so a hook that fails or times out denies instead of opening the door. The same run showed that Claude Code
+  ignores `Write(path)` deny rules (it prints a warning at every start; only `Edit(path)` rules match and they cover every
+  file-editing tool): the installer now writes the three `Edit(...)` rules only and removes the keeper's own old
+  `Write(...)` duplicates, leaving foreign rules alone. Tests: default entry, in-place upgrade of an old entry, edit-only
+  deny rules with legacy cleanup and a kept foreign rule; mutation-checked (each of four mutants makes them fail).
+
 Next: finish the block-mode trial (started 12/10/2026, after the end-to-end dry run of refusal, approval, expiry, replay and a Telegram outage) -- a few days of varied real work, no deadlock, an acceptable number of cards -- then v1.0.
 
 - **go-gate: a `dir:` grant also requires the working directory to be inside it (owner decision, 20/10).** A command

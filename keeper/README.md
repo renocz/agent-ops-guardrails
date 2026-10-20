@@ -159,6 +159,14 @@ never be allowed to reach it.
 - To allow a longer wait, raise both: `install-keeper.sh ... --hook-timeout 1810 --wait-max 1800`. If you edit the
   keeper's config by hand instead, the hook entry in the managed settings must carry the same value as its
   `timeout`: keeperd cannot read the managed settings, so it trusts its own config.
+- **Measured, not just documented (Claude Code 2.1.302, 20/10/2026).** A test hook that sleeps 90 s with `"timeout": 60`
+  let the command run after about 67 s; the same hook with `"onFailure": "block"` blocked it (71 s); a fast hook ran in 9 s.
+  So the installer now also writes `"onFailure": "block"` into the keeper hook entry (a reinstall adds it in place), which
+  makes ANY hook failure or timeout a deny instead of an open door. It needs a Claude Code version that knows the field
+  (2.1.295 or later according to its release notes); on an older version, upgrade Claude Code before relying on this.
+- The managed-settings deny rules are `Edit(path)` only: Claude Code matches file-editing tools through `Edit` rules,
+  and a `Write(path)` rule matches nothing (it only prints a warning at every start). Earlier installs wrote both; a
+  reinstall removes the useless `Write(...)` duplicates of the keeper's own three paths and leaves any other rule alone.
 - Without `--wait`, the hook answers in milliseconds and none of this applies.
 
 ## Language

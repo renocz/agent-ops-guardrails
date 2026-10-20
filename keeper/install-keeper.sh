@@ -9,6 +9,7 @@
 # Options: --chat-id N (default: the owner id); --observe (log only, do not block); --lang en|fr (language of what the
 # human reads on Telegram, default en; what the agent reads stays English); --safe-git-repo DIR (repeatable: a repo
 # where a git read verb is trusted; without any, every git read needs a plan — see K6 in docs/design-keeper.md).
+# The hook entry also gets "onFailure": "block" (measured 20/10/2026: without it a timed-out PreToolUse hook lets the call run).
 # --hook-timeout N (default 60) is the "timeout" written into the hook entry; --wait-max N (default 50) caps
 # keeper-propose --wait. Rule: hook timeout >= wait-max + 10 (a hook killed by its timeout does NOT block the call).
 # The keeper bot's token is never passed on the command line: with --apply, the script asks for it on the terminal
@@ -260,14 +261,23 @@ cmd, base, existing, hook_timeout = sys.argv[1:]
 cur = {}
 if os.path.exists(existing):
     cur = json.load(open(existing))          # unreadable JSON: stop here, the install fails before writing
-deny = [f"{t}({p})" for t in ("Edit", "Write") for p in (base + "/**", "/etc/keeper/**", "/var/lib/keeper/**")]
+paths = (base + "/**", "/etc/keeper/**", "/var/lib/keeper/**")
+# Measured on Claude Code 2.1.302 (20/10/2026): only Edit(path) deny rules match (they cover every file-editing tool);
+# a Write(path) rule matches nothing and Claude Code prints a warning at every start. Earlier installs wrote both.
+deny = [f"Edit({p})" for p in paths]
+legacy = [f"Write({p})" for p in paths]
 pre = cur.setdefault("hooks", {}).setdefault("PreToolUse", [])
 mine = [h for e in pre for h in e.get("hooks", []) if h.get("command") == cmd]
+# Measured on Claude Code 2.1.302 (20/10/2026): a PreToolUse hook that exceeds its "timeout" does NOT block the tool call
+# (the command ran after ~67 s); with "onFailure": "block" it is blocked. So the keeper hook always carries both.
 for h in mine:
     h["timeout"] = int(hook_timeout)           # a reinstall upgrades an old entry that had none (never a duplicate)
+    h["onFailure"] = "block"
 if not mine:
-    pre.insert(0, {"matcher": "*", "hooks": [{"type": "command", "command": cmd, "timeout": int(hook_timeout)}]})
+    pre.insert(0, {"matcher": "*", "hooks": [{"type": "command", "command": cmd, "timeout": int(hook_timeout),
+                                               "onFailure": "block"}]})
 d = cur.setdefault("permissions", {}).setdefault("deny", [])
+d[:] = [x for x in d if x not in legacy]       # drop the useless Write(...) duplicates an earlier install wrote
 d += [x for x in deny if x not in d]
 print(json.dumps(cur, indent=1))
 PYEOF

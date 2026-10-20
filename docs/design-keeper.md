@@ -77,8 +77,10 @@ change or forge that approval**, even if it tries. Output filtering (secret-guar
    `timeout` (60 s) in the hook entry; `wait_max_sec` defaults to 50 s; the rule is `hook_timeout_sec >= wait_max_sec
    + 10` (one in-flight 5 s status poll, the 2 s poll interval, start-up); the installer refuses a combination that
    breaks it and keeperd clamps every `--wait` to `hook_timeout_sec - 10`. A longer wait is an operator choice that
-   needs both numbers raised together. What the harness really does when a hook is killed mid-sleep is documented but
-   has not been observed on a real session (see PR #16 for the test to run).
+   needs both numbers raised together. Observed on a real session (Claude Code 2.1.302, 20/10/2026, test hook sleeping
+   90 s with `timeout` 60): without `onFailure` the tool call RAN after about 67 s (fail-open, as documented); with
+   `"onFailure": "block"` it was blocked (71 s); a fast hook ran in 9 s. The installer therefore writes
+   `"onFailure": "block"` too, so any hook failure or timeout is a deny, whatever the wait settings.
 5. The socket is owned by `_keeper`, group `keeperclients` (the agent's user), mode 660;
    keeperd reads the peer's uid (`getpeereid`) and only answers the configured agent user.
 6. Revocation: the **Stop** button on any approval message ends every active plan, in every session, at once. It does not stop a process already started; that is stated in the message. `/stop <id>` (12/10's text commands) ends only the one plan.
