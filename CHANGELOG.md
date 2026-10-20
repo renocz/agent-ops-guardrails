@@ -6,6 +6,14 @@ One version scheme: **a repository tag per release**. Components have no version
 
 Next: finish the block-mode trial (started 12/10/2026, after the end-to-end dry run of refusal, approval, expiry, replay and a Telegram outage) -- a few days of varied real work, no deadlock, an acceptable number of cards -- then v1.0.
 
+- **go-gate: a `dir:` grant also requires the working directory to be inside it (owner decision, 20/10).** A command
+  that changes something and is covered through a `dir:` target must also run with its effective working directory
+  (`go_gate.CWD`, followed through the command's own `cd`/`pushd`/`popd` per stage, symlinks followed) inside one of the
+  plan's `dir:` targets and not under a protected path; an unknown or unresolvable cwd is refused. Plans without `dir:`
+  targets, plain-target matches (also in a mixed plan) and file tools are unchanged. Over-refusal is accepted (for
+  example `docker compose -f <abs path>` started from another directory); the refusal says to run it from inside the
+  directory or use `cd <dir> && ...`. Tests: cwd inside, outside, unknown, equal to the dir, symlink, protected,
+  `cd` and subshell chains, the message; five new mutants of the mutation check.
 - **go-gate: a `dir:` target now covers an action only when *every* path in it is inside (independent review of PR
   #15, 19/10).** The first version of `dir:` matched like any target: one word of the action under the directory was
   enough, so with `targets=dir:/opt/stacks/news` the action `cp /opt/stacks/news/x /etc/cron.d/y` was covered although

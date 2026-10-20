@@ -39,7 +39,10 @@ state, replay a GO or remove the hook. The keeper moves the approval out of the 
   paths resolved against the agent's own cwd. `cp /opt/stacks/news/x /etc/cron.d/y` is refused under
   `dir:/opt/stacks/news`. A path that cannot be judged (a variable, a remote `host:path`) is not covered, and a
   command that runs elsewhere (`ssh`, `pct`, `docker exec`) is never covered by a `dir:` target. Plain targets are
-  unchanged (any one matching word covers). Details in go-gate's README.
+  unchanged (any one matching word covers). A `dir:` grant also requires the working directory to be inside it: a
+  command that changes something must run with its effective cwd (followed through its own `cd`) inside one of the
+  plan's `dir:` targets, or it is refused with "run it from inside <dir>" / "use `cd <dir> && ...`". Details in
+  go-gate's README.
 - The "Requested after a refusal" line on a card is shown only if the refusal was less than 10 minutes before the
   proposal; an older one is dropped, so an unrelated card never carries it.
 - An approval is a button press, received by keeperd from Telegram. It is checked against the owner id and the chat,
@@ -192,7 +195,8 @@ cover:
   one after that, and not at all when the refusal is more than 10 minutes old;
 - `dir:<path>` targets: every path of the action must be inside (one inside plus one outside is refused: `cp`, `tee`,
   redirections, `--target-directory`, `ssh`/`bash -c` nesting, symlinks pointing out, relative paths against the
-  agent's cwd), with a mutation check of that rule; a valid prefix covers its subtree, a look-alike sibling and a
+  agent's cwd), a command that changes something must also run from inside a `dir:` target (inside, outside, unknown,
+  `cd` in the command, symlink, protected), with a mutation check of that rule; a valid prefix covers its subtree, a look-alike sibling and a
   `..`/symlink escape do not, and
   neither does `/`, the home directory, go-gate's own protected paths, or the keeper's own (`/etc/keeper`,
   `/opt/agent-guardrails`), even through a broader `dir:` that would otherwise reach them.

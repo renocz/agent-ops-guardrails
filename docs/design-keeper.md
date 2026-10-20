@@ -154,6 +154,14 @@ Still open, and stated so a reader does not over-trust the gate:
   for each stage), not the daemon's, which is unrelated to where the agent runs. Limits that remain: the judgement is
   on the text of the command (a program that computes a path at run time is a `script`, covered by the `script`
   rules, not by this one), and words that merely look like paths (`s/a/b/`, `application/json`) are over-refused.
+  **The working directory must also be inside the grant (20/10).** A command that changes something and is covered
+  through a `dir:` target must also run with its effective working directory (the same `go_gate.CWD` followed per stage
+  through `cd`/`pushd`/`popd`, `STAGE_CWD`) inside one of the plan's `dir:` targets, symlinks followed, and not under a
+  protected path. An unknown or unresolvable cwd fails closed. The rule applies only when the match relies on a `dir:`
+  target: a plan without `dir:` targets, and a match through a plain target of a mixed plan, keep their behaviour.
+  File tools (no command text) are unchanged. The accepted cost is over-refusal, such as `docker compose -f <abs path>`
+  started from another directory or a `cd` inside a subshell (not followed); the refusal tells the agent to run it from
+  inside the directory or to use `cd <dir> && ...`.
 - **A refusal's note expires (round 2).** The "requested after a refusal" line kept on the session was shown on the next
   proposal's card however much later and however unrelated; it now carries a timestamp and is dropped after 10 minutes.
 - **TOCTOU on files.** `python3 script.py` is judged on the file keeperd reads; the file can change before it runs.
