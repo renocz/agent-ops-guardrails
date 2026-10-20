@@ -6,6 +6,32 @@ One version scheme: **a repository tag per release**. Components have no version
 
 Next: finish the block-mode trial (started 12/10/2026, after the end-to-end dry run of refusal, approval, expiry, replay and a Telegram outage) -- a few days of varied real work, no deadlock, an acceptable number of cards -- then v1.0.
 
+- **go-gate: a `dir:` target now covers an action only when *every* path in it is inside (independent review of PR
+  #15, 19/10).** The first version of `dir:` matched like any target: one word of the action under the directory was
+  enough, so with `targets=dir:/opt/stacks/news` the action `cp /opt/stacks/news/x /etc/cron.d/y` was covered although
+  it writes outside it. `coverage_gap()` now collects every path the action names -- path-like words, the value of
+  `--opt=PATH` / `-CPATH`, redirection targets (`>`, `>>`, `2>`, `&>`), and the file arguments of file-writing commands
+  (`cp`, `mv`, `tee`, `rm`, `install`, `tar`, `dd of=` ...), also inside a quoted `bash -c` or `ssh` command -- and
+  requires each to resolve (symlinks and `..` followed) inside one of the plan's `dir:` targets or to match another
+  target of the plan, with none protected (`is_protected()` / `is_keeper_protected()`). It fails closed on what it
+  cannot judge (variables, command substitutions, escapes, a wildcard before the last component, remote `host:path`),
+  and never covers a stage that runs elsewhere (`ssh`, `scp`, `pct`, `docker exec/run`, `kubectl`): remote work needs
+  plain targets. **Plain, non-`dir:` targets behave exactly as before** (any one matching word covers), including in a
+  plan that mixes both kinds. A relative `dir:` target is no longer a grant. The refusal names the offending paths and,
+  for a `dir:` plan, says that every path must be inside.
+- **go-gate: relative paths are resolved against the agent's cwd for `dir:` matching.** `real()` resolved a relative
+  word against the daemon's own cwd, unrelated to where the agent runs. They now use `go_gate.CWD` (the hook input's
+  cwd), followed through the command's own `cd`/`pushd`/`popd` per stage (`STAGE_CWD`); with no cwd, or one that cannot
+  be resolved statically, a relative path cannot be judged and is not covered.
+- **keeper: the "requested after a refusal" note expires after 10 minutes.** It was stored on the session and shown on
+  the next proposal's card, once, however unrelated and however much later. It is now timestamped and dropped when
+  older than 10 minutes (state written without a timestamp is dropped too).
+- **Tests.** `DirAllPaths` (cp/mv/ln/install, `tee`, every redirection form, `--target-directory`/`-t`/`-C`/`of=`,
+  `ssh`/`pct`/`docker exec`/`bash -c` nesting, symlinks pointing out, `..` inside a path, go-gate and keeper protected
+  paths, unjudgeable paths, wildcards, a mixed command with one path in and one out, file tools judged on their file,
+  plain targets unchanged), `DirRelativePaths` (including a relative `..` escape and a daemon cwd that differs from the
+  agent's), 3 keeper tests for the expiry, and `DirRuleMutation`: it breaks 8 parts of the rule one at a time in a copy
+  of `go_gate.py` and requires the `dir:` tests to fail on each (and to pass on an unmodified copy).
 - **go-gate + keeper: the refusal says what a plan does not cover, instead of just that it does not (19/10).** A
   dozen cards in one real day traced back to the same cause: a plan covered the intent, but a temp filename, a
   quoted path, or an action word (`pull`, `rm`, `git commit`) was not cited word-for-word, and the old reason

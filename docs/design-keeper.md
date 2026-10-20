@@ -136,8 +136,26 @@ Still open, and stated so a reader does not over-trust the gate:
   directory, pointing outside it, changes what the grant reaches from that point on — the same TOCTOU class already
   open for every path check in go-gate (see below), not a new one; planting that symlink is itself a write that
   needed its own approval first, same reasoning as the safe-git-repo symlink limit above. `dir:` adds no new
-  classifier logic and no new way to reach `script`/`delete` coverage: it only widens how a target string can match,
-  nothing else in `covers()`/`coverage_gap()` changes for it.
+  classifier logic and no new way to reach `script`/`delete` coverage.
+
+  **Every path, not any one (round 2, 19/10).** The first version matched like a plain target: one word of the action
+  under the directory was enough, so `cp <inside> /etc/cron.d/y` was covered by `dir:<inside's parent>` while writing
+  outside it. A plain target keeps that any-one-word rule (it is a name the human recognises in the action, and
+  changing it would bring back the "dozen cards a day" problem); a `dir:` target is a statement about where the action
+  may act, so it now has to hold for all of it. `coverage_gap()` collects every path the action names (path-like
+  words; `--opt=PATH`, `-CPATH`; redirection targets; every file argument of a file-writing command, bare names
+  included because they land in the cwd; quotes only separate words, so a path inside `ssh host "cp a b"` or
+  `bash -c '...'` is seen) and requires each to resolve inside a `dir:` target of the plan, or to match another target
+  of the plan, with none protected. It fails closed where a path cannot be judged: variables, substitutions, escapes,
+  a wildcard before the last component, a remote `host:path`, a relative path with no known cwd. A stage that runs
+  elsewhere (`ssh`, `scp`, `pct`, `docker exec/run`, `kubectl`) is not covered at all: the local filesystem cannot
+  vouch for another machine's symlinks, so remote work is planned with plain targets. Relative paths are resolved
+  against the agent's cwd (`go_gate.CWD`, from the hook input, followed through the command's own `cd`/`pushd`/`popd`
+  for each stage), not the daemon's, which is unrelated to where the agent runs. Limits that remain: the judgement is
+  on the text of the command (a program that computes a path at run time is a `script`, covered by the `script`
+  rules, not by this one), and words that merely look like paths (`s/a/b/`, `application/json`) are over-refused.
+- **A refusal's note expires (round 2).** The "requested after a refusal" line kept on the session was shown on the next
+  proposal's card however much later and however unrelated; it now carries a timestamp and is dropped after 10 minutes.
 - **TOCTOU on files.** `python3 script.py` is judged on the file keeperd reads; the file can change before it runs.
 - **A process started under an approved plan keeps running after the plan ends.** The keeper gates tool calls, not
   the processes they spawn.

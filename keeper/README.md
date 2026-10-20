@@ -33,6 +33,15 @@ state, replay a GO or remove the hook. The keeper moves the approval out of the 
   missing) for `/`, your home directory, go-gate's own state/hooks/settings, and the keeper's own paths
   (`/etc/keeper`, `/opt/agent-guardrails`, its managed-settings file) — even if you declare it, even if a token the
   agent writes resolves inside one of those through a broader `dir:` (say `dir:/etc`).
+  A `dir:` target is also stricter than a plain one about *what the action touches*: it covers an action only when
+  **every** path in it (path-like words, `--opt=PATH`, redirections, the file arguments of `cp`/`mv`/`tee`/`rm`/…,
+  including inside a quoted `bash -c`) is inside a `dir:` target of the plan, symlinks and `..` followed, relative
+  paths resolved against the agent's own cwd. `cp /opt/stacks/news/x /etc/cron.d/y` is refused under
+  `dir:/opt/stacks/news`. A path that cannot be judged (a variable, a remote `host:path`) is not covered, and a
+  command that runs elsewhere (`ssh`, `pct`, `docker exec`) is never covered by a `dir:` target. Plain targets are
+  unchanged (any one matching word covers). Details in go-gate's README.
+- The "Requested after a refusal" line on a card is shown only if the refusal was less than 10 minutes before the
+  proposal; an older one is dropped, so an unrelated card never carries it.
 - An approval is a button press, received by keeperd from Telegram. It is checked against the owner id and the chat,
   is bound to that plan's fingerprint, works once only, and must come within 2 h. The plan then stays active for its
   TTL: 1 h by default, 4 h at most. Anything the agent writes in its conversation approves nothing.
@@ -180,7 +189,10 @@ cover:
   and `keeper-summary`;
 - the deny reason naming the missing action or the missing targets, with the plan's own actions/targets alongside,
   and never anything secret-shaped; the refusal's context carried once onto the next proposal's card, and not onto
-  one after that;
-- `dir:<path>` targets: a valid prefix covers its subtree, a look-alike sibling and a `..`/symlink escape do not, and
+  one after that, and not at all when the refusal is more than 10 minutes old;
+- `dir:<path>` targets: every path of the action must be inside (one inside plus one outside is refused: `cp`, `tee`,
+  redirections, `--target-directory`, `ssh`/`bash -c` nesting, symlinks pointing out, relative paths against the
+  agent's cwd), with a mutation check of that rule; a valid prefix covers its subtree, a look-alike sibling and a
+  `..`/symlink escape do not, and
   neither does `/`, the home directory, go-gate's own protected paths, or the keeper's own (`/etc/keeper`,
   `/opt/agent-guardrails`), even through a broader `dir:` that would otherwise reach them.
