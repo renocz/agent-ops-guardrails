@@ -4,6 +4,42 @@ One version scheme: **a repository tag per release**. Components have no version
 
 ## Unreleased (towards v1.0)
 
+- **docker-proxy: `inspect` and `logs` no longer hand the agent raw secrets (owner review of PR #21, 21/10/2026).**
+  `docker inspect` includes a container's entire environment verbatim (`Config.Env`) -- API keys, database
+  passwords, tokens -- and `docker logs` prints whatever the container writes, which regularly includes secrets in
+  connection strings or startup banners. Before this fix both subcommands returned docker's raw stdout
+  unfiltered. Two independent, deliberately redundant layers fix it:
+  1. `inspect` now always runs with the daemon's own fixed `--format`, never one the agent supplies (a `format`
+     key in the request is refused outright) -- a literal allowlist of eight fields (`Name`, `Id`, `State`,
+     `Image`, `RestartPolicy`, `Health`, `Networks`, `Mounts`) that structurally never asks docker for
+     `Config.Env`, `Config.Cmd` or `Config.Entrypoint` in the first place. `docker-proxy inspect <name>` now
+     prints a compact JSON object with exactly those eight keys, not docker's own multi-page JSON.
+  2. `inspect`'s (now-filtered) output and all of `logs`' output, stdout and stderr, are passed through
+     `mask_text()` -- secret-guard/mask's own redaction patterns, ported into `docker_proxyd.py` (not a
+     subprocess call to the Perl script, so the daemon keeps running under its hardened, `env -i` systemd unit
+     with no new runtime dependency) -- before either leaves the daemon. This is server-side, so the agent cannot
+     get an unmasked copy by skipping its own local `mask`; it catches what the field whitelist didn't anticipate
+     (a secret in a log line, in a health-check script's own output).
+
+  (Caught by actually running this against a real Docker Engine (29.9.1), not just the fake `run` recorder the
+  rest of this suite uses: the first field-path syntax tried, plain dot notation, made a real `docker inspect
+  --format` fail outright on any container with no healthcheck configured -- the common case -- once `.Id` was
+  also in the same template. Fixed by building every nested field access with `index()` instead of dot notation.)
+
+  New, optional config section **`read_allow.containers`**: same shape and same fail-closed literal-name
+  validation as `write_allow.containers` (no wildcard, no regex, checked at load and at request time). Absent
+  (the default), reads are unrestricted, as before this entry. Present, even empty, it narrows `logs`/`inspect`/
+  `stats`/`top` to exactly the listed containers; `ps` is never gated by it (it lists every container, it targets
+  none). Not yet wired into `install-docker-proxy.sh` (which still only ever writes `write_allow`) -- edit the
+  installed config by hand and restart the service, same as any other config change (see docker-proxy/README.md).
+
+  25 new tests (read_allow config loading and gating, inspect's fixed format and the agent-supplied-`format`
+  refusal, a fake secret in logs/an inspect-allowed field never reaching the response, and mutation checks that
+  disabling `mask_text()` or bypassing the field whitelist each flip a redaction to a leak), plus a check that the
+  ported `mask_text()` matches the real `secret-guard/mask` on a shared set of fixtures (skipped if `perl` isn't
+  available). `ps`/`stats`/`top` output is not masked (out of this fix's scope; see docker-proxy/README.md "Known
+  limits").
+
 - **New kit: docker-proxy, filtered Docker access for a non-root agent.** Implements option C of
   `docs/design-keeper-server.md` section 1: a dedicated `dockerproxy` account is the only one in the `docker`
   group; the agent reaches a small daemon (`docker_proxyd.py`) over its own Unix socket instead. Reads (`ps`,
