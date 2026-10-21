@@ -4,6 +4,20 @@ One version scheme: **a repository tag per release**. Components have no version
 
 ## Unreleased (towards v1.0)
 
+- **New kit: docker-proxy, filtered Docker access for a non-root agent.** Implements option C of
+  `docs/design-keeper-server.md` section 1: a dedicated `dockerproxy` account is the only one in the `docker`
+  group; the agent reaches a small daemon (`docker_proxyd.py`) over its own Unix socket instead. Reads (`ps`,
+  `logs`, `inspect`, `stats`, `top`) are always allowed; writes (`restart`, `start`, `stop`) are gated by an exact,
+  literal container-name allowlist in a root-owned config -- no wildcard, no regex, checked both when the config is
+  loaded and at request time. No flags are forwarded from the agent (only a few bounded, fixed options: `-a`,
+  `--tail`, `--timeout`); a target name is validated against Docker's own naming rules before anything else runs,
+  which stops shell-metacharacter and flag-injection attempts (`-v`, `--privileged`, `; rm -rf /`, …) structurally.
+  `install-docker-proxy.sh` follows the same dry-run-by-default / `--apply` / `--prefix` convention as the other
+  installers in this repo. 29 tests (no real Docker, no network -- a fake `run` recorder stands in for
+  `subprocess.run`, plus one real-Unix-socket end-to-end test), including a mutation check that disabling the
+  whitelist guard flips a refusal to an allow. Sudoers lines for `pct`/`systemctl` (design doc's option B) are left
+  out of scope: they need the owner's real service/unit names, which this session cannot know.
+
 - **keeper installer: a reinstall now MERGES into an existing `/etc/keeper/config.json` instead of overwriting it
   (20/10).** Rerunning `install-keeper.sh --apply` rewrote the whole file from the script's own defaults and
   command-line options, so any key the owner had edited by hand after the first install -- `max_proposals_per_hour`

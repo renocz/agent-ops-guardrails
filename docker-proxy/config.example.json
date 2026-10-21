@@ -1,0 +1,8 @@
+{
+  "write_allow": {
+    "containers": [
+      "example-app",
+      "example-worker"
+    ]
+  }
+}
