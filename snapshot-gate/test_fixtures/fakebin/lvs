@@ -2,10 +2,36 @@
 # Fake `lvs`: see test_fixtures/fakebin/README.md. Not a real backend -- never touches any real VG.
 set -eu
 state="${FAKE_SG_STATE:?FAKE_SG_STATE not set}"
-vg=""
-for a in "$@"; do vg="$a"; done
+target=""
+o=""
+prev=""
+for a in "$@"; do
+    if [ "$prev" = "-o" ]; then o="$a"; fi
+    prev="$a"
+    target="$a"
+done
 snap_file="$state/lvm_snapshots"
 touch "$snap_file"
+
+if [ "$o" = "lv_layout,pool_lv" ]; then
+    # target is the full "vg/lv" origin passed to backends.Lvm._require_thin().
+    if [ -f "$state/lvm_lvs_bogus_output" ] && [ "$(cat "$state/lvm_lvs_bogus_output")" = "$target" ]; then
+        echo "  garbage output no backend could parse"
+        exit 0
+    fi
+    if [ -f "$state/lvm_thin_origins" ] && grep -Fxq "$target" "$state/lvm_thin_origins"; then
+        pool="thinpool"
+        if [ -f "$state/lvm_thin_pool_name" ]; then pool="$(cat "$state/lvm_thin_pool_name")"; fi
+        printf '  thin,sparse %s\n' "$pool"
+    else
+        printf '  linear\n'
+    fi
+    exit 0
+fi
+
+# Any other -o value (lv_name,origin, or just lv_name, as the portability test uses): the pre-existing
+# lv_name/origin listing, same shape regardless of which columns were actually asked for.
+vg="$target"
 if [ -f "$state/lvm_missing_vg" ] && [ "$(cat "$state/lvm_missing_vg")" = "$vg" ]; then
     echo "Volume group \"$vg\" not found" >&2
     exit 5

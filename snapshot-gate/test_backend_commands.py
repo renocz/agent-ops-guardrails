@@ -33,6 +33,7 @@ class FakeRun:
         self.store = []
         self.calls = []
         self.used, self.avail = used, avail
+        self.classic_lvm_origins = set()    # origins the fake "lvs -o lv_layout,pool_lv" reports as non-thin
 
     def __call__(self, argv, capture_output=True, text=True, check=True, timeout=None):
         self.calls.append(list(argv))
@@ -52,6 +53,11 @@ class FakeRun:
             # vgs reports (vg_size, vg_free): total and unused, not (used, avail) like zfs -- map so the two
             # backends' usage_percent() agree on the same percentage for the same self.used/self.avail.
             out.stdout = f"{self.used + self.avail}\t{self.avail}\n"
+        elif argv[0] == "lvs" and "lv_layout,pool_lv" in argv:
+            # backends.Lvm._require_thin()'s own probe, run before any lvcreate: thin unless the test
+            # explicitly listed this origin as classic.
+            origin = argv[-1]
+            out.stdout = "  linear\n" if origin in self.classic_lvm_origins else "  thin,sparse thinpool\n"
         elif argv[0] == "lvs":
             vg = argv[-1]
             lines = []
@@ -127,6 +133,21 @@ class LvmCommandShapes(unittest.TestCase):
             backends.Lvm("vg/lv").create_snapshot("vg/lv@agent-gate-20260101-000000")
         self.assertEqual(fake.calls[-1], ["lvcreate", "-s", "-n", "agent-gate-20260101-000000", "vg/lv"])
         self.assertNotIn("@", fake.calls[-1][3])                # the new LV's own name: lvcreate rejects "@"
+
+    def test_create_snapshot_checks_thin_provisioning_before_lvcreate(self):
+        fake = FakeRun()
+        with unittest.mock.patch("subprocess.run", fake):
+            backends.Lvm("vg/lv").create_snapshot("vg/lv@agent-gate-20260101-000000")
+        self.assertEqual(fake.calls[-2], ["lvs", "--noheadings", "-o", "lv_layout,pool_lv", "vg/lv"])
+        self.assertEqual(fake.calls[-1][0], "lvcreate")
+
+    def test_create_snapshot_refuses_a_classic_origin_without_ever_calling_lvcreate(self):
+        fake = FakeRun()
+        fake.classic_lvm_origins.add("vg/lv")
+        with unittest.mock.patch("subprocess.run", fake):
+            with self.assertRaises(backends.LvmNotThinProvisioned):
+                backends.Lvm("vg/lv").create_snapshot("vg/lv@agent-gate-20260101-000000")
+        self.assertNotIn("lvcreate", [c[0] for c in fake.calls])
 
     def test_destroy_command_targets_the_snapshot_lv_not_the_origin(self):
         fake = FakeRun()

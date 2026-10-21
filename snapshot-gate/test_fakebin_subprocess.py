@@ -133,6 +133,7 @@ class ZfsRealExecMissingDataset(FakeBinHarness):
 
 class LvmRealExecRoundTrip(FakeBinHarness):
     def test_round_trip_through_real_vgs_lvs_lvcreate_processes(self):
+        self._write("lvm_thin_origins", "vg/lv")
         backend = backends.Lvm("vg/lv")
         cfg = self.sg_cfg("vg/lv", backend="lvm")
 
@@ -221,6 +222,52 @@ class LvmRealExecPartialPurgeFailure(FakeBinHarness):
         backend = backends.Lvm("vg/lv")
         self.assertNotIn(old_b, backend.list_snapshot_names())      # still purged despite old_a's failure
         self.assertIn(old_a, backend.list_snapshot_names())
+
+
+class LvmRealExecThinProvisioningGate(FakeBinHarness):
+    """The LVM backend must only ever run `lvcreate -s` (no size argument) against a thin-provisioned
+    origin: real `lvcreate -s` on a classic LV needs an explicit size and fails. `backends.Lvm` checks
+    this itself via `lvs -o lv_layout,pool_lv` before ever invoking `lvcreate`, through the real fake
+    `lvs`/`lvcreate` processes exercised elsewhere in this file -- see owner review on PR #12, 21/10."""
+
+    def test_a_thin_origin_is_snapshotted_normally(self):
+        self._write("lvm_thin_origins", "vg/lv")
+        backend = backends.Lvm("vg/lv")
+        name = f"vg/lv@{naming.new_name('agent-gate')}"
+        backend.create_snapshot(name)
+        self.assertIn(name, backend.list_snapshot_names())
+
+    def test_a_classic_non_thin_origin_is_refused_and_lvcreate_is_never_run(self):
+        # No lvm_thin_origins entry for vg/lv -> the fake lvs reports it as a classic "linear" LV.
+        backend = backends.Lvm("vg/lv")
+        name = f"vg/lv@{naming.new_name('agent-gate')}"
+        with self.assertRaises(backends.LvmNotThinProvisioned):
+            backend.create_snapshot(name)
+        # If lvcreate had actually run, the fake lvcreate would have appended to lvm_snapshots.
+        self.assertEqual(backend.list_snapshot_names(), [])
+
+    def test_unparseable_lvs_output_refuses_fail_closed_and_lvcreate_is_never_run(self):
+        self._write("lvm_lvs_bogus_output", "vg/lv")
+        backend = backends.Lvm("vg/lv")
+        name = f"vg/lv@{naming.new_name('agent-gate')}"
+        with self.assertRaises(backends.LvmNotThinProvisioned):
+            backend.create_snapshot(name)
+        self.assertEqual(backend.list_snapshot_names(), [])
+
+    def test_the_thin_check_runs_before_lvcreate_in_the_full_create_flow(self):
+        backend = backends.Lvm("vg/lv")
+        cfg = self.sg_cfg("vg/lv", backend="lvm")
+        with tempfile.TemporaryDirectory() as tmp:
+            full = dict(cfg, requests_dir=tmp, states_dir=tmp,
+                        lock_file=os.path.join(tmp, "l"), log_file=os.path.join(tmp, "log"))
+            with open(os.path.join(tmp, "r1.request"), "w", encoding="utf-8"):
+                pass
+            sg_host.process_pending(full, backend)
+            with open(os.path.join(tmp, "r1.state"), encoding="utf-8") as f:
+                state = f.read()
+        self.assertIn("status=ERROR", state)
+        self.assertIn("LvmNotThinProvisioned", state)
+        self.assertEqual(backend.list_snapshot_names(), [])
 
 
 class FixturesPortableAcrossShells(FakeBinHarness):

@@ -39,8 +39,19 @@ class Zfs:
         subprocess.run(["zfs", "snapshot", qualified_name], check=True, timeout=30)
 
 
+class LvmNotThinProvisioned(RuntimeError):
+    """Raised instead of ever calling `lvcreate`: this backend only ever runs `lvcreate -s` with no
+    explicit size, which LVM only accepts for a thin-provisioned snapshot -- on a classic (non-thin)
+    LV it requires a size argument this kit deliberately never supplies. Also raised when the
+    thin-or-not check itself cannot be answered (missing/unexpected `lvs` output), so a check that
+    fails closed, never open."""
+
+
 class Lvm:
-    """An LVM logical volume. `volume` is `vg/lv`, the origin volume the gate protects."""
+    """An LVM logical volume. `volume` is `vg/lv`, the origin volume the gate protects.
+
+    Thin-provisioned origins only: `create_snapshot` refuses (`LvmNotThinProvisioned`) before ever
+    invoking `lvcreate` on a classic (non-thin) LV, or when it cannot confirm the origin is thin."""
 
     name = "lvm"
 
@@ -70,11 +81,35 @@ class Lvm:
                 names.append(f"{self.vg}/{self.lv}@{parts[0]}")
         return names
 
+    def _require_thin(self, origin):
+        # `lv_layout` is always a single, space-free, comma-joined token (e.g. "linear", "thin,sparse");
+        # `pool_lv` is the thin pool's name for a thin LV, and empty (so absent from --noheadings output,
+        # which never pads missing trailing fields with spaces) for a classic one. That gives the three
+        # cases below a clean, unambiguous shape to split on -- anything else is treated as unreadable,
+        # never as "probably fine": this check fails closed, not open.
+        out = subprocess.run(["lvs", "--noheadings", "-o", "lv_layout,pool_lv", origin],
+                              capture_output=True, text=True, check=True, timeout=10).stdout
+        lines = [line for line in out.splitlines() if line.strip()]
+        parts = lines[0].split() if len(lines) == 1 else []
+        if len(parts) == 2 and "thin" in parts[0]:
+            return
+        if len(parts) == 1 and "thin" not in parts[0]:
+            raise LvmNotThinProvisioned(
+                f"backend 'lvm' only supports thin-provisioned volumes, and {origin!r} is a classic "
+                "(non-thin) logical volume; lvcreate -s on a classic LV needs an explicit size, which "
+                "this kit never supplies, so refusing to create a snapshot."
+            )
+        raise LvmNotThinProvisioned(
+            f"could not confirm {origin!r} is thin-provisioned: unexpected output from `lvs --noheadings "
+            f"-o lv_layout,pool_lv {origin}` ({lines!r}); refusing to create a snapshot."
+        )
+
     def create_snapshot(self, qualified_name):
         # qualified_name is "<vg>/<lv>@<snapshot-name>" (origin + "@" + the LV name to actually create). Split
         # on "@", never on "/": the origin side already is the "vg/lv" lvcreate itself expects, and the
         # snapshot-name side is what becomes the new LV's own name -- never glued together with "@" in it.
         origin, _, snap_name = qualified_name.partition("@")
+        self._require_thin(origin)
         subprocess.run(["lvcreate", "-s", "-n", snap_name, origin], check=True, timeout=30)
 
 

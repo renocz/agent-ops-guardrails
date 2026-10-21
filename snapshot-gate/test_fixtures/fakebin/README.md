@@ -24,6 +24,13 @@ State files read/written under `$FAKE_SG_STATE`:
 - `lvm_missing_vg` — if present, its content is a VG name; `vgs`/`lvs` on exactly that VG fail
 - `lvm_busy` — if present, its content is a `vg/snap-name`; `lvremove` on exactly that target
   fails like a logical volume still in use would
+- `lvm_thin_origins` — one `vg/lv` origin per line; `lvs --noheadings -o lv_layout,pool_lv <vg/lv>`
+  reports it as thin-provisioned (`thin,sparse <pool>`) for exactly those origins, and as a classic,
+  non-thin volume (`linear`) for any other `vg/lv`
+- `lvm_thin_pool_name` — the thin pool name reported for a thin origin (default `thinpool` if absent)
+- `lvm_lvs_bogus_output` — if present, its content is a `vg/lv`; `lvs -o lv_layout,pool_lv` on exactly
+  that origin prints output the thin-or-not check cannot parse, standing in for a real `lvs` output
+  shape this kit did not anticipate
 
 Portability rule: these scripts are `#!/bin/sh` and must stay valid for bash 3.2 (stock macOS) and
 dash. No arrays, negative subscripts, `${!#}`, `[[ ]]`, `local` or `pipefail`. CI enforces it
