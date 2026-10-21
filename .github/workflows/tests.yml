@@ -50,6 +50,11 @@ jobs:
           docker-proxy/install-docker-proxy.sh --agent-user "$(id -un)" --container web-app --prefix /tmp/dpx
           python -m json.tool /tmp/dpx/etc/docker-proxy/config.json >/dev/null
           python -c "import json; c=json.load(open('/tmp/dpx/etc/docker-proxy/config.json')); assert c['write_allow']['containers']==['web-app'], c"
+      - name: keeper server check script (syntax + its own read-only/no-crash self-test; nothing installed in CI)
+        run: |
+          bash -n keeper/check-keeper-server.sh
+          bash keeper/test_check_keeper_server.sh
+          keeper/check-keeper-server.sh || true   # exit code depends on the runner's own docker/sudo state, not asserted here
       - name: leak-check tests (fake secrets only)
         run: cd leak-check && python -m unittest -v test_leak_check.py
       - name: leak-check orchestration scripts (syntax + offline run)
