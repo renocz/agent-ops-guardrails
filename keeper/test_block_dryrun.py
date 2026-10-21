@@ -123,6 +123,10 @@ class DryRunBase(unittest.TestCase):
     """A real Keeper in block mode, the real serve() socket, the real TelegramBot against a fake local Telegram,
     and the real poll() loop running in a background thread for the lifetime of the test."""
 
+    def extra_cfg(self):
+        """Override in a subclass to merge extra keys into cfg before the real Keeper/socket/poll loop start."""
+        return {}
+
     def setUp(self):
         self.dir = tempfile.mkdtemp(prefix="kbd", dir="/tmp")
         self.addCleanup(shutil.rmtree, self.dir, ignore_errors=True)
@@ -134,6 +138,7 @@ class DryRunBase(unittest.TestCase):
         self.cfg = dict(keeperd.DEFAULTS, state_dir=os.path.join(self.dir, "state"), owner_id=OWNER, chat_id=CHAT,
                         agent_uids=[os.getuid()], agent_home=self.home, socket=os.path.join(self.dir, "k.sock"),
                         bot_token_file=token_path, mode="block")
+        self.cfg.update(self.extra_cfg())
 
         self.fake = FakeTelegramServer()
         self.addCleanup(self.fake.shutdown)
@@ -645,6 +650,40 @@ class WaitForApproval(DryRunBase):
         reason = self.propose("id=p1 ; actions=edit")
         self.assertLess(time.time() - t0, 5)
         self.assertIn("sent to the human", reason)
+
+
+class IStandingPlansAndActor(DryRunBase):
+    """End to end (design: docs/design-keeper-server.md §2): KEEPER_ACTOR, as only a root-owned hook command line
+    could ever set it, carried by the REAL keeper_client.py subprocess over the REAL socket into Keeper.check()."""
+
+    def extra_cfg(self):
+        return {"standing_plans": [{"id": "morning", "commands": ["python3 morning-act.py restart-arr"],
+                                     "expires_at": "2126-01-01"}],
+                "unattended_actors": ["standing-morning"]}
+
+    def test_standing_command_allowed_through_the_real_hook_with_no_plan_and_no_card(self):
+        decision, _ = self.hook(*bash("python3 morning-act.py restart-arr"))
+        self.assertEqual(decision, "allow")
+        self.assertEqual(self.fake.state.sent, [])                          # no Telegram message of any kind
+
+    def test_same_command_denied_without_the_actor_tag_mattering_here(self):
+        """The standing grant itself does not depend on KEEPER_ACTOR at all -- only card suppression does."""
+        env = dict(self.env, KEEPER_ACTOR="standing-morning")
+        decision, _ = self.hook(*bash("python3 morning-act.py restart-arr"), env=env)
+        self.assertEqual(decision, "allow")
+
+    def test_out_of_scope_call_from_the_actor_tag_proposes_quietly(self):
+        env = dict(self.env, KEEPER_ACTOR="standing-morning")
+        decision, reason = self.hook(*bash(self.propose_cmd("id=p1 ; actions=edit")), env=env)
+        self.assertEqual(decision, "deny")
+        self.assertIn("no alert was sent", reason)
+        self.assertTrue(self.wait_for(lambda: self.log_records("standing-propose-suppressed")))
+        self.assertEqual(self.fake.state.sent, [])                          # still no Telegram message
+
+    def test_out_of_scope_call_without_the_actor_tag_sends_a_card_as_before(self):
+        reason = self.propose("id=p1 ; actions=edit")
+        self.assertIn("sent to the human", reason)
+        self.assertTrue(self.wait_for(lambda: self.fake.state.sent))
 
 
 if __name__ == "__main__":

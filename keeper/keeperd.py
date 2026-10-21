@@ -6,7 +6,12 @@ Telegram bot whose token only this user can read. The agent can propose a plan a
 it cannot approve, change or read the approval state.
 
 Requests (one JSON object per line on the socket):
-  {"op": "check", "session": s, "tool": "Bash", "input": {...}}   -> {"decision": "allow"|"deny", "reason": …}
+  {"op": "check", "session": s, "tool": "Bash", "input": {...}, "actor": a}   -> {"decision": "allow"|"deny", "reason": …}
+
+`actor` is optional and only ever meaningful when it is a tag set by a root-owned hook command (docs/design-
+keeper-server.md §2: a distinct `--settings` profile per systemd unit, not anything the agent's own session can
+set) that also appears in the config's `unattended_actors`: it suppresses the Telegram card a `keeper-propose`
+would otherwise push, for an agent nobody is watching at the time. It never widens what a call is allowed to do.
 
 The agent proposes a plan by running `keeper-propose --scope "id=… ; targets=… ; actions=… ; ttl=…" --text "why"`.
 keeperd sees that command in the hook's check, with the session id Claude Code gave the hook, sends the plan to the
@@ -24,8 +29,57 @@ DEFAULTS = {"socket": "/var/run/keeper/keeper.sock", "state_dir": "/var/lib/keep
             "owner_id": None, "chat_id": None, "bot_token_file": "/etc/keeper/bot.token",
             "ttl_default_min": 60, "ttl_max_min": 240, "pending_max_age_min": 120, "max_proposals_per_hour": 3,
             "mode": "block", "agent_home": None, "client_group": None, "safe_git_repos": [], "lang": "en",
-            "wait_max_sec": 50, "hook_timeout_sec": 60, "max_active_plans": 3}
+            "wait_max_sec": 50, "hook_timeout_sec": 60, "max_active_plans": 3,
+            "standing_plans": [], "unattended_actors": []}
 MAX_ACTIVE_PLANS_HARD_CAP = 5          # a config typo (or an attempt from a writable config) cannot go past this
+# Standing plans (design: docs/design-keeper-server.md §2): a closed, exact-literal allowlist for an agent nobody is
+# watching (a systemd timer, e.g.), defined ONLY in the root-owned config file -- never created, approved or widened
+# through the socket or Telegram. "Long but bounded": a typo in the config's expires_at cannot create a silent,
+# effectively permanent grant, the same defence-in-depth pattern as MAX_ACTIVE_PLANS_HARD_CAP above.
+STANDING_MAX_DAYS = 45
+
+
+def parse_expiry(val, now):
+    """A standing plan's `expires_at`: a unix timestamp (int/float), or a "YYYY-MM-DD" string read as UTC midnight.
+    Anything else (missing, malformed, wrong type) returns None -- the caller drops the entry rather than guessing
+    a default, since a standing plan with no real expiry is exactly the "silently permanent" shape this exists to
+    refuse."""
+    if isinstance(val, bool):
+        return None
+    if isinstance(val, (int, float)):
+        return float(val)
+    if isinstance(val, str):
+        try:
+            return datetime.datetime.strptime(val, "%Y-%m-%d").replace(tzinfo=datetime.timezone.utc).timestamp()
+        except ValueError:
+            return None
+    return None
+
+
+def load_standing(cfg, now):
+    """Every usable standing plan from cfg["standing_plans"], keyed by id. A malformed entry (no id, no commands,
+    an unparsable or missing expires_at) is dropped and skipped -- never a crash, and never treated as "allow
+    everything": the daemon simply has one fewer standing plan than the config intended, which is the fail-closed
+    direction, not fail-open. expires_at is clamped to at most STANDING_MAX_DAYS from now regardless of what the
+    config says."""
+    out = {}
+    for raw in cfg.get("standing_plans") or []:
+        try:
+            sid = str(raw["id"]).strip()
+            raw_cmds = raw["commands"]
+            if not isinstance(raw_cmds, list):           # a string here would silently iterate into characters
+                continue
+            cmds = [c.strip() for c in raw_cmds if isinstance(c, str) and c.strip()]
+            if not sid or not cmds:
+                continue
+            exp = parse_expiry(raw.get("expires_at"), now)
+            if exp is None:
+                continue
+            exp = min(exp, now + STANDING_MAX_DAYS * 86400)
+            out[sid] = {"commands": cmds, "expires_at": exp, "note": str(raw.get("note") or "")}
+        except (KeyError, TypeError, AttributeError):
+            continue
+    return out
 # keeper-propose --wait blocks the PreToolUse hook process. Claude Code kills a command hook at its "timeout" and, on
 # PreToolUse, a timed-out hook does NOT block the tool call (it falls through to the normal permission flow), so the
 # wait must always end first: wait_max_sec + this margin (one in-flight status poll, process start-up) <= hook_timeout_sec.
@@ -99,6 +153,8 @@ MESSAGES = {
         "status_pending": "Pending proposals: {n} (ids: {ids})",
         "status_no_pending": "No pending proposal.",
         "status_hourly": "Proposals in the last hour: {n}/{limit}",
+        "status_standing_line": "• standing {id}: {n} command(s), expires in {days} d",
+        "status_no_standing": "No standing plan configured.",
         "plans_title": "📜 Last plan events",
         "plans_empty": "No plan event recorded yet.",
         "plans_line": "{at} — {id}: {outcome}",
@@ -108,7 +164,8 @@ MESSAGES = {
         "plans_outcome_expired": "expired",
         "plans_outcome_revoked": "revoked (stop)",
         "help_title": "Commands:",
-        "help_stop": "/stop [id] — revoke every active and pending plan right now, or just the one named plan",
+        "help_stop": "/stop [id] — revoke every active and pending plan right now, or just the one named plan "
+                     "(a standing plan's id works too)",
         "help_status": "/status — mode, active/pending plans, proposals left this hour",
         "help_plans": "/plans [n] — last n plan events (default 5, max 20)",
         "help_summary": "/summary [days] — log summary of would-deny/denied/allowed (alias /resume)",
@@ -175,6 +232,8 @@ MESSAGES = {
         "status_pending": "Propositions en attente : {n} (identifiants : {ids})",
         "status_no_pending": "Aucune proposition en attente.",
         "status_hourly": "Propositions dans la dernière heure : {n}/{limit}",
+        "status_standing_line": "• permanent {id} : {n} commande(s), expire dans {days} j",
+        "status_no_standing": "Aucun plan permanent configuré.",
         "plans_title": "📜 Derniers événements de plan",
         "plans_empty": "Aucun événement de plan enregistré pour l'instant.",
         "plans_line": "{at} — {id} : {outcome}",
@@ -184,7 +243,8 @@ MESSAGES = {
         "plans_outcome_expired": "expiré",
         "plans_outcome_revoked": "révoqué (stop)",
         "help_title": "Commandes :",
-        "help_stop": "/stop [id] — révoque immédiatement tout plan actif et toute proposition en attente, ou seulement le plan nommé",
+        "help_stop": "/stop [id] — révoque immédiatement tout plan actif et toute proposition en attente, ou "
+                     "seulement le plan nommé (l'identifiant d'un plan permanent fonctionne aussi)",
         "help_status": "/status — mode, plans actifs/en attente, propositions restantes cette heure",
         "help_plans": "/plans [n] — les n derniers événements de plan (5 par défaut, 20 au maximum)",
         "help_summary": "/summary [jours] — résumé du journal des refus/autorisations (alias /resume)",
@@ -580,6 +640,11 @@ class Keeper:
         # Requirement 1: several active plans at once, bounded. A config typo or a tampered config file cannot
         # raise this past MAX_ACTIVE_PLANS_HARD_CAP -- the clamp runs here, every time, not just at install.
         self.max_active_plans = max(1, min(int(cfg.get("max_active_plans") or 3), MAX_ACTIVE_PLANS_HARD_CAP))
+        # Standing plans (docs/design-keeper-server.md §2): loaded ONLY from cfg, once, at start-up. There is no
+        # socket op, Telegram command or agent-reachable code path that writes self.standing -- the only way to
+        # create, widen or renew one is a root edit to the config file followed by a daemon restart.
+        self.standing = load_standing(cfg, self.now())
+        self.unattended_actors = frozenset(str(a) for a in (cfg.get("unattended_actors") or []))
         self.gate = load_gate(cfg.get("agent_home"))
         self.gate.SAFE_GIT_REPOS[:] = cfg.get("safe_git_repos") or []      # K6: trusted repos for git read verbs
         self.lock = threading.Lock()
@@ -592,6 +657,8 @@ class Keeper:
         except (OSError, ValueError):
             self.state = {"sessions": {}, "used_nonces": [], "proposals": []}
         self.state.setdefault("plan_status", {})               # hash12 -> {state, at}; see _record_plan_status
+        self.state.setdefault("standing_disabled", [])          # ids stopped at runtime; see _revoke_all
+        self.state.setdefault("standing_usage", {})             # id -> {count, last_used}; see _touch_standing
 
     def save(self):
         tmp = self.state_path + ".tmp"
@@ -616,7 +683,7 @@ class Keeper:
         return self.state["sessions"].setdefault(str(sid or "no-session"), {})
 
     # ----- agent side ------------------------------------------------------------------------------------------
-    def propose(self, sid, text, scope_line):
+    def propose(self, sid, text, scope_line, actor=None):
         plan = self.gate.parse_scope("Scope: " + (scope_line or "")) or self.gate.parse_scope(text or "")
         if not plan:
             return {"ok": False, "reason": "no valid scope (actions=edit,git,deploy,api,browser,delete,script,doc)"}
@@ -646,8 +713,18 @@ class Keeper:
         self.state["proposals"] = recent + [now]
         self.save()
         self.log({"event": "proposed", "session": sid, "plan": plan.get("id"), "hash": phash[:12]})
-        return {"ok": True, "hash": phash[:12], "message": "sent to the human for approval",
-                "_notify": (sid, pending)}                     # sent by the caller, outside the lock
+        out = {"ok": True, "hash": phash[:12], "message": "sent to the human for approval"}
+        # Standing-plan design, §2: an unattended actor's proposal is still recorded (so /plans and /summary show
+        # it the next time the owner looks), but must never push a Telegram card -- nobody is there to tap it, and
+        # training the owner to approve a card they cannot explain at 3am is worse than no gate. `actor` only ever
+        # carries this meaning when it is a root-configured tag (see keeper_client.py): the agent cannot set it.
+        if actor is not None and str(actor) in self.unattended_actors:
+            self.log({"event": "standing-propose-suppressed", "session": sid, "actor": str(actor),
+                       "plan": plan.get("id"), "hash": phash[:12]})
+            out["unattended"] = True
+        else:
+            out["_notify"] = (sid, pending)                   # sent by the caller, outside the lock
+        return out
 
     def _preview_outcome(self, active, new_plan):
         """What approving `new_plan` would do to this session's `active` list, right now (requirement 6). A plan
@@ -664,6 +741,34 @@ class Keeper:
         if active:
             return {"kind": "add", "ids": [a["plan"].get("id") or "-" for a in active]}
         return {"kind": "first"}
+
+    # ----- standing plans (docs/design-keeper-server.md §2) -----------------------------------------------------
+    def _standing_lookup(self, command):
+        """The id of a standing plan whose literal commands include exactly `command` (already stripped), not
+        expired, not disabled via /stop -- or None. Exact string equality only, deliberately: no prefix, no
+        substring, no pattern. A standing plan is a finite, owner-written list of commands, not a category."""
+        now = self.now()
+        disabled = self.state.get("standing_disabled") or []
+        for sid, p in self.standing.items():
+            if sid in disabled or p["expires_at"] <= now:
+                continue
+            if command in p["commands"]:
+                return sid
+        return None
+
+    def _touch_standing(self, sid):
+        usage = self.state.setdefault("standing_usage", {})
+        rec = usage.setdefault(sid, {"count": 0, "last_used": None})
+        rec["count"] += 1
+        rec["last_used"] = self.now()
+        self.save()
+
+    def _standing_view(self):
+        """Every currently-valid (not expired, not disabled) standing plan, for keeper-status and /status."""
+        now = self.now()
+        disabled = self.state.get("standing_disabled") or []
+        return [{"id": sid, "commands": p["commands"], "expires_in_days": max(0, int((p["expires_at"] - now) / 86400))}
+                for sid, p in sorted(self.standing.items()) if sid not in disabled and p["expires_at"] > now]
 
     def keeper_command(self, cmd):
         """`keeper-propose …` or `keeper-status` alone in a Bash call: (name, {option: value}), else None."""
@@ -691,25 +796,41 @@ class Keeper:
             # anything else (negative, decimal, non-numeric) is not recognized, same fallback as any other option
         return name, opts
 
-    def check(self, sid, tool, tool_input, cwd=None):
+    def check(self, sid, tool, tool_input, cwd=None, actor=None):
         self.gate.CWD = cwd                                            # the dir the agent ran the tool in (K6)
         kc = self.keeper_command(tool_input.get("command", "")) if tool == "Bash" else None
         if kc and kc[0] == "keeper-status":
             return {"decision": "deny", "reason": "keeper status (nothing was run): " + json.dumps(self.status(sid))}
         if kc:
             opts = kc[1]
-            out = self.propose(sid, opts.get("text", ""), opts.get("scope", ""))
-            why = (f"keeper: plan sent to the human for approval (fingerprint {out['hash']}). Nothing was run. Wait for "
-                   "their decision, then retry the actions." if out["ok"] else f"keeper: proposal refused: {out['reason']}")
+            out = self.propose(sid, opts.get("text", ""), opts.get("scope", ""), actor=actor)
+            if out.get("unattended"):
+                why = (f"keeper: plan recorded for the owner's next review (fingerprint {out['hash']}); no alert was "
+                       "sent (unattended actor, nobody is watching right now). Nothing was run." if out["ok"]
+                       else f"keeper: proposal refused: {out['reason']}")
+            else:
+                why = (f"keeper: plan sent to the human for approval (fingerprint {out['hash']}). Nothing was run. Wait for "
+                       "their decision, then retry the actions." if out["ok"] else f"keeper: proposal refused: {out['reason']}")
             res = {"decision": "deny", "reason": why}
             if out.get("_notify"):
                 res["_notify"] = out["_notify"]
-            if out["ok"] and "wait" in opts:
+            if out["ok"] and "wait" in opts and not out.get("unattended"):
                 # The hook polls keeperd's "status" op (by fingerprint only) for up to this many seconds instead of
                 # the agent having to re-run keeper-status itself. Clamped here, never inside propose(): wait is a
                 # per-call client preference, not part of the plan, and must never enter the plan's hash/scope.
+                # Skipped for an unattended actor (design §2): nobody is there to decide, so waiting would only
+                # burn the headless job's own time budget on every single run.
                 res["hash"], res["wait"] = out["hash"], min(int(opts["wait"]), effective_wait_max(self.cfg))
             return res
+        if tool == "Bash":
+            # Standing plans (design §2): an exact literal match is allowed immediately, logged, and never even
+            # reaches the heuristic classifier below -- there is no category/target ambiguity to get wrong for a
+            # command the owner approved character-for-character in the config file.
+            std_id = self._standing_lookup((tool_input.get("command") or "").strip())
+            if std_id:
+                self._touch_standing(std_id)
+                self.log({"event": "standing-used", "session": sid, "standing": std_id})
+                return {"decision": "allow", "reason": ""}
         try:
             kind, detail = self.gate.classify(tool, tool_input)
         except Exception as e:                                   # a classifier crash must never let a change through
@@ -761,11 +882,13 @@ class Keeper:
         return {"decision": "allow", "reason": ""}
 
     def status(self, sid):
-        """`keeper-status`: every active plan of this session (requirement 5), never the agent's free-form text."""
+        """`keeper-status`: every active plan of this session (requirement 5), never the agent's free-form text.
+        Also lists every currently-valid standing plan (design §2): an agent that wants to know what it can already
+        do without proposing can read this instead of guessing."""
         now = self.now()
         active = [a for a in (self.session(sid).get("active") or []) if a["expires"] > now]
         return {"active": [dict(a["plan"], expires_in_min=int((a["expires"] - now) / 60)) for a in active],
-                "pending": bool(self.session(sid).get("pending"))}
+                "pending": bool(self.session(sid).get("pending")), "standing": self._standing_view()}
 
     # ----- plan status by fingerprint (keeper-propose --wait) ----------------------------------------------------
     # A read-only view of what decide() already decided, keyed by the plan's hash12 instead of a session. Exists so
@@ -890,6 +1013,9 @@ class Keeper:
                      else self.msg("status_no_pending"))
         recent = len([t for t in self.state["proposals"] if t > self.now() - 3600])
         lines.append(self.msg("status_hourly", n=recent, limit=self.cfg["max_proposals_per_hour"]))
+        standing = [str(self.msg("status_standing_line", id=p["id"], n=len(p["commands"]), days=p["expires_in_days"]))
+                    for p in self._standing_view()]
+        lines += standing if standing else [self.msg("status_no_standing")]
         return split_message(mask_text("\n".join(str(x) for x in lines)))
 
     def plans(self, n=PLANS_DEFAULT):
@@ -954,6 +1080,15 @@ class Keeper:
             pending = s.get("pending")
             if pending and pending["plan"].get("id") == plan_id:
                 s.pop("pending", None)
+        # A standing plan's id works with /stop too (design §2): disabled at once, persisted in standing_disabled.
+        # This is the one runtime change the socket/Telegram side can make to a standing plan -- revoke, never
+        # create or widen. Re-enabling one needs a root edit (removing it from standing_disabled, or restarting
+        # without it in standing_disabled) -- not reachable from here, by design.
+        if plan_id is not None and plan_id in self.standing:
+            disabled = self.state.setdefault("standing_disabled", [])
+            if plan_id not in disabled:
+                disabled.append(plan_id)
+                had = True
         self.save()
         self.log({"event": "revoked-all" if plan_id is None else "revoked-one", "plan": plan_id})
         return had
@@ -1278,9 +1413,10 @@ def serve(keeper, cfg, ready=None):
             # classification. Making that safe would mean changing go-gate itself, out of scope here. send_plan()
             # below (the actual network call) already runs after this scope ends, not inside it; propose() has no
             # lock site of its own, it runs inside this same one.
+            actor = req.get("actor")                            # an optional, root-set tag (see keeper_client.py)
             with keeper.lock_scope("check"):
                 out = keeper.check(req.get("session"), str(req.get("tool", "")), req.get("input") or {},
-                                   req.get("cwd"))
+                                   req.get("cwd"), actor if isinstance(actor, str) else None)
             note = out.pop("_notify", None)
             # Dry run (11/10): send_plan() used to run AFTER the reply, so the agent was told "sent to the human"
             # even when Telegram was down and nothing reached them. Attempted first; the reason is rewritten only

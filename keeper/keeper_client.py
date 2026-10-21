@@ -112,8 +112,14 @@ def hook():
         sys.exit(0)
     tool, ti = data.get("tool_name", ""), data.get("tool_input") or {}
     cwd = data.get("cwd")
+    # KEEPER_ACTOR (design: docs/design-keeper-server.md §2): only ever set by a root-owned hook command line (this
+    # file always runs under `env -i`, so nothing the agent controls can set it) -- a tag telling keeperd which
+    # standing plan / unattended rules apply to an agent nobody is watching (a systemd timer, not the interactive
+    # session). Absent for every ordinary, human-attended invocation; behaves exactly as before in that case.
+    actor = os.environ.get("KEEPER_ACTOR")
     try:
-        out = ask({"op": "check", "session": data.get("session_id"), "tool": tool, "input": ti, "cwd": cwd})
+        out = ask({"op": "check", "session": data.get("session_id"), "tool": tool, "input": ti, "cwd": cwd,
+                   "actor": actor})
     except (OSError, ValueError) as e:
         if local_kind(tool, ti, cwd) in ("read", "talk") or observe_mode():
             sys.exit(0)
