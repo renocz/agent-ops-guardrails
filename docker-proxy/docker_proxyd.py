@@ -68,15 +68,25 @@ WRITE_SUBCOMMANDS = {"restart", "start", "stop"}
 # line (`{{json <path>}}` on docker's own JSON-marshals-and-escapes-control-characters output, so a literal "\n"
 # between them is never ambiguous with a newline inside a value) so build_inspect_result() can split on them
 # positionally without guessing at a Go template function (e.g. "dict") that may not exist in every docker version.
+#
+# Every nested path uses (index (index . "X") "Y"), never dot notation (.X.Y) -- found the hard way, against a
+# real `docker inspect` (Docker Engine 29.9.1, the only version this was verified against), not a fake: a
+# template that references BOTH .Id (by that literal name) AND a dot-accessed field that docker's own JSON omits
+# when unset (State.Health, when no healthcheck is configured -- the common case for most containers) fails
+# outright ("map has no entry for key \"Health\""), apparently because referencing .Id switches docker's
+# formatter to a map-based representation where only index(), not dot access, tolerates a key that JSON's own
+# omitempty left out. index() worked for this on 29.9.1; it is used for every nested field here, not just
+# Health, on the reasoning that the same quirk could in principle hit any other omitempty field, on this or a
+# different docker version -- untested on other versions, so treat that reasoning as the generalization it is.
 INSPECT_FIELDS = [
-    ("Name", ".Name"),
-    ("Id", ".Id"),
-    ("State", ".State.Status"),
-    ("Image", ".Config.Image"),
-    ("RestartPolicy", ".HostConfig.RestartPolicy"),
-    ("Health", ".State.Health"),
-    ("Networks", ".NetworkSettings.Networks"),
-    ("Mounts", ".Mounts"),
+    ("Name", '(index . "Name")'),
+    ("Id", '(index . "Id")'),
+    ("State", '(index (index . "State") "Status")'),
+    ("Image", '(index (index . "Config") "Image")'),
+    ("RestartPolicy", '(index (index . "HostConfig") "RestartPolicy")'),
+    ("Health", '(index (index . "State") "Health")'),
+    ("Networks", '(index (index . "NetworkSettings") "Networks")'),
+    ("Mounts", '(index . "Mounts")'),
 ]
 INSPECT_FORMAT = "\n".join("{{json %s}}" % path for _, path in INSPECT_FIELDS)
 

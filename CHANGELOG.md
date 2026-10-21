@@ -21,6 +21,11 @@ One version scheme: **a repository tag per release**. Components have no version
      get an unmasked copy by skipping its own local `mask`; it catches what the field whitelist didn't anticipate
      (a secret in a log line, in a health-check script's own output).
 
+  (Caught by actually running this against a real Docker Engine (29.9.1), not just the fake `run` recorder the
+  rest of this suite uses: the first field-path syntax tried, plain dot notation, made a real `docker inspect
+  --format` fail outright on any container with no healthcheck configured -- the common case -- once `.Id` was
+  also in the same template. Fixed by building every nested field access with `index()` instead of dot notation.)
+
   New, optional config section **`read_allow.containers`**: same shape and same fail-closed literal-name
   validation as `write_allow.containers` (no wildcard, no regex, checked at load and at request time). Absent
   (the default), reads are unrestricted, as before this entry. Present, even empty, it narrows `logs`/`inspect`/
