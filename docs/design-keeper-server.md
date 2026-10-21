@@ -77,7 +77,18 @@ must be read as having decided to accept that the agent still has host root, jus
   proxy that grants it, not a check that could be argued around. Residual risk: the proxy's own filter list is the
   new attack surface (same category of risk as go-gate's classifier — a heuristic that must be kept narrow and
   tested), and anything genuinely needing `docker exec`/`create` (most ad hoc debugging) now needs a keeper plan
-  with `actions=script`, through the normal flow, same as any other opaque command today.
+  with `actions=script`, through the normal flow, same as any other opaque command today. **Residual risk found
+  and fixed after the kit landed (owner review of PR #21, 21/10/2026):** "the read endpoints" above undersold what
+  `docker inspect` actually returns — the container's entire environment (`Config.Env`), which routinely holds
+  the very API keys and passwords this whole design exists to keep away from the agent, and `docker logs` prints
+  whatever the container writes, including secrets in connection strings or startup banners. The read side of the
+  proxy was not, in fact, a safe default the moment a real container held a real secret. Fixed in docker-proxy's
+  own `decide()`/`handle_request()`: `inspect` is now pinned to a fixed, agent-can't-override `--format` that
+  never asks for `Config.Env`/`Config.Cmd`/`Config.Entrypoint`, and both `inspect`'s and `logs`' output are masked
+  server-side with secret-guard's own redaction patterns before they leave the daemon (see docker-proxy/README.md
+  and CHANGELOG.md). Masking is pattern-based and best-effort, the same limit secret-guard's own `mask` already
+  has — it narrows the exposure, it does not make the read side a guarantee against a container that deliberately
+  tries to exfiltrate something through its own output.
 
 **Recommendation: C for Docker, B for the rest, never A.** Put the agent user in no group that is root-equivalent.
 Route routine container lifecycle management through a filtered proxy whose allowlist is reviewed like code (it

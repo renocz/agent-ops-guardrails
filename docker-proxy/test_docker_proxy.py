@@ -3,11 +3,15 @@
 side-effecting call with a fake, assert on what it would have run). The end-to-end test below opens a real Unix
 socket on a local tmp path, which is not network access.
 """
-import json, os, socket, subprocess, sys, tempfile, threading, unittest
+import json, os, shutil, socket, subprocess, sys, tempfile, threading, unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import docker_proxyd as dp
+import docker_proxy_client as dpc
+
+REPO_ROOT = os.path.dirname(HERE)
+REAL_MASK = os.path.join(REPO_ROOT, "secret-guard", "mask")
 
 
 class FakeRun:
@@ -24,8 +28,24 @@ class FakeRun:
         return subprocess.CompletedProcess(argv, self.returncode, self.stdout, self.stderr)
 
 
-def cfg(containers=()):
-    return {"write_allow_containers": set(containers)}
+def cfg(containers=(), read_allow=None):
+    """read_allow=None means unconfigured (every syntactically valid target readable, the pre-existing
+    behaviour); pass an iterable (possibly empty) to mean read_allow.containers is configured to exactly that."""
+    return {
+        "write_allow_containers": set(containers),
+        "read_allow_containers": None if read_allow is None else set(read_allow),
+    }
+
+
+def inspect_stdout(**fields):
+    """Build the exact text `docker inspect --format INSPECT_FORMAT` would print for the given field values --
+    one JSON value per line, in dp.INSPECT_FIELDS order, trailing newline included (as docker itself appends
+    one). Fields not passed default to a harmless placeholder, since build_inspect_result() only cares about
+    position and valid JSON, not content, for fields a given test doesn't exercise."""
+    defaults = {"Name": "/web", "Id": "abc123", "State": "running", "Image": "nginx:1",
+                "RestartPolicy": {"Name": "always"}, "Health": None, "Networks": {}, "Mounts": []}
+    defaults.update(fields)
+    return "\n".join(json.dumps(defaults[key]) for key, _path in dp.INSPECT_FIELDS) + "\n"
 
 
 class ReadAlwaysAllowed(unittest.TestCase):
@@ -143,6 +163,114 @@ class WildcardAndInjectionRefused(unittest.TestCase):
             self.assertFalse(allowed, f"{bad!r} must be refused for reads too")
 
 
+class ReadAllowlistGating(unittest.TestCase):
+    """read_allow.containers, when configured, narrows logs/inspect/stats/top to a literal allowlist, the same
+    way write_allow.containers already gates restart/start/stop. Unconfigured (cfg()'s default), behaviour is
+    unchanged: any syntactically valid target."""
+
+    def test_unconfigured_read_allow_keeps_reads_unrestricted(self):
+        for sub in ("logs", "inspect", "stats", "top"):
+            allowed, _, _ = dp.decide({"subcommand": sub, "target": "anything-not-listed"}, cfg(read_allow=None))
+            self.assertTrue(allowed, f"{sub} must stay unrestricted when read_allow is not configured")
+
+    def test_configured_read_allow_refuses_unlisted_target(self):
+        for sub in ("logs", "inspect", "stats", "top"):
+            allowed, reason, argv = dp.decide({"subcommand": sub, "target": "db"}, cfg(read_allow=["web"]))
+            self.assertFalse(allowed, f"{sub} on an unlisted target must be refused once read_allow is configured")
+            self.assertIn("read allowlist", reason)
+
+    def test_configured_read_allow_allows_listed_target(self):
+        for sub in ("logs", "inspect", "stats", "top"):
+            allowed, _, argv = dp.decide({"subcommand": sub, "target": "web"}, cfg(read_allow=["web"]))
+            self.assertTrue(allowed, f"{sub} on a listed target must still be allowed")
+
+    def test_empty_read_allow_refuses_everything_fail_closed(self):
+        # An explicit, empty read_allow.containers is "restrict to nothing," not "unrestricted" -- same posture
+        # as write_allow's own missing-section-defaults-to-empty.
+        allowed, _, _ = dp.decide({"subcommand": "logs", "target": "web"}, cfg(read_allow=[]))
+        self.assertFalse(allowed)
+
+    def test_ps_is_not_gated_by_read_allow(self):
+        # ps lists every container; it has no single target for read_allow to check against.
+        allowed, _, _ = dp.decide({"subcommand": "ps"}, cfg(read_allow=["web"]))
+        self.assertTrue(allowed)
+
+    def test_write_allowlist_and_read_allowlist_are_independent(self):
+        allowed, _, _ = dp.decide({"subcommand": "logs", "target": "db"}, cfg(containers=["web"], read_allow=None))
+        self.assertTrue(allowed, "write_allow must never gate a read")
+
+
+class InspectFixedFormat(unittest.TestCase):
+    """inspect never takes a --format (or any other option) from the agent, and the one the daemon itself always
+    uses never asks docker for Config.Env, Config.Cmd or Config.Entrypoint."""
+
+    def test_format_key_from_agent_is_refused(self):
+        allowed, reason, argv = dp.decide({"subcommand": "inspect", "target": "web", "format": "{{json .}}"}, cfg())
+        self.assertFalse(allowed)
+        self.assertIsNone(argv)
+        self.assertIn("format", reason)
+
+    def test_inspect_argv_carries_the_daemons_own_fixed_format(self):
+        allowed, _, argv = dp.decide({"subcommand": "inspect", "target": "web"}, cfg())
+        self.assertTrue(allowed)
+        self.assertEqual(argv, ["docker", "inspect", "--format", dp.INSPECT_FORMAT, "web"])
+
+    def test_fixed_format_never_requests_env_or_cmd(self):
+        lowered = dp.INSPECT_FORMAT.lower()
+        for secret_field in (".config.env", ".config.cmd", ".config.entrypoint"):
+            self.assertNotIn(secret_field, lowered, f"INSPECT_FORMAT must never ask docker for {secret_field}")
+
+
+class ReadAllowConfigLoading(unittest.TestCase):
+    def _write(self, data):
+        fd, path = tempfile.mkstemp(suffix=".json")
+        with os.fdopen(fd, "w") as f:
+            json.dump(data, f)
+        self.addCleanup(os.remove, path)
+        return path
+
+    def test_no_read_allow_key_means_unconfigured(self):
+        path = self._write({"write_allow": {"containers": ["web"]}})
+        config = dp.load_config(path)
+        self.assertIsNone(config["read_allow_containers"])
+
+    def test_read_allow_with_containers_is_configured(self):
+        path = self._write({"read_allow": {"containers": ["web", "worker-1"]}})
+        config = dp.load_config(path)
+        self.assertEqual(config["read_allow_containers"], {"web", "worker-1"})
+
+    def test_read_allow_present_but_empty_is_configured_to_nothing(self):
+        path = self._write({"read_allow": {}})
+        config = dp.load_config(path)
+        self.assertEqual(config["read_allow_containers"], set())
+
+    def test_wildcard_in_read_allow_refused(self):
+        for bad in ["*", "web*", "web?", "[a-z]+", ".*", "web db"]:
+            path = self._write({"read_allow": {"containers": ["web", bad]}})
+            with self.assertRaises(ValueError, msg=f"{bad!r} should make load_config refuse to start"):
+                dp.load_config(path)
+
+    def test_non_string_entry_in_read_allow_refused(self):
+        path = self._write({"read_allow": {"containers": ["web", 123]}})
+        with self.assertRaises(ValueError):
+            dp.load_config(path)
+
+    def test_non_list_read_allow_refused(self):
+        path = self._write({"read_allow": {"containers": "web"}})
+        with self.assertRaises(ValueError):
+            dp.load_config(path)
+
+
+class ClientNeverOffersFormat(unittest.TestCase):
+    """The client's own argparse never exposes a --format (or any option beyond target/--tail/--timeout/-a) in
+    the first place -- decide()'s own refusal (InspectFixedFormat above) is the real guard, this just locks down
+    that the shipped client can't even construct such a request by accident."""
+
+    def test_inspect_subparser_has_no_format_option(self):
+        with self.assertRaises(SystemExit):
+            dpc.build_parser().parse_args(["inspect", "web", "--format", "{{json .}}"])
+
+
 class ConfigLoading(unittest.TestCase):
     def _write(self, data):
         fd, path = tempfile.mkstemp(suffix=".json")
@@ -222,6 +350,135 @@ class MutationGuardIsLoadBearing(unittest.TestCase):
             allowed_after,
             "mutating is_whitelisted() to always allow had no effect -- decide() is not actually calling it",
         )
+
+
+class SecretMasking(unittest.TestCase):
+    """A fake container whose logs/environment carry a fake secret must never hand that secret back through
+    `inspect` or `logs` -- both layers (the fixed field whitelist for inspect, mask_text() for both) apply before
+    handle_request() returns anything to the caller."""
+
+    FAKE_SECRET = "hunter2verysecretvalue"
+
+    def test_logs_with_a_leaked_secret_are_masked(self):
+        run = FakeRun(returncode=0, stdout=f"starting\nDATABASE_PASSWORD={self.FAKE_SECRET}\nready\n", stderr="")
+        resp = dp.handle_request({"subcommand": "logs", "target": "web"}, cfg(), run=run)
+        self.assertTrue(resp["ok"])
+        self.assertNotIn(self.FAKE_SECRET, resp["stdout"])
+        self.assertIn("<m>", resp["stdout"])
+        self.assertIn("starting", resp["stdout"])      # the rest of the log is left alone
+
+    def test_logs_stderr_is_masked_too(self):
+        run = FakeRun(returncode=0, stdout="", stderr=f"warning: token={self.FAKE_SECRET}\n")
+        resp = dp.handle_request({"subcommand": "logs", "target": "web"}, cfg(), run=run)
+        self.assertNotIn(self.FAKE_SECRET, resp["stderr"])
+
+    def test_inspect_never_exposes_env_because_it_is_never_requested(self):
+        # The fixed --format never asks docker for Config.Env in the first place (see InspectFixedFormat), so
+        # there is structurally no field in the daemon's own response that could carry it, however the real
+        # container's environment looks. This fakes what the *filtered* docker call returns -- a fake secret
+        # cannot even be expressed here, which is the point.
+        run = FakeRun(returncode=0, stdout=inspect_stdout(Name="/web"), stderr="")
+        resp = dp.handle_request({"subcommand": "inspect", "target": "web"}, cfg(), run=run)
+        self.assertTrue(resp["ok"])
+        result = json.loads(resp["stdout"])
+        self.assertEqual(set(result), {key for key, _path in dp.INSPECT_FIELDS})
+        self.assertNotIn("Env", result)
+        self.assertNotIn("Cmd", result)
+
+    def test_inspect_masks_a_secret_leaking_through_an_allowed_field(self):
+        # Defense in depth: Health is whitelisted (it is operationally useful), but a health-check script can
+        # print anything, including a secret, to its own output -- mask_text() must still catch it there.
+        health = {"Status": "unhealthy", "Log": [{"Output": f"curl failed: token={self.FAKE_SECRET}\n"}]}
+        run = FakeRun(returncode=0, stdout=inspect_stdout(Health=health), stderr="")
+        resp = dp.handle_request({"subcommand": "inspect", "target": "web"}, cfg(), run=run)
+        self.assertNotIn(self.FAKE_SECRET, resp["stdout"])
+
+    def test_failed_inspect_is_surfaced_masked_not_as_a_hard_error(self):
+        run = FakeRun(returncode=1, stdout="", stderr="Error: No such object: ghost\n")
+        resp = dp.handle_request({"subcommand": "inspect", "target": "ghost"}, cfg(), run=run)
+        self.assertTrue(resp["ok"])
+        self.assertEqual(resp["returncode"], 1)
+
+    def test_other_read_subcommands_are_not_touched_by_masking(self):
+        # Out of scope for this fix (not asked for): ps/stats/top pass through exactly as before.
+        run = FakeRun(returncode=0, stdout="CONTAINER ID   IMAGE\n", stderr="")
+        resp = dp.handle_request({"subcommand": "ps"}, cfg(), run=run)
+        self.assertEqual(resp["stdout"], "CONTAINER ID   IMAGE\n")
+
+
+class MaskAndFormatMutationGuards(unittest.TestCase):
+    """If mask_text() or the inspect field whitelist is disabled, a fake secret must flip from hidden to exposed.
+    Same technique as MutationGuardIsLoadBearing above: prove the guard is load-bearing, not dead code."""
+
+    FAKE_SECRET = "hunter2verysecretvalue"
+
+    def test_disabling_mask_text_lets_the_secret_through(self):
+        run = FakeRun(returncode=0, stdout=f"token={self.FAKE_SECRET}\n", stderr="")
+
+        resp_before = dp.handle_request({"subcommand": "logs", "target": "web"}, cfg(), run=run)
+        self.assertNotIn(self.FAKE_SECRET, resp_before["stdout"], "sanity check: masking must hide it today")
+
+        original = dp.mask_text
+        dp.mask_text = lambda text: text
+        try:
+            resp_after = dp.handle_request({"subcommand": "logs", "target": "web"}, cfg(), run=run)
+        finally:
+            dp.mask_text = original
+
+        self.assertIn(
+            self.FAKE_SECRET, resp_after["stdout"],
+            "disabling mask_text() had no effect -- handle_request() is not actually calling it",
+        )
+
+    def test_passing_through_raw_inspect_output_lets_env_through(self):
+        # Simulates what would happen if build_inspect_result() stopped filtering and just returned docker's raw
+        # JSON (the exact regression this fix closes). inspect_stdout()'s fixed format cannot itself carry
+        # Config.Env -- that is the whole point of layer 1 -- so this fixture stands in for "whatever docker
+        # inspect would have printed before this fix," fed through the mutated code path. The fake secret is a
+        # bare array element, not a "key=value" pair, so mask_text()'s own patterns (layer 2) do not happen to
+        # catch it either -- this isolates what the field whitelist alone is responsible for.
+        raw_with_env = json.dumps({"Name": "/web", "Config": {"Env": [self.FAKE_SECRET]}})
+        run = FakeRun(returncode=0, stdout=inspect_stdout(), stderr="")
+
+        original = dp.build_inspect_result
+        dp.build_inspect_result = lambda stdout: {"raw": raw_with_env}
+        try:
+            resp_after = dp.handle_request({"subcommand": "inspect", "target": "web"}, cfg(), run=run)
+        finally:
+            dp.build_inspect_result = original
+
+        self.assertIn(
+            self.FAKE_SECRET, resp_after["stdout"],
+            "bypassing build_inspect_result()'s field whitelist had no effect on the response",
+        )
+
+
+@unittest.skipUnless(shutil.which("perl") and os.access(REAL_MASK, os.X_OK), "perl or secret-guard/mask unavailable")
+class MaskPortMatchesSecretGuard(unittest.TestCase):
+    """mask_text() is a port of secret-guard/mask's own regexes (see its docstring for why a port and not a
+    subprocess call to the Perl script). This pins the two together: a change to one not mirrored in the other
+    shows up here as a mismatch, instead of silently drifting apart."""
+
+    FIXTURES = [
+        "token=abcdef1234567890\n",
+        "Authorization: Bearer abc.def.ghijklmnop\n",
+        "API_KEY: 'sk-ant-abcdefghij1234567890'\n",
+        "postgres://user:hunter2pass@db:5432/app\n",
+        "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0."
+        "dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U\n",
+        "-----BEGIN RSA PRIVATE KEY-----\nMIIBOgIBAAJBAK...\n-----END RSA PRIVATE KEY-----\n",
+        "plain line with nothing secret\n",
+        "DATABASE_PASSWORD=hunter2verysecret\n",
+        "ghp_abcdefghijklmnopqrstuvwxyz0123456789\n",
+        "X-Api-Key: abcdef1234567890\n",
+        "curl -u admin:hunter2secret https://x\n",
+        "--token mysecrettoken1234\n",
+    ]
+
+    def test_python_port_matches_perl_mask(self):
+        for fixture in self.FIXTURES:
+            proc = subprocess.run([REAL_MASK], input=fixture, capture_output=True, text=True, timeout=5)
+            self.assertEqual(dp.mask_text(fixture), proc.stdout, f"mismatch on {fixture!r}")
 
 
 class EndToEndOverRealSocket(unittest.TestCase):
