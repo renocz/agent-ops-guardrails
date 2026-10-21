@@ -104,6 +104,21 @@ busy/held snapshot's destroy failure raise an uncaught exception and abort the w
 every other (otherwise eligible) snapshot undeleted. It now catches a per-target failure, reports
 it to stderr, keeps purging the rest, and exits 1 only if at least one target failed.
 
+A later owner review (21/10) found a second gap this tier's fakes did not yet cover: the LVM
+backend ran `lvcreate -s` with no size on every origin, which only works for a thin-provisioned LV
+— against a classic (non-thin) one, real `lvcreate` demands an explicit size and fails. The owner's
+own host is mostly ZFS with LVM thin on a couple of containers, but also has one classic LVM volume
+this kit would have failed against with no clear reason why. `Lvm.create_snapshot` now checks `lvs
+-o lv_layout,pool_lv` before ever calling `lvcreate` and refuses with a named exception
+(`LvmNotThinProvisioned`) on a classic origin or on any `lvs` output it cannot parse — fail-closed,
+never "probably fine". `test_fixtures/fakebin/lvs` and both test tiers were extended to exercise a
+thin origin (creates), a classic origin (refuses, `lvcreate` never runs), and unparseable `lvs`
+output (refuses). **This was verified only against the fake `lvs`/`lvcreate` processes below, same
+as the rest of this tier — no real LVM thin pool or classic volume was available to confirm the real
+`lvs -o lv_layout,pool_lv` output against a genuine thin or classic LV; that is exactly the kind of
+gap step 2 of the checklist below exists to close, and is now worth doing for both an LVM thin and a
+classic volume, not just a thin one.**
+
 **What Tier 3 does *not* prove**, however realistic the fake binaries are: that the real `zfs`/
 `lvcreate`/`lvremove` command-line syntax used here is accepted by a real pool/VG, that a real
 `usage_percent()` reading reflects real disk usage, or that ZFS's and LVM's own locking/retry
@@ -123,8 +138,15 @@ throwaway names, never anything from a real deployment.
    --show /tmp/sg-check.img` → note the loop device.
 2. **ZFS path** (needs a kernel with `zfs.ko` loadable): `zpool create sgcheck <loopdev>`, then
    point `config.json` at `"backend": "zfs", "dataset": "sgcheck"`.
-   **LVM path** (needs `dm_mod`): `pvcreate <loopdev> && vgcreate sgcheck-vg <loopdev> && lvcreate
-   -n sgcheck-lv -L 500M sgcheck-vg`, then `"backend": "lvm", "dataset": "sgcheck-vg/sgcheck-lv"`.
+   **LVM path** (needs `dm_mod`): the gate's LVM backend only supports a **thin-provisioned**
+   origin (see above) — `pvcreate <loopdev> && vgcreate sgcheck-vg <loopdev> && lvcreate --type
+   thin-pool -n sgcheck-pool -L 400M sgcheck-vg && lvcreate --type thin -n sgcheck-lv -V 300M
+   --thinpool sgcheck-pool sgcheck-vg`, then `"backend": "lvm", "dataset":
+   "sgcheck-vg/sgcheck-lv"`. Also create one **classic** LV in the same VG (`lvcreate -n
+   sgcheck-classic -L 100M sgcheck-vg`) and, once through step 4, point a second, throwaway
+   `config.json` at `"sgcheck-vg/sgcheck-classic"` and confirm the gate refuses it with
+   `LvmNotThinProvisioned` instead of calling `lvcreate` — this is the one thing this pass's fake
+   `lvs` cannot prove, since nothing here has run against a real thin pool or classic volume yet.
 3. **Put a marker file where the dataset/LV is actually mounted**, so step 6 has something to
    restore: e.g. `echo hello > /<mountpoint>/one-service/data.txt` for a service you name yourself.
 4. **Run the real request/host round trip**: `request-snapshot.sh <requests_dir> <states_dir>` (as

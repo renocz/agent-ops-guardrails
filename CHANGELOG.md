@@ -6,6 +6,19 @@ One version scheme: **a repository tag per release**. Components have no version
 
 Next: finish the block-mode trial (started 12/10/2026, after the end-to-end dry run of refusal, approval, expiry, replay and a Telegram outage) -- a few days of varied real work, no deadlock, an acceptable number of cards -- then v1.0.
 
+- **snapshot-gate: the LVM backend now refuses a classic (non-thin) volume instead of failing opaquely
+  (owner review, 21/10).** `Lvm.create_snapshot` always ran `lvcreate -s` with no size, which LVM only
+  accepts for a thin-provisioned origin; against a classic LV it would fail with no clear explanation,
+  and the owner's own host mixes LVM thin (two containers) with one classic LVM volume this backend
+  would have hit. `Lvm.create_snapshot` now checks `lvs --noheadings -o lv_layout,pool_lv` before ever
+  calling `lvcreate`, and refuses (`LvmNotThinProvisioned`) on a classic origin or on any unparseable
+  `lvs` output — fail-closed, never "probably fine". No size option and no second LVM backend were
+  added; a classic volume is simply out of scope for this backend. Extended the fake `lvs` fixture and
+  both test tiers (`test_backend_commands.py`'s `subprocess.run` mock, `test_fakebin_subprocess.py`'s
+  real fake-binary exec) to cover a thin origin creating normally, a classic origin refusing without
+  `lvcreate` ever running, and unparseable `lvs` output refusing the same way. **Not verified against a
+  real LVM thin pool or classic volume** — see `docs/snapshot-gate-real-disk-testing.md` for why none
+  exists in this environment, and the updated manual checklist step that now covers both.
 - **snapshot-gate: the fake `zfs`/`vgs`/`lvs`/`lvcreate`/`lvremove` run on stock macOS and under dash (20/10).**
   Running the suite on a Mac (system Python 3.9, `/bin/bash` 3.2) made 3 tests of `test_fakebin_subprocess.py`
   fail ("bad array subscript": a negative array subscript needs bash 4.3+). It was a fixture-only defect:

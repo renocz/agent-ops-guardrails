@@ -74,7 +74,20 @@ agent                    host (triggered by a path unit / WatchPaths job)
 `create_snapshot`) — **none of them has a destroy method**:
 
 - **Zfs** — `zfs list`/`zfs snapshot` on a configured dataset.
-- **Lvm** — `vgs`/`lvs`/`lvcreate -s` on a configured `vg/lv`.
+- **Lvm** — `vgs`/`lvs`/`lvcreate -s` on a configured `vg/lv`. **Thin-provisioned origins only.**
+  `lvcreate -s` with no size (what this backend always runs) only works for a thin-provisioned LV; on
+  a classic (non-thin) LV it needs an explicit size, which this kit deliberately never supplies. Before
+  ever calling `lvcreate`, the backend checks `lvs --noheadings -o lv_layout,pool_lv <vg/lv>` and
+  refuses with `LvmNotThinProvisioned` if the origin is classic, or if that check's own output can't be
+  parsed (fail-closed, never "probably fine"). Example on a classic origin:
+  ```
+  backend 'lvm' only supports thin-provisioned volumes, and 'vg/data' is a classic (non-thin) logical
+  volume; lvcreate -s on a classic LV needs an explicit size, which this kit never supplies, so
+  refusing to create a snapshot.
+  ```
+  There is no size option and no second LVM backend for classic volumes — mix a thin pool and classic
+  volumes on the same host, and point this kit only at the thin ones; snapshot a classic volume some
+  other way.
 - **Dir** — a directory of empty files standing in for snapshots. This is both the dry-run backend and the
   fixture every test in this kit uses; no root, no real storage, needed to exercise it.
 
