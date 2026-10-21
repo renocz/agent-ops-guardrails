@@ -42,16 +42,21 @@ prevent — the opposite of what this mechanism is for.
 
 ## Item 2 — `agent_uids` still lists both users after the last reinstall
 
-[docs/deploy-keeper-server.md](deploy-keeper-server.md)#2.2's known trap: any `install-keeper.sh --apply` rerun
-silently drops `keeper-update`'s uid back out of `agent_uids`. Before every switch to block mode:
+`install-keeper.sh` unions the uids it resolves from `--agent-user` into any `agent_uids` already in
+`/etc/keeper/config.json` (fixed 21/10/2026, see `CHANGELOG.md` and
+[docs/deploy-keeper-server.md](deploy-keeper-server.md)#2.2) — a reinstall that only re-specifies `keeper-agent`
+no longer drops `keeper-update`. Confirm it held on this real host, not just in the installer's own tests, before
+every switch to block mode:
 
 ```sh
 python3 -m json.tool /etc/keeper/config.json | grep -A3 agent_uids
 ```
 
-**Pass:** two entries. **Fail:** redo the snippet in deploy-keeper-server.md §2.2, restart `keeper`, recheck.
-`keeper/check-keeper-server.sh` also checks this, but check it yourself right before flipping to block mode —
-a check run an hour before a reinstall is stale the moment the reinstall happens.
+**Pass:** two entries. **Fail:** something on this host still only has one `--agent-user`, or
+`--replace-agent-uids` was passed without meaning to — rerun §2.1's command with both `--agent-user` flags
+(without `--replace-agent-uids`), restart `keeper`, recheck. `keeper/check-keeper-server.sh` also checks this,
+but check it yourself right before flipping to block mode — a check run an hour before a reinstall is stale the
+moment the reinstall happens.
 
 ## Item 3 — standing plans launch only scripts the agent cannot modify
 

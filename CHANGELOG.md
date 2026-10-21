@@ -4,6 +4,29 @@ One version scheme: **a repository tag per release**. Components have no version
 
 ## Unreleased (towards v1.0)
 
+- **`install-keeper.sh`: `--agent-user` is repeatable, and a reinstall no longer silently drops a second agent
+  from `agent_uids` (owner review of the server deployment entry below, 21/10/2026).** The bug: every `--apply`
+  wrote `agent_uids` as a single-element list containing whichever `--agent-user` that run happened to pass, so
+  reinstalling a two-user topology (§2.2 of `docs/deploy-keeper-server.md`, the shared assistant/morning user plus
+  the separate update-timer user) for any ordinary reason -- a new `--hook-timeout`, a new `--lang`, a newer
+  `keeperd.py` -- quietly took the second user's socket access away. Fixed:
+  - `--agent-user` can be given more than once; `agent_uids` holds each resolved uid, de-duplicated, in the order
+    given, and every one of those users is added to the `keeperclients` group (additively, every run). A
+    nonexistent `--agent-user` is refused before anything is written, same as before.
+  - A reinstall **unions** the uids it resolves into whatever `agent_uids` already holds in
+    `/etc/keeper/config.json`, instead of replacing the list -- the general "a reinstall merges, never silently
+    overwrites" rule this repo already applies to the rest of the config file (PR #20) now also covers this key.
+    The install's own output names what was added versus already present, in both dry and real runs, so the
+    merge is never silent. `--replace-agent-uids` is the explicit opt-out, for when the list should become
+    exactly this run's `--agent-user`s.
+  - `keeper/test_keeper.py`'s `InstallerConfigMerge` gained the coverage (two users, a reinstall naming only one,
+    `--replace-agent-uids`, a nonexistent user, the same user twice, the dry-run message), mutation-checked
+    against a sibling script where the union is replaced by a plain overwrite.
+  - `docs/deploy-keeper-server.md` §2.2 and `docs/keeper-server-dry-run.md`'s item 2, previously the by-hand
+    workaround for this gap, are rewritten: the two-user install is now one `install-keeper.sh` command with two
+    `--agent-user` flags, and no by-hand `python3 -c '...'` step survives reinstalls to be forgotten.
+  No behavior changed for an install with a single `--agent-user`, which is still the common case.
+
 - **Server deployment of the keeper, documented and checkable, not yet applied anywhere (21/10/2026).**
   `docs/deploy-keeper-server.md` turns `docs/design-keeper-server.md`'s decisions (two non-root users, the Docker
   proxy, standing plans, `KEEPER_ACTOR`) into exact commands, each with an expected result and a rollback;
@@ -14,12 +37,11 @@ One version scheme: **a repository tag per release**. Components have no version
   an out-of-plan command is actually refused) that degrades to a clean SKIP, never a crash or a FAIL, on however
   much of the install exists yet; `keeper/test_check_keeper_server.sh` checks that it never writes anything and
   never crashes. Two real traps found by writing and running these against this repo's own test host, not
-  guessed: `install-keeper.sh`'s `agent_uids` key is silently reset to one entry by every reinstall, so a
-  two-user topology needs that step redone each time (documented, not changed here -- changing the installer's
-  own merge behavior is a separate decision); and Docker Engine ships its own, unrelated binary also named
-  `docker-proxy`, an exact basename collision with this kit's agent-facing wrapper that depends on `PATH` order
-  to resolve correctly (now checked for and warned about). No code from `keeper/` or `docker-proxy/`'s own
-  daemons/clients changed, and nothing in this entry was run with `--apply` against a real host.
+  guessed: `install-keeper.sh`'s `agent_uids` key was silently reset to one entry by every reinstall (fixed
+  above, same day); and Docker Engine ships its own, unrelated binary also named `docker-proxy`, an exact
+  basename collision with this kit's agent-facing wrapper that depends on `PATH` order to resolve correctly (now
+  checked for and warned about). No code from `keeper/` or `docker-proxy/`'s own daemons/clients changed, and
+  nothing in this entry was run with `--apply` against a real host.
 
 - **docker-proxy: `inspect` and `logs` no longer hand the agent raw secrets (owner review of PR #21, 21/10/2026).**
   `docker inspect` includes a container's entire environment verbatim (`Config.Env`) -- API keys, database

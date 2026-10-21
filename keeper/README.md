@@ -128,8 +128,15 @@ for a real server (two non-root users, the Docker proxy, the sudoers allowlist, 
 sudo ./install-keeper.sh --agent-user you --owner-id <id> --apply [--observe]          # real install
 ```
 
-Options worth knowing: `--observe` (log only, block nothing), `--lang fr` (what you read on Telegram in French, default
-`en`), `--safe-git-repo DIR` (repeatable, see the limits below).
+`--agent-user` is repeatable — once per non-root user that must reach keeperd's socket (a second, unattended
+actor on the same host, say). Each one is added to the `keeperclients` group and its uid lands in `agent_uids`.
+A reinstall **unions** the uids it resolves into whatever `agent_uids` already holds (never a silent drop of a
+uid an earlier run, or a hand edit, put there); pass `--replace-agent-uids` to set `agent_uids` to exactly this
+run's `--agent-user` list instead. See "Emergency rollback" below for the general reinstall-merge rule this
+follows, and `docs/deploy-keeper-server.md` §2 for the two-user server topology this exists for.
+
+Other options worth knowing: `--observe` (log only, block nothing), `--lang fr` (what you read on Telegram in
+French, default `en`), `--safe-git-repo DIR` (repeatable, see the limits below).
 
 Create the keeper bot with BotFather first. With `--apply`, the installer asks for its token on the terminal (hidden
 input); the token is never passed as an argument. If managed settings already exist, the installer merges into them: it puts
@@ -268,7 +275,10 @@ To hand control back fast (do this as a human with sudo; the agent cannot):
 A reinstall **merges** into an existing `/etc/keeper/config.json` instead of overwriting it: only the keys this run's
 own options drive (`--lang`, `--safe-git-repo`, `--hook-timeout`, …) are refreshed, and any key you edited by hand --
 `mode` above, `max_proposals_per_hour`, a key a newer script version adds -- survives untouched. With no existing
-file, the script writes its usual defaults, unchanged.
+file, the script writes its usual defaults, unchanged. `agent_uids` follows the same rule but one step further: a
+reinstall **unions** this run's `--agent-user` uids into the existing list rather than refreshing it outright (fixed
+21/10/2026 -- it used to refresh it to a single uid every time, dropping any other user silently); `--replace-agent-uids`
+opts out and sets it to exactly this run's list.
 
 ## Tests
 
@@ -316,6 +326,13 @@ cover:
   reinstall is idempotent and upgrades an entry that has none, a `--wait-max` that does not fit under
   `--hook-timeout` is refused with nothing written, and keeperd clamps `--wait` under the timeout. Mutation-checked:
   the clamp removed, the installer's refusal removed, and the in-place upgrade removed, each makes tests fail.
+- `--agent-user` repeated and reinstalled (`InstallerConfigMerge`): two agent users land in `agent_uids` in order
+  with no duplicate, a reinstall naming only one of them still keeps the other (the regression this fixed --
+  every `--apply` used to reset `agent_uids` to one entry), `--replace-agent-uids` does drop what this run did not
+  list, a nonexistent `--agent-user` fails before anything is written, and the dry run reports what it would add
+  or keep without writing anything. Mutation-checked: a sibling script that skips the merge entirely (own class)
+  or that replaces the union with a plain overwrite (same class as the general config-merge mutation) each make
+  the reinstall-keeps-the-other test fail.
 
 `python3 test_block_dryrun.py` adds the same `--wait` scenarios end to end, through the real hook subprocess: the
 Bash tool call stays blocked on the open socket while the card is still pending, and returns once the owner's
