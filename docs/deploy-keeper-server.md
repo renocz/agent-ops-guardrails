@@ -17,8 +17,8 @@ anything you commit back to this repository.
 **Who does what, in order:**
 
 1. Two non-root Unix users (§1 below).
-2. `keeperd`, its hook, and the config — including the two-user caveat the installer doesn't handle by itself
-   (§2).
+2. `keeperd`, its hook, and the config for both of them at once — `install-keeper.sh` takes a repeated
+   `--agent-user` and merges reinstalls, so this topology no longer needs a by-hand step (§2).
 3. The `KEEPER_ACTOR` wiring for the unattended (morning) systemd unit — the one piece of this whole design that
    is **assumed, not verified**, from this session (§3).
 4. The Docker proxy (§4).
@@ -63,63 +63,58 @@ keeper-agent docker`.
 
 ## 2. `keeperd`, the hook, and the config
 
-### 2.1 Install for the shared user first
+### 2.1 Install for both agent users at once
+
+`--agent-user` is repeatable: pass it once for each non-root user that must reach keeperd's socket. For the
+two-user topology from §1, that is both `keeper-agent` and `keeper-update`:
 
 ```sh
 sudo /path/to/agent-ops-guardrails/keeper/install-keeper.sh \
-  --agent-user keeper-agent --owner-id <your Telegram numeric id> --apply
+  --agent-user keeper-agent --agent-user keeper-update --owner-id <your Telegram numeric id> --apply
 ```
 
 (Add `--observe` here if you want to start logging before anything is ever blocked — recommended, and §6/the dry
 run checklist assumes you did.)
 
 **Expected result:** the script's own `-- 1` through `-- 6` sections each print what they did (`id keeper 2>&1`
-now resolves, `getent group keeperclients` lists `keeper-agent` and `keeper`); `/etc/keeper/config.json` exists,
-mode 640, owner `root:keeper`, and its `agent_uids` key is a one-element list containing `keeper-agent`'s uid
-(`id -u keeper-agent`); `systemctl status keeper` is `active (running)`.
+now resolves, `getent group keeperclients` lists `keeper-agent`, `keeper-update` and `keeper`);
+`/etc/keeper/config.json` exists, mode 640, owner `root:keeper`, and its `agent_uids` key holds **two** entries,
+`keeper-agent`'s uid and `keeper-update`'s (`id -u keeper-agent`, `id -u keeper-update`), in that order;
+`systemctl status keeper` is `active (running)`.
 
 **Rollback:** this step alone, cleanly: `sudo systemctl disable --now keeper`, `sudo rm -rf /opt/agent-guardrails
 /etc/keeper /var/lib/keeper`, restore `/etc/claude-code/managed-settings.json` from
 `managed-settings.json.bak-keeper` if one was written, `sudo userdel -r keeper` (the `keeper` service account the
-installer created, not `keeper-agent`).
+installer created, not `keeper-agent`/`keeper-update`).
 
-### 2.2 Add the second agent user by hand — the installer does not do this
+### 2.2 Reinstalling: `agent_uids` is merged, never silently reduced
 
-**This is the one gap `install-keeper.sh` has for a two-user topology, stated plainly so it isn't missed:** the
-installer always writes `agent_uids` as a **single-element list containing whichever `--agent-user` you passed
-it**, every time it runs (see `install-keeper.sh`'s own config-merge script: `agent_uids` is one of the keys a
-run always refreshes, never one it leaves alone). Design doc §5 is correct that the config format already
-supports a list — but nothing in the installer ever puts a second uid into it. You do that by hand:
+Fixed (21/10/2026 — see `CHANGELOG.md`): earlier versions of `install-keeper.sh` always wrote `agent_uids` as a
+**single-element list containing whichever `--agent-user` was passed that run**, so a plain reinstall after §2.1
+— a new `--hook-timeout`, a new `--lang`, picking up a newer `keeperd.py` — silently dropped `keeper-update` from
+the list even though nothing asked for that. That is no longer true: a reinstall **unions** the uids it resolves
+from this run's `--agent-user` options into whatever `agent_uids` already holds, and the group membership
+(`usermod -aG keeperclients …`) is applied to every `--agent-user` on every run, additively.
+
+So the ordinary case needs nothing special: reinstalling with only `--agent-user keeper-agent` (forgetting
+`keeper-update` on the command line) still leaves both uids in `agent_uids` afterwards. Only pass
+`--replace-agent-uids` when you deliberately want `agent_uids` to become exactly this run's `--agent-user` list
+(dropping any uid not named this time) — for example, decommissioning `keeper-update` for good:
 
 ```sh
-sudo usermod -aG keeperclients keeper-update
-sudo python3 -c '
-import json
-p = "/etc/keeper/config.json"
-cfg = json.load(open(p))
-update_uid = int(__import__("subprocess").check_output(["id", "-u", "keeper-update"]).strip())
-if update_uid not in cfg["agent_uids"]:
-    cfg["agent_uids"].append(update_uid)
-json.dump(cfg, open(p, "w"), indent=1)
-'
-sudo systemctl restart keeper
+sudo /path/to/agent-ops-guardrails/keeper/install-keeper.sh \
+  --agent-user keeper-agent --owner-id <your Telegram numeric id> --replace-agent-uids --apply
 ```
 
-**Expected result:** `python3 -m json.tool /etc/keeper/config.json` shows `agent_uids` with **two** entries;
-`getent group keeperclients` now lists `keeper-agent`, `keeper-update`, and `keeper`; `systemctl status keeper`
-is `active (running)` again after the restart (it must reload the config to pick up the new uid — `keeperd`
-reads its config at start-up only, same as the mode file).
-
-**Known trap, every time you reinstall:** running `install-keeper.sh --apply` again (for any reason — a new
-`--hook-timeout`, a new `--lang`, picking up a newer `keeperd.py`) **silently reverts `agent_uids` back to one
-entry**, because that key is one the installer always drives. Redo the snippet above after *every* reinstall,
-and check it (`python3 -m json.tool /etc/keeper/config.json | grep -A2 agent_uids`) before assuming the update
-timer is still covered. `keeper/check-keeper-server.sh` (§6) checks this for you so it isn't a silent regression.
+**Expected result (ordinary reinstall, no `--replace-agent-uids`):** `python3 -m json.tool /etc/keeper/config.json
+| grep -A3 agent_uids` still shows both uids; the install's own `-- 3.` section prints an `agent_uids: kept …` /
+`agent_uids: also kept, untouched by this run …` line naming them, not a silent change. `keeper/check-keeper-server.sh`
+(§6) also checks the entry count, so a topology that does regress shows up as a warning, not silently.
 
 ### 2.3 Standing plans and the unattended actor, by hand
 
 Neither `standing_plans` nor `unattended_actors` is a reinstall-driven key (the installer never writes either),
-so this edit survives reinstalls on its own — unlike §2.2's `agent_uids`.
+so this edit survives reinstalls on its own, same as `agent_uids` now does since §2.2's fix.
 
 ```sh
 sudo python3 -c '

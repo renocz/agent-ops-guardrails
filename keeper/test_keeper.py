@@ -1058,29 +1058,79 @@ class InstallerConfigMerge(unittest.TestCase):
         self.assertEqual((doc["lang"], doc["hook_timeout_sec"], doc["wait_max_sec"]), ("en", 60, 50))
         self.assertNotIn("max_proposals_per_hour", doc)
 
+    # --- --agent-user is repeatable; agent_uids is the de-duplicated union, never silently reduced -----------------
+    # Owner review, 21/10: install-keeper.sh used to write agent_uids as a single-element list containing whichever
+    # --agent-user was passed, every --apply -- so a reinstall of a two-user server topology (two non-root agents,
+    # see docs/deploy-keeper-server.md) silently dropped the second user's uid. --agent-user now accepts several
+    # (--agent-user a --agent-user b), and a reinstall UNIONS the uids it resolves into whatever agent_uids already
+    # holds; --replace-agent-uids opts out and sets agent_uids to exactly this run's list.
+
+    @staticmethod
+    def uid_of(user):
+        return int(subprocess.check_output(["id", "-u", user]).strip())
+
+    @unittest.skipUnless(subprocess.run(["id", "daemon"], capture_output=True).returncode == 0, "needs user daemon")
+    def test_two_agent_users_land_in_agent_uids_in_order_no_duplicate(self):
+        prefix, r = self.install(self.SCRIPT, None, "--agent-user", "daemon")   # base --agent-user nobody + daemon
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self.config(prefix)["agent_uids"], [self.uid_of("nobody"), self.uid_of("daemon")])
+
+    @unittest.skipUnless(subprocess.run(["id", "daemon"], capture_output=True).returncode == 0, "needs user daemon")
+    def test_reinstall_with_only_one_of_two_users_keeps_the_other(self):
+        prefix, r = self.install(self.SCRIPT, None, "--agent-user", "daemon")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        _, r2 = self.install(self.SCRIPT, prefix)                 # reinstall: only the base --agent-user nobody
+        self.assertEqual(r2.returncode, 0, r2.stderr)
+        self.assertEqual(self.config(prefix)["agent_uids"], [self.uid_of("nobody"), self.uid_of("daemon")])
+
+    @unittest.skipUnless(subprocess.run(["id", "daemon"], capture_output=True).returncode == 0, "needs user daemon")
+    def test_replace_agent_uids_drops_what_this_run_did_not_list(self):
+        prefix, r = self.install(self.SCRIPT, None, "--agent-user", "daemon")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        _, r2 = self.install(self.SCRIPT, prefix, "--replace-agent-uids")      # only nobody, and --replace
+        self.assertEqual(r2.returncode, 0, r2.stderr)
+        self.assertEqual(self.config(prefix)["agent_uids"], [self.uid_of("nobody")])
+
+    def test_nonexistent_agent_user_fails_before_any_write(self):
+        prefix = tempfile.mkdtemp(prefix="kcfg", dir="/tmp")
+        self.addCleanup(shutil.rmtree, prefix, ignore_errors=True)
+        r = subprocess.run(["bash", self.SCRIPT, "--agent-user", "nobody", "--agent-user", "no-such-user-xyz",
+                            "--owner-id", "1", "--prefix", prefix], capture_output=True, text=True, timeout=60)
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("no such user", r.stderr)
+        self.assertEqual(os.listdir(prefix), [])                  # nothing was written, not even partially
+
+    def test_the_same_agent_user_passed_twice_is_not_duplicated(self):
+        prefix, r = self.install(self.SCRIPT, None, "--agent-user", "nobody")   # base nobody + nobody again
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self.config(prefix)["agent_uids"], [self.uid_of("nobody")])
+
+    def test_dry_run_reports_the_merge_and_writes_nothing(self):
+        config_path = "/etc/keeper/config.json"                  # true dry run: no --prefix, no --apply
+        existed_before = os.path.exists(config_path)
+        r = subprocess.run(["bash", self.SCRIPT, "--agent-user", "nobody", "--owner-id", "1"],
+                            capture_output=True, text=True, timeout=60)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("would write: /etc/keeper/config.json", r.stdout)
+        self.assertRegex(r.stderr, r"agent_uids: (added|kept|\[)")
+        self.assertEqual(os.path.exists(config_path), existed_before)       # dry run touched nothing real
+
 
 @unittest.skipUnless(shutil.which("bash") and os.path.exists("/usr/bin/python3") and
                      subprocess.run(["id", "nobody"], capture_output=True).returncode == 0, "needs bash, /usr/bin/python3, user nobody")
 class InstallerConfigMergeMutation(InstallerConfigMerge):
     """Mutation check: run the exact tests above (inherited unchanged) against a sibling copy of install-keeper.sh
-    that reinstates the original bug -- a full overwrite of config.json, ignoring any existing file -- and require
-    every one of them to fail. The mutant is written INSIDE keeper/ (not a separate tree) so $HERE/$REPO in the
-    script still resolve to the real keeper_client.py, keeperd.py, go_gate.py and secret_guard.py."""
+    that reinstates the original bug -- a full overwrite of config.json, ignoring any existing file (agent_uids
+    included) -- and require every one of them to fail. The mutant is written INSIDE keeper/ (not a separate tree)
+    so $HERE/$REPO in the script still resolve to the real keeper_client.py, keeperd.py, go_gate.py and
+    secret_guard.py."""
 
     OLD = '''cur = {}
 if os.path.exists(existing):
     cur = json.load(open(existing))          # unreadable JSON: stop here, the install fails before writing
-cur.update({"owner_id": int(o), "chat_id": int(c), "agent_uids": [int(uid)], "agent_home": home,
-            "client_group": grp, "socket": run + "/keeper.sock", "state_dir": "/var/lib/keeper",
-            "bot_token_file": "/etc/keeper/bot.token", "mode": mode, "lang": lang,
-            "hook_timeout_sec": int(hook_timeout), "wait_max_sec": int(wait_max),
-            "safe_git_repos": safe_repos})
-print(json.dumps(cur, indent=1))'''
-    NEW = '''print(json.dumps({"owner_id": int(o), "chat_id": int(c), "agent_uids": [int(uid)], "agent_home": home,
-                  "client_group": grp, "socket": run + "/keeper.sock", "state_dir": "/var/lib/keeper",
-                  "bot_token_file": "/etc/keeper/bot.token", "mode": mode, "lang": lang,
-                  "hook_timeout_sec": int(hook_timeout), "wait_max_sec": int(wait_max),
-                  "safe_git_repos": safe_repos}, indent=1))'''
+existing_uids = cur.get("agent_uids") or []'''
+    NEW = '''cur = {}
+existing_uids = []'''
 
     @classmethod
     def setUpClass(cls):
@@ -1107,6 +1157,10 @@ print(json.dumps(cur, indent=1))'''
     def test_an_unknown_key_from_a_future_script_version_survives_reinstall(self):
         with self.assertRaises(AssertionError):
             super().test_an_unknown_key_from_a_future_script_version_survives_reinstall()
+
+    def test_reinstall_with_only_one_of_two_users_keeps_the_other(self):
+        with self.assertRaises(AssertionError):
+            super().test_reinstall_with_only_one_of_two_users_keeps_the_other()
 
     # Not mutated: the fresh-install path (no existing file) never went through the merge, so it still passes.
     # Kept here (inherited unchanged, run again) to prove the mutant is otherwise a working installer, not broken

@@ -159,7 +159,7 @@ if [ -r "$CONFIG" ]; then
     if [ "$COUNT" -ge 2 ]; then
       pass "agent_uids has $COUNT entries (two-user topology intact: $AGENT_UIDS)"
     elif [ "$COUNT" -eq 1 ]; then
-      warn "agent_uids has only 1 entry ($AGENT_UIDS) -- if keeper-update should also be covered, this is docs/deploy-keeper-server.md §2.2's known trap: redo that step (it is NOT preserved across a plain reinstall)"
+      warn "agent_uids has only 1 entry ($AGENT_UIDS) -- if keeper-update should also be covered, reinstall with a second --agent-user (install-keeper.sh now unions it into agent_uids; it is preserved across a plain reinstall since, see docs/deploy-keeper-server.md §2.2)"
     else
       skip "agent_uids content" "config has no agent_uids (or unreadable)"
     fi

@@ -6,7 +6,11 @@
 #                                                                       no service, no chown (to inspect the result)
 #   sudo ./install-keeper.sh --agent-user you --owner-id 12345 --apply      really installs (needs root)
 #
-# Options: --chat-id N (default: the owner id); --observe (log only, do not block); --lang en|fr (language of what the
+# Options: --agent-user is repeatable (one per non-root user that must reach keeperd's socket, e.g. a second,
+# unattended actor on the same host — see docs/deploy-keeper-server.md §2.2); a reinstall MERGES the uids it
+# resolves into any agent_uids already in /etc/keeper/config.json (union, never a silent drop of an existing uid).
+# --replace-agent-uids makes a reinstall set agent_uids to exactly this run's --agent-user list instead of merging.
+# --chat-id N (default: the owner id); --observe (log only, do not block); --lang en|fr (language of what the
 # human reads on Telegram, default en; what the agent reads stays English); --safe-git-repo DIR (repeatable: a repo
 # where a git read verb is trusted; without any, every git read needs a plan — see K6 in docs/design-keeper.md).
 # The hook entry also gets "onFailure": "block" (measured 20/10/2026: without it a timed-out PreToolUse hook lets the call run).
@@ -19,7 +23,8 @@ set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 REPO="$(cd "$HERE/.." && pwd)"
-MODE=dry PREFIX="" AGENT="" OWNER="" CHAT="" GATE_MODE=block UI_LANG=en
+MODE=dry PREFIX="" OWNER="" CHAT="" GATE_MODE=block UI_LANG=en
+AGENTS=() REPLACE_AGENT_UIDS=0
 HOOK_TIMEOUT=60 WAIT_MAX=50   # hook timeout must be >= WAIT_MAX + HOOK_MARGIN (keeperd.py's HOOK_TIMEOUT_MARGIN_SEC)
 HOOK_MARGIN=10
 SAFE_REPOS=()                 # K6: repos where a git read verb is trusted (empty = every git read needs a plan)
@@ -27,7 +32,8 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --apply) MODE=apply ;;
     --prefix) MODE=prefix; PREFIX="${2%/}"; shift ;;
-    --agent-user) AGENT="$2"; shift ;;
+    --agent-user) AGENTS+=("$2"); shift ;;          # repeatable: one per non-root user that must reach the socket
+    --replace-agent-uids) REPLACE_AGENT_UIDS=1 ;;   # reinstall: set agent_uids to exactly this run's list (default: merge)
     --owner-id) OWNER="$2"; shift ;;
     --chat-id) CHAT="$2"; shift ;;
     --safe-git-repo) SAFE_REPOS+=("$2"); shift ;;       # repeatable; absolute path to a repo the agent cannot tamper with
@@ -35,22 +41,36 @@ while [ $# -gt 0 ]; do
     --lang) UI_LANG="$2"; shift ;;
     --hook-timeout) HOOK_TIMEOUT="$2"; shift ;;      # seconds Claude Code lets the keeper hook run (written into the hook entry)
     --wait-max) WAIT_MAX="$2"; shift ;;              # longest keeper-propose --wait, seconds (config key wait_max_sec)
-    -h|--help) sed -n '2,14p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,15p' "$0"; exit 0 ;;
     *) echo "unknown option: $1" >&2; exit 2 ;;
   esac
   shift
 done
-[ -n "$AGENT" ] && [ -n "$OWNER" ] || { echo "need --agent-user and --owner-id" >&2; exit 2; }
+[ ${#AGENTS[@]} -gt 0 ] && [ -n "$OWNER" ] || { echo "need --agent-user and --owner-id" >&2; exit 2; }
 [[ "$OWNER" =~ ^[0-9]+$ ]] || { echo "--owner-id must be a Telegram numeric id" >&2; exit 2; }
 CHAT="${CHAT:-$OWNER}"
 [[ "$HOOK_TIMEOUT" =~ ^[0-9]{1,5}$ && "$WAIT_MAX" =~ ^[0-9]{1,5}$ ]] || { echo "--hook-timeout and --wait-max must be whole seconds" >&2; exit 2; }
 [ "$HOOK_TIMEOUT" -ge 1 ] || { echo "--hook-timeout must be at least 1" >&2; exit 2; }
 [ $((WAIT_MAX + HOOK_MARGIN)) -le "$HOOK_TIMEOUT" ] || { echo "refusing: --hook-timeout ($HOOK_TIMEOUT) must be at least --wait-max ($WAIT_MAX) + $HOOK_MARGIN: a hook killed by its timeout does not block the tool call" >&2; exit 2; }
 case "$UI_LANG" in en|fr) ;; *) echo "--lang must be en or fr" >&2; exit 2 ;; esac
-[ "$AGENT" != root ] || { echo "refusing: the agent must not be root (see the design's precondition)" >&2; exit 2; }
-id "$AGENT" >/dev/null 2>&1 || { echo "no such user: $AGENT" >&2; exit 2; }
-AGENT_UID=$(id -u "$AGENT")
-AGENT_HOME=$(/usr/bin/python3 -c 'import pwd, sys; print(pwd.getpwnam(sys.argv[1]).pw_dir)' "$AGENT")
+# Every --agent-user is checked (not root, exists) before anything is written. AGENT_UIDS is the de-duplicated
+# list of their uids, in the order first seen (owner review, 20/10: a reinstall must union this into any existing
+# agent_uids, never reduce it -- see section 3 below -- so duplicates here must not inflate or reorder that list).
+AGENT_UIDS=()
+for AGENT in "${AGENTS[@]}"; do
+  [ "$AGENT" != root ] || { echo "refusing: the agent must not be root (see the design's precondition)" >&2; exit 2; }
+  id "$AGENT" >/dev/null 2>&1 || { echo "no such user: $AGENT" >&2; exit 2; }
+done
+for AGENT in "${AGENTS[@]}"; do
+  u=$(id -u "$AGENT")
+  dup=0
+  for seen in ${AGENT_UIDS[@]+"${AGENT_UIDS[@]}"}; do [ "$seen" = "$u" ] && { dup=1; break; }; done
+  [ "$dup" = 1 ] || AGENT_UIDS+=("$u")
+done
+# The primary (first) --agent-user is the interactive one whose $HOME the classifier protects (go-gate's own
+# "~/.claude/settings.json etc are the agent's" rule, see keeperd.py's load_gate): a second --agent-user (say, an
+# unattended update timer's own account) does not get its own agent_home -- there is only one in the config.
+AGENT_HOME=$(/usr/bin/python3 -c 'import pwd, sys; print(pwd.getpwnam(sys.argv[1]).pw_dir)' "${AGENTS[0]}")
 
 OS=$(uname -s)
 if [ "$OS" = Darwin ]; then
@@ -98,9 +118,10 @@ mkd() {                       # mkd <dir> <mode> <owner:group>
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 
-echo "== keeper install ($MODE) on $OS for agent user $AGENT (uid $AGENT_UID)"
+AGENTS_LIST="${AGENTS[*]}"
+echo "== keeper install ($MODE) on $OS for agent user(s): $AGENTS_LIST (uid(s): ${AGENT_UIDS[*]})"
 
-echo "-- 1. user $KUSER and group $GROUP (members: $AGENT, $KUSER)"
+echo "-- 1. user $KUSER and group $GROUP (members: $AGENTS_LIST, $KUSER)"
 if [ "$OS" = Darwin ]; then
   dscl . -read "/Groups/$GROUP" >/dev/null 2>&1 || run dseditgroup -o create "$GROUP"
   dscl . -read "/Groups/$KUSER" >/dev/null 2>&1 || run dseditgroup -o create "$KUSER"     # private group, no members
@@ -115,14 +136,18 @@ if [ "$OS" = Darwin ]; then
     run dscl . -create "/Users/$KUSER" NFSHomeDirectory /var/empty
     run dscl . -create "/Users/$KUSER" IsHidden 1
   fi
-  run dseditgroup -o edit -a "$AGENT" -t user "$GROUP"
+  for AGENT in "${AGENTS[@]}"; do
+    run dseditgroup -o edit -a "$AGENT" -t user "$GROUP"
+  done
   run dseditgroup -o edit -a "$KUSER" -t user "$GROUP"
 else
   getent group "$GROUP" >/dev/null || run groupadd --system "$GROUP"
   id "$KUSER" >/dev/null 2>&1 || run useradd --system --user-group --no-create-home --home-dir /nonexistent \
       --shell /usr/sbin/nologin "$KUSER"
   run usermod -a -G "$GROUP" "$KUSER"
-  run usermod -a -G "$GROUP" "$AGENT"
+  for AGENT in "${AGENTS[@]}"; do
+    run usermod -a -G "$GROUP" "$AGENT"               # additive only (-a): never drops a membership a past run granted
+  done
 fi
 
 echo "-- 2. root-owned code in $LIB (the agent cannot edit it)"
@@ -174,15 +199,47 @@ echo "-- 3. config, state and socket directory"
 # the file -- known to this script or not, a future version's key included -- is kept exactly as it is. This is
 # the only way a value the owner edited by hand after install (say max_proposals_per_hour, which the installer
 # never writes at all) survives the next --apply instead of silently reverting to a script default.
+#
+# agent_uids is the one key above that is itself a set the owner may have grown by hand (a second, unattended
+# actor added per docs/deploy-keeper-server.md's old §2.2) or through an earlier --agent-user list: a reinstall
+# UNIONS this run's resolved uids into whatever is already there instead of replacing it (owner review, 21/10 --
+# the bug this fixes: every --apply used to drop back to a single uid, silently removing the second user from a
+# two-user topology). --replace-agent-uids opts out of the union and sets agent_uids to exactly this run's list.
 EXISTING_CONFIG=/etc/keeper/config.json; [ "$MODE" = prefix ] && EXISTING_CONFIG="$PREFIX/etc/keeper/config.json"
-"$PY" - "$OWNER" "$CHAT" "$AGENT_UID" "$AGENT_HOME" "$GROUP" "$RUN_DIR" "$GATE_MODE" "$UI_LANG" "$HOOK_TIMEOUT" "$WAIT_MAX" "$EXISTING_CONFIG" \
-  ${SAFE_REPOS[@]+"${SAFE_REPOS[@]}"} > "$TMP/config.json" <<'PYEOF'
+"$PY" - "$OWNER" "$CHAT" "$AGENT_HOME" "$GROUP" "$RUN_DIR" "$GATE_MODE" "$UI_LANG" "$HOOK_TIMEOUT" "$WAIT_MAX" "$EXISTING_CONFIG" \
+  "$REPLACE_AGENT_UIDS" "${#AGENT_UIDS[@]}" "${AGENT_UIDS[@]}" ${SAFE_REPOS[@]+"${SAFE_REPOS[@]}"} > "$TMP/config.json" <<'PYEOF'
 import json, os, sys
-o, c, uid, home, grp, run, mode, lang, hook_timeout, wait_max, existing, *safe_repos = sys.argv[1:]
+o, c, home, grp, run, mode, lang, hook_timeout, wait_max, existing, replace_flag, n_uids = sys.argv[1:13]
+rest = sys.argv[13:]
+n_uids = int(n_uids)
+uids, safe_repos = [int(x) for x in rest[:n_uids]], rest[n_uids:]
 cur = {}
 if os.path.exists(existing):
     cur = json.load(open(existing))          # unreadable JSON: stop here, the install fails before writing
-cur.update({"owner_id": int(o), "chat_id": int(c), "agent_uids": [int(uid)], "agent_home": home,
+existing_uids = cur.get("agent_uids") or []
+note = []
+if replace_flag == "1":
+    final_uids = uids
+    dropped = [u for u in existing_uids if u not in final_uids]
+    note.append("agent_uids: replaced with %s (--replace-agent-uids)" % final_uids)
+    if dropped:
+        note.append("agent_uids: dropped (not in this run's --agent-user list) %s" % dropped)
+else:
+    added = [u for u in uids if u not in existing_uids]
+    kept_requested = [u for u in uids if u in existing_uids]
+    kept_other = [u for u in existing_uids if u not in uids]
+    final_uids = existing_uids + added
+    if added:
+        note.append("agent_uids: added %s" % added)
+    if kept_requested:
+        note.append("agent_uids: kept (already present) %s" % kept_requested)
+    if kept_other:
+        note.append("agent_uids: also kept, untouched by this run %s" % kept_other)
+    if not note:
+        note.append("agent_uids: %s" % final_uids)
+for line in note:
+    print("   " + line, file=sys.stderr)
+cur.update({"owner_id": int(o), "chat_id": int(c), "agent_uids": final_uids, "agent_home": home,
             "client_group": grp, "socket": run + "/keeper.sock", "state_dir": "/var/lib/keeper",
             "bot_token_file": "/etc/keeper/bot.token", "mode": mode, "lang": lang,
             "hook_timeout_sec": int(hook_timeout), "wait_max_sec": int(wait_max),
@@ -307,9 +364,14 @@ cat <<EOF
    - Restart every Claude Code session that was already open before this (re)install: a running session keeps the
      hooks it started with, so it will not pick up the keeper hook until restarted.
    - Remove go-gate's own PreToolUse/Stop/UserPromptSubmit hook from ~/.claude/settings.json (keeper replaces it).
-   - Check as $AGENT, each must FAIL: write /var/lib/keeper/state.json; edit $LIB/keeperd.py; rename $BASE; kill keeperd;
-     send {"op":"approve"} to the socket; set "disableAllHooks": true in ~/.claude/settings.json and see whether the
-     managed hook still runs (it must).
+   - The hook and the deny rules just written to $MANAGED are global and root-owned: identical for every
+     --agent-user, not one entry per user. Only the socket-level allow-list (agent_uids, below) and the
+     keeperclients group membership are per-user.
+   - Check as each of: $AGENTS_LIST -- each must FAIL: write /var/lib/keeper/state.json; edit $LIB/keeperd.py;
+     rename $BASE; kill keeperd; send {"op":"approve"} to the socket; set "disableAllHooks": true in
+     ~/.claude/settings.json and see whether the managed hook still runs (it must).
+   - agent_uids now holds: ${AGENT_UIDS[*]} (one per --agent-user above, merged with whatever was already in
+     /etc/keeper/config.json unless --replace-agent-uids was given -- see section 3's own output above).
    - The agent proposes with: $BIN/keeper-propose --scope "id=… ; targets=… ; actions=… ; ttl=60" --text "why"
    - On the keeper bot: /stop revokes every active and pending plan right now; /status shows the mode and what is
      active or pending; /plans [n] shows the last plan events; /summary [days] (alias /resume) shows the refusal/
