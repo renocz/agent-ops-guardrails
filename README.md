@@ -58,7 +58,7 @@ Two claims, and only the first is strong: the **approval cannot be forged** by t
 - **Stop secret leaks in Claude Code:** [secret-guard/README.md](secret-guard/README.md). Two files to install, plus a settings snippet.
 - **Measure real leaks, not pattern scores:** [leak-check/README.md](leak-check/README.md). It found 7 real leaks the pattern hook had missed. Its inventory covers 53% of what gitleaks flags, measured and broken down.
 - **Make the GO mechanical (experimental):** [go-gate/README.md](go-gate/README.md). Start with `simulate.py` on your own history, then a week in observe mode.
-- **Make the approval unforgeable (experimental):** [keeper/README.md](keeper/README.md), with the [design and threat model](docs/design-keeper.md). Its installer only does a dry run unless you pass `--apply`.
+- **Make the approval unforgeable (experimental):** [keeper/README.md](keeper/README.md), with the [design and threat model](docs/design-keeper.md). Its installer only does a dry run unless you pass `--apply`. Covering a root agent and a server with no human watching (standing plans): [docs/design-keeper-server.md](docs/design-keeper-server.md).
 - **Give a non-root agent filtered Docker access, never the `docker` group (experimental):** [docker-proxy/README.md](docker-proxy/README.md), design in [docs/design-keeper-server.md](docs/design-keeper-server.md) section 1. Its installer only does a dry run unless you pass `--apply`.
 - **The whole method and the incidents behind it:** [docs/method.md](docs/method.md).
 

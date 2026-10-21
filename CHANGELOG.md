@@ -18,6 +18,19 @@ One version scheme: **a repository tag per release**. Components have no version
   whitelist guard flips a refusal to an allow. Sudoers lines for `pct`/`systemctl` (design doc's option B) are left
   out of scope: they need the owner's real service/unit names, which this session cannot know.
 
+- **keeper installer: a reinstall now MERGES into an existing `/etc/keeper/config.json` instead of overwriting it
+  (20/10).** Rerunning `install-keeper.sh --apply` rewrote the whole file from the script's own defaults and
+  command-line options, so any key the owner had edited by hand after the first install -- `max_proposals_per_hour`
+  raised from 3 to 8 (owner review of PR #8), or `mode` set to `observe` for the emergency rollback in the README --
+  was silently lost on the next reinstall, reverting to the script's default. The script now reads the existing file
+  first (if any) and only sets the keys this run's own options drive (`owner_id`, `chat_id`, `agent_uids`,
+  `agent_home`, `client_group`, `socket`, `state_dir`, `bot_token_file`, `mode`, `lang`, `hook_timeout_sec`,
+  `wait_max_sec`, `safe_git_repos`); every other existing key -- known to this version of the script or not, a
+  future version's key included -- survives untouched, value and presence both. With no existing file, behavior is
+  unchanged (the shipped defaults are written). Tests: a hand-edited key the installer never writes (`max_proposals_
+  per_hour`) survives a reinstall with the other installer-owned keys still correct, an unknown key simulating a
+  future script version survives too, the no-existing-file path is unchanged; mutation-checked (reinstating the old
+  full-overwrite write in a sibling copy of the script makes both new tests fail).
 - **keeper installer: the hook entry gets `"onFailure": "block"`, and the useless `Write(...)` deny rules go (20/10).**
   The owner ran a real test on Claude Code 2.1.302 (a hook that sleeps 90 s with `"timeout": 60`): without `onFailure` the
   command ran after about 67 s, i.e. a timed-out PreToolUse hook is fail-open in practice, not only in the documentation;
@@ -31,6 +44,75 @@ One version scheme: **a repository tag per release**. Components have no version
 
 Next: finish the block-mode trial (started 12/10/2026, after the end-to-end dry run of refusal, approval, expiry, replay and a Telegram outage) -- a few days of varied real work, no deadlock, an acceptable number of cards -- then v1.0.
 
+- **keeper: standing plans, for an agent nobody is watching (design: `docs/design-keeper-server.md`, written
+  first, before any code here -- the keeper's own precondition, "the agent must not be root," is false on the
+  server, where three agents run as root and two of them act with no human reading a Telegram card at the time).**
+  A standing plan is an exact, literal allowlist of commands (`standing_plans` in `/etc/keeper/config.json`),
+  never created or widened through the socket or Telegram -- there is no code path from agent input to it at all,
+  only a root edit to the config file followed by a restart. A call is covered only if it is character-for-
+  character equal to one of the listed commands (no prefix, no pattern, no category/targets abstraction like an
+  ordinary plan); `expires_at` is mandatory and clamped to at most 45 days from now regardless of what the config
+  says. A match skips the classifier entirely (logged as `standing-used`), is listed on both `keeper-status` and
+  `/status`, and `/stop <id>` disables one at once, persisted. A new, optional `actor` field on the socket's
+  `check` op -- set only by a root-owned hook command line (a distinct `--settings` profile per systemd unit),
+  never by the agent's own session -- lets a proposal from a configured `unattended_actors` tag stay recorded
+  (still visible in `/plans`/`/summary`) without ever pushing a Telegram card, and skips `--wait` (nobody is there
+  to decide). Any other actor, or none, behaves exactly as before. 13 new tests in `test_keeper.py` plus 4
+  end-to-end ones in `test_block_dryrun.py` (the real `keeper_client.py` subprocess, over the real socket,
+  carrying `KEEPER_ACTOR`); mutation-checked (same method as PR #14/#15 -- a manual revert in a throwaway copy,
+  run against the real test file): the exact-match guard widened to a substring check, a crafted payload trying to
+  smuggle its own `standing_plans`/`actor` into `Keeper.standing`, and the per-entry `try/except` in
+  `load_standing()` removed. Existing suites unmodified and green. Not run from this session: `install-keeper.sh
+  --apply` on a real LXC, and a real `claude -p` headless run against a real `--settings` profile -- see the
+  design doc's NOT TESTED list.
+- **go-gate: round 2 red-team on our own classifier (attacker mode, authorised, 19/10) -- two real bypasses found
+  and fixed by whitelist, not blacklist; the F4 "unbalanced" question from PR #11 revisited.**
+  - **MCP method write-verb check was a blacklist, and a blacklist of "dangerous" verbs can never be complete.**
+    `get_and_archive_repo`, `list_and_close_issue`, `find_and_merge_duplicates`, `get_and_lock_thread`,
+    `search_and_block_user`, `get_and_overwrite_file`, `list_and_add_label`, `get_and_ban_member`,
+    `get_and_disable_webhook`, `get_and_publish_draft`, `get_and_wipe_cache`, `get_and_clear_history` and the
+    single run-on word `getandarchiveitem` all classified as **read** on main: `mcp_writes()`'s `MCP_WRITE` list
+    (delete/remove/create/update/...) never included archive, merge, close, lock, overwrite, add, ban, disable,
+    publish, wipe or clear -- every one of them changes state, and `mcp__github__merge_pull_request`, a real tool
+    in this very session's own MCP server list, is such a verb. Fixed by `mcp_is_read_verb()`: for a method that
+    splits into separate words (the overwhelming majority of real MCP tool names -- every one of the 94 real names
+    this project has checked uses `_` or camelCase), the verb after and/then/or must now be ON `MCP_SAFE_VERBS`, a
+    short whitelist, not merely absent from a blacklist. The leading verb is left exactly as `MCP_READ` already
+    judged it (itself whitelist-shaped: it requires the method to START WITH a recognised read verb or phrase).
+    The one case that keeps a blacklist, by necessity: a method with no separator at all (`getandarchiveitem`)
+    cannot be split into words with any confidence, and an exact whitelist there breaks real, already-tested reads
+    (`getstatuses`, `searchrepositories` -- "or" sits inside "repositories" with nothing to do with a connector),
+    so it falls back to `MCP_WRITE_WIDE`, the old blacklist widened to the same newly-found verbs. Both bypasses
+    and the no-regression cases are in `go-gate/test_disguise.py` (`MCP_UNLISTED_WRITE_VERB`,
+    `MCP_SAFE_SINGLE_WORD_WITH_OR`); mutation-checked by diffing classification against the pre-fix code (each
+    case flips from read to change/opaque, and no previously-passing case regresses).
+  - **`docker exec`'s own flag table was missing two real, value-taking flags.** `--env-file` and `--detach-keys`
+    were not in the by-hand list of flags assumed to take a separate value, so an unrecognised flag was silently
+    treated as taking none, and the parse stopped one token too early: `docker exec --env-file x.env cat bash -c
+    "rm -rf /data"` classified as **read**, because the shift landed the classifier on the CONTAINER NAME (which
+    the agent can itself choose, with an earlier `docker run --name cat ...`) instead of on `bash -c "rm -rf
+    /data"`, the command the container actually runs. Fixed with a closed, authoritative flag table
+    (`DOCKER_EXEC_FLAGS` -- `docker exec` is a small, stable CLI, unlike an arbitrary shell command, so a complete
+    table is realistic here in a way it never is for awk/sed programs or shell commands in general): an
+    unrecognised flag now makes the call **opaque** instead of being assumed to take zero arguments. Grouped short
+    booleans (`-it`, `-dit`) and the `=` form of every flag keep classifying normally.
+    `go-gate/test_disguise.py`'s `DOCKER_EXEC_FLAG_PARSING` / `DOCKER_EXEC_SAFE_FLAGS`; mutation-checked the same
+    way.
+  - **The "unbalanced" question from PR #11, revisited.** The oracle corpus (`go-gate/test_balance_oracle.py`) now
+    covers 427 generated commands (up from the 355 of PR #11 -- the corpus itself grew in the meantime, not from
+    this round). Recomputing the disagreement table: **2 of 427** are still the already-known, still-open false
+    positive (the `$'...'` ANSI-C gap -- `gate_says_unbalanced()` flags a syntactically valid ANSI-C-quoted string
+    as unbalanced; unchanged since PR #11, not fixed here, see NON CORRIGÉS below). A separate **6 of 427** are
+    cases where the narrow oracle helper (`gate_says_unbalanced()`, which checks `scan()`'s own balanced flag at
+    the top level only) disagrees with `real_valid()` -- all 6 are the `bash; pct exec 100 -- sh -c "echo c'est
+    ...; <payload>"` family already identified on 15/10 (a second, independent genuine trap in the same log
+    family): the bare leading `bash` statement (no `-c`) is classified `opaque` directly by `classify_bash()`
+    regardless of what the oracle's narrow helper says about the rest of the line, so the real pipeline was never
+    at risk -- confirmed again here, no new fix needed, same conclusion as 15/10. **0 of 427** are a real
+    unbalanced command that the actual `classify_bash()` pipeline (not the narrow oracle helper) fails to flag.
+  - **What was tried and rejected:** widening the leading-verb check itself to a free substring search (instead of
+    requiring it to START the method) would have reopened exactly the `mcp__x__y_search` case PR #11's own test
+    already pins to "change" ("only a prefix naming the server goes") -- kept as `MCP_READ` already was.
 - **go-gate: a `dir:` grant also requires the working directory to be inside it (owner decision, 20/10).** A command
   that changes something and is covered through a `dir:` target must also run with its effective working directory
   (`go_gate.CWD`, followed through the command's own `cd`/`pushd`/`popd` per stage, symlinks followed) inside one of the

@@ -84,6 +84,38 @@ In short:
 - An old `state.json` (one active plan per session, not a list) is upgraded automatically on the next start; nothing
   it already granted is widened or lost.
 
+## Standing plans: a closed allowlist for an agent nobody is watching
+
+A normal plan needs a human to tap a button. That is wrong for an agent that runs unattended (a systemd timer at
+08:15, say): nobody is there to tap anything, and pushing a Telegram card every morning would train you to approve
+without reading. A **standing plan** is instead:
+
+- defined **only** in the config file (`standing_plans` in `/etc/keeper/config.json`), never created or widened
+  through the socket or Telegram — the agent has no path to it at all;
+- an **exact list of literal commands**, not a category: `{"id": "morning", "commands": ["python3
+  /opt/homelab/morning-act.py restart-arr", …], "expires_at": "2026-11-19"}`. A call is covered only if the whole
+  command, stripped of leading/trailing whitespace, is character-for-character one of the listed strings — no
+  prefix, no pattern;
+- **bounded**: `expires_at` is mandatory and clamped to at most 45 days from now regardless of what the file says.
+  Reconfirming means editing the date and restarting `keeperd`;
+- **listed** in `keeper-status` (what the agent reads) and `/status` (what you read);
+- **revocable** the same way as any other plan: `/stop <id>` disables a standing plan at once, persisted — there is
+  no way back except a root edit and a restart;
+- logged on every use (`standing-used` in the log), and never sent to the classifier: an exact pre-approved literal
+  has no category/target ambiguity to get wrong.
+
+An out-of-scope call still goes through `keeper-propose` as usual. For a session tagged with an actor in
+`unattended_actors` (see below), that proposal is recorded — so it shows up in `/plans` and `/summary` — but no
+Telegram card is sent; the agent is told so in its deny reason, and `--wait` is not honoured (nobody is there to
+decide). An attended session, or any actor not listed, behaves exactly as before: a card goes out.
+
+**The actor tag.** `KEEPER_ACTOR` is an environment variable the hook forwards if set. It is only ever meaningful
+when a *root-owned* hook command line sets it (e.g. a distinct `--settings` profile for a systemd unit that launches
+an unattended `claude -p`: `env -i KEEPER_ACTOR=standing-morning /usr/bin/python3 -I .../keeper_client.py`) — the
+agent's own session cannot set or change it, for the same reason it cannot redirect the socket: the whole hook
+invocation is root-owned. List the tags that mean "nobody is watching" in `unattended_actors`. Full design and the
+alternatives considered: [docs/design-keeper-server.md](../docs/design-keeper-server.md).
+
 ## Install
 
 ```sh
@@ -229,6 +261,11 @@ To hand control back fast (do this as a human with sudo; the agent cannot):
 3. **Or remove the gate entirely**: restore the managed settings the installer backed up
    (`managed-settings.json.bak-keeper`).
 
+A reinstall **merges** into an existing `/etc/keeper/config.json` instead of overwriting it: only the keys this run's
+own options drive (`--lang`, `--safe-git-repo`, `--hook-timeout`, …) are refreshed, and any key you edited by hand --
+`mode` above, `max_proposals_per_hour`, a key a newer script version adds -- survives untouched. With no existing
+file, the script writes its usual defaults, unchanged.
+
 ## Tests
 
 `python3 test_keeper.py`: no network and no install. The tests use a fake Telegram and a socket in a temp dir, and
@@ -263,6 +300,13 @@ cover:
   itself) and its peer-uid gate, two plans tracked independently, a late click still counted as expired, the
   ledger pruned by age, and the hook's own `wait_for_decision()` against a real socket (approved/rejected/expired
   while still waiting, the wait itself running out, a daemon that is down or stops answering mid-wait).
+- Standing plans (`docs/design-keeper-server.md`): exact-literal coverage and its "no wildcard" guard (a command
+  differing by a trailing flag, an extra `sh -c` wrapper, or one character is never covered), the `expires_at`
+  clamp, malformed config entries dropped one at a time without crashing, `/stop <id>` disabling one at once and
+  persisting it, both listings (`keeper-status` and `/status`), and that no tool call or socket payload can create
+  or widen one. `test_block_dryrun.py` adds the end-to-end case: `KEEPER_ACTOR`, forwarded only by a real
+  `keeper_client.py` subprocess over the real socket, suppressing a Telegram card for an unattended actor's
+  out-of-scope proposal while an attended one still gets a card as before.
 
 - the hook timeout (`InstallerHookTimeout`, `WaitClamp`): the installer writes the `timeout` into the entry, a
   reinstall is idempotent and upgrades an entry that has none, a `--wait-max` that does not fit under

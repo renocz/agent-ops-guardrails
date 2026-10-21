@@ -999,6 +999,120 @@ class InstallerHookTimeout(unittest.TestCase):
             self.assertEqual(self.install(None, "--wait-max", bad)[1].returncode, 2, bad)
 
 
+@unittest.skipUnless(shutil.which("bash") and os.path.exists("/usr/bin/python3") and
+                     subprocess.run(["id", "nobody"], capture_output=True).returncode == 0, "needs bash, /usr/bin/python3, user nobody")
+class InstallerConfigMerge(unittest.TestCase):
+    """A reinstall MERGES into an existing /etc/keeper/config.json instead of overwriting it: only the keys this
+    run's command-line options actually drive are refreshed; every other key already in the file -- one the script
+    knows about or not -- is kept exactly as it is (value and presence), so a value the owner edited by hand after
+    install (say `max_proposals_per_hour`, which the installer never writes at all) survives the next --apply."""
+
+    SCRIPT = os.path.join(HERE, "install-keeper.sh")
+
+    def install(self, script, prefix=None, *extra):
+        if prefix is None:
+            prefix = tempfile.mkdtemp(prefix="kcfg", dir="/tmp")
+            self.addCleanup(shutil.rmtree, prefix, ignore_errors=True)
+        r = subprocess.run(["bash", script, "--agent-user", "nobody", "--owner-id", "1",
+                            "--prefix", prefix, *extra], capture_output=True, text=True, timeout=60)
+        return prefix, r
+
+    def config(self, prefix):
+        with open(os.path.join(prefix, "etc", "keeper", "config.json")) as f:
+            return json.load(f)
+
+    def test_a_hand_edited_key_the_installer_never_writes_survives_reinstall(self):
+        prefix, r = self.install(self.SCRIPT)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        path = os.path.join(prefix, "etc", "keeper", "config.json")
+        doc = self.config(prefix)
+        self.assertNotIn("max_proposals_per_hour", doc)                  # the installer itself never writes this key
+        doc["max_proposals_per_hour"] = 8                                 # owner raised it by hand (council review of PR #8)
+        with open(path, "w") as f:
+            json.dump(doc, f)
+        _, r = self.install(self.SCRIPT, prefix)                          # reinstall, same user, same options
+        self.assertEqual(r.returncode, 0, r.stderr)
+        after = self.config(prefix)
+        self.assertIn("max_proposals_per_hour", after)                    # survived the reinstall at all
+        self.assertEqual(after["max_proposals_per_hour"], 8)              # ... with the hand-edited value, not the default
+        self.assertEqual((after["lang"], after["hook_timeout_sec"]), ("en", 60))   # installer-owned keys still correct
+
+    def test_an_unknown_key_from_a_future_script_version_survives_reinstall(self):
+        prefix, r = self.install(self.SCRIPT)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        path = os.path.join(prefix, "etc", "keeper", "config.json")
+        doc = self.config(prefix)
+        doc["some_future_key"] = {"nested": ["value"]}                    # simulates a key a later script version added
+        with open(path, "w") as f:
+            json.dump(doc, f)
+        self.install(self.SCRIPT, prefix, "--lang", "fr")                  # reinstall with one explicit option
+        after = self.config(prefix)
+        self.assertIn("some_future_key", after)                           # unknown key: still there
+        self.assertEqual(after["some_future_key"], {"nested": ["value"]})  # ... untouched
+        self.assertEqual(after["lang"], "fr")                              # this run's own option still takes effect
+
+    def test_without_an_existing_file_defaults_are_written_as_before(self):
+        prefix, r = self.install(self.SCRIPT)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        doc = self.config(prefix)
+        self.assertEqual((doc["lang"], doc["hook_timeout_sec"], doc["wait_max_sec"]), ("en", 60, 50))
+        self.assertNotIn("max_proposals_per_hour", doc)
+
+
+@unittest.skipUnless(shutil.which("bash") and os.path.exists("/usr/bin/python3") and
+                     subprocess.run(["id", "nobody"], capture_output=True).returncode == 0, "needs bash, /usr/bin/python3, user nobody")
+class InstallerConfigMergeMutation(InstallerConfigMerge):
+    """Mutation check: run the exact tests above (inherited unchanged) against a sibling copy of install-keeper.sh
+    that reinstates the original bug -- a full overwrite of config.json, ignoring any existing file -- and require
+    every one of them to fail. The mutant is written INSIDE keeper/ (not a separate tree) so $HERE/$REPO in the
+    script still resolve to the real keeper_client.py, keeperd.py, go_gate.py and secret_guard.py."""
+
+    OLD = '''cur = {}
+if os.path.exists(existing):
+    cur = json.load(open(existing))          # unreadable JSON: stop here, the install fails before writing
+cur.update({"owner_id": int(o), "chat_id": int(c), "agent_uids": [int(uid)], "agent_home": home,
+            "client_group": grp, "socket": run + "/keeper.sock", "state_dir": "/var/lib/keeper",
+            "bot_token_file": "/etc/keeper/bot.token", "mode": mode, "lang": lang,
+            "hook_timeout_sec": int(hook_timeout), "wait_max_sec": int(wait_max),
+            "safe_git_repos": safe_repos})
+print(json.dumps(cur, indent=1))'''
+    NEW = '''print(json.dumps({"owner_id": int(o), "chat_id": int(c), "agent_uids": [int(uid)], "agent_home": home,
+                  "client_group": grp, "socket": run + "/keeper.sock", "state_dir": "/var/lib/keeper",
+                  "bot_token_file": "/etc/keeper/bot.token", "mode": mode, "lang": lang,
+                  "hook_timeout_sec": int(hook_timeout), "wait_max_sec": int(wait_max),
+                  "safe_git_repos": safe_repos}, indent=1))'''
+
+    @classmethod
+    def setUpClass(cls):
+        with open(cls.SCRIPT) as f:
+            src = f.read()
+        if cls.OLD not in src:
+            raise AssertionError("the mutation text no longer matches install-keeper.sh: update this test")
+        mutated = src.replace(cls.OLD, cls.NEW, 1)
+        fd, path = tempfile.mkstemp(prefix=".mutant-install-keeper-", suffix=".sh", dir=HERE)
+        os.close(fd)
+        with open(path, "w") as f:
+            f.write(mutated)
+        os.chmod(path, 0o755)
+        cls.SCRIPT = path
+
+    @classmethod
+    def tearDownClass(cls):
+        os.remove(cls.SCRIPT)
+
+    def test_a_hand_edited_key_the_installer_never_writes_survives_reinstall(self):
+        with self.assertRaises(AssertionError):
+            super().test_a_hand_edited_key_the_installer_never_writes_survives_reinstall()
+
+    def test_an_unknown_key_from_a_future_script_version_survives_reinstall(self):
+        with self.assertRaises(AssertionError):
+            super().test_an_unknown_key_from_a_future_script_version_survives_reinstall()
+
+    # Not mutated: the fresh-install path (no existing file) never went through the merge, so it still passes.
+    # Kept here (inherited unchanged, run again) to prove the mutant is otherwise a working installer, not broken
+    # in some other way that would make it fail every test regardless of the merge.
+
+
 class WaitClamp(Base):
     """keeperd side: the wait never exceeds hook_timeout_sec - margin, whatever wait_max_sec says."""
 
@@ -2172,6 +2286,121 @@ class WaitForDecisionClient(Base):
         treat the daemon's {"error": ...} reply as a state."""
         with self.assertRaises(ValueError):
             keeper_client.wait_for_decision("not-a-hash", 1)
+
+
+class StandingPlans(Base):
+    """A closed, exact-literal allowlist for an agent nobody is watching (design: docs/design-keeper-server.md §2).
+    Defined only in cfg["standing_plans"], never created or widened through the socket or Telegram."""
+
+    STANDING = [{"id": "morning", "commands": ["python3 /opt/homelab/morning-act.py restart-arr",
+                                                "python3 /opt/homelab/morning-act.py retry-search"],
+                 "expires_at": "2126-01-01", "note": "08:15 systemd timer"}]
+
+    def kp(self, standing=None, unattended=None, clock=None):
+        cfg = dict(self.cfg, standing_plans=standing if standing is not None else self.STANDING,
+                   unattended_actors=unattended or [])
+        return keeperd.Keeper(cfg, self.bot, clock=clock or self.clock)
+
+    def test_exact_match_allows_without_any_active_plan(self):
+        k = self.kp()
+        self.assertTrue(k.check("s1", *bash("python3 /opt/homelab/morning-act.py restart-arr"))["decision"] == "allow")
+        self.assertIn("standing-used", [json.loads(x)["event"] for x in open(k.log_path)])
+
+    def test_not_a_prefix_not_a_substring_not_a_wildcard(self):
+        """The core guard: one of these differs from the configured literal by only a trailing character, an extra
+        flag, or a wrapping shell -- none of them may be covered."""
+        k = self.kp()
+        self.assertTrue(k.check("s1", *bash("python3 /opt/homelab/morning-act.py restart-arr "))["decision"] == "allow",
+                        "surrounding whitespace is stripped on both sides, so this one IS the same command")
+        for cmd in ("python3 /opt/homelab/morning-act.py restart-arr; true",  # a DIFFERENT command
+                    "python3 /opt/homelab/morning-act.py restart-ar",
+                    "sh -c 'python3 /opt/homelab/morning-act.py restart-arr'",
+                    "python3 /opt/homelab/morning-act.py restart-arr --force"):
+            self.assertFalse(k.check("s1", *bash(cmd))["decision"] == "allow", cmd)
+
+    def test_expired_standing_plan_is_not_covered(self):
+        k = self.kp(standing=[dict(self.STANDING[0], expires_at="2020-01-01")])
+        self.assertFalse(self.allowed_on(k, *bash("python3 /opt/homelab/morning-act.py restart-arr")))
+
+    def test_expires_at_is_clamped_to_standing_max_days(self):
+        far_future = self.clock.t + 10_000 * 86400
+        k = self.kp(standing=[dict(self.STANDING[0], expires_at=far_future)])
+        self.assertLessEqual(k.standing["morning"]["expires_at"], self.clock.t + keeperd.STANDING_MAX_DAYS * 86400)
+
+    def test_missing_or_malformed_entries_are_dropped_not_a_crash(self):
+        bad = [
+            {"id": "no-commands", "expires_at": "2126-01-01"},
+            {"id": "empty-commands", "commands": [], "expires_at": "2126-01-01"},
+            {"id": "", "commands": ["x"], "expires_at": "2126-01-01"},
+            {"id": "no-expiry", "commands": ["x"]},
+            {"id": "bad-expiry", "commands": ["x"], "expires_at": "not-a-date"},
+            {"commands": ["x"], "expires_at": "2126-01-01"},           # no id at all
+            "not-even-a-dict",
+        ]
+        k = self.kp(standing=bad)                       # must not raise
+        self.assertEqual(k.standing, {})
+
+    def test_one_malformed_entry_does_not_drop_the_others(self):
+        k = self.kp(standing=[{"id": "bad", "commands": "not-a-list", "expires_at": "2126-01-01"}] + self.STANDING)
+        self.assertEqual(set(k.standing), {"morning"})
+
+    def test_stop_by_id_disables_a_standing_plan_at_once(self):
+        k = self.kp()
+        self.assertTrue(self.allowed_on(k, *bash("python3 /opt/homelab/morning-act.py restart-arr")))
+        ans = k.command(OWNER, CHAT, "/stop morning")
+        self.assertEqual(ans, [k.msg("ans_stopped_one", id="morning")])
+        self.assertFalse(self.allowed_on(k, *bash("python3 /opt/homelab/morning-act.py restart-arr")))
+        # persisted: a freshly loaded Keeper against the same state dir keeps it disabled
+        k2 = keeperd.Keeper(k.cfg, self.bot, clock=self.clock)
+        self.assertFalse(self.allowed_on(k2, *bash("python3 /opt/homelab/morning-act.py restart-arr")))
+
+    def test_listed_for_the_agent_and_for_the_owner(self):
+        k = self.kp()
+        self.assertEqual([p["id"] for p in k.status("s1")["standing"]], ["morning"])
+        report = "\n".join(str(x) for x in k.status_report())
+        self.assertIn("morning", report)
+
+    def test_disabled_or_expired_standing_plan_is_not_listed(self):
+        k = self.kp()
+        k.command(OWNER, CHAT, "/stop morning")
+        self.assertEqual(k.status("s1")["standing"], [])
+        self.assertNotIn("morning", "\n".join(str(x) for x in k.status_report()))
+
+    def test_agent_input_cannot_create_or_widen_standing_plans(self):
+        """There is no code path from a tool call (or a crafted socket-shaped payload) to self.standing: it is
+        read once from cfg at __init__ and never written again. A tool_input trying to smuggle its own
+        standing_plans/actor keys changes nothing."""
+        k = self.kp()
+        before = dict(k.standing)
+        k.check("s1", "Bash", {"command": "echo hi",
+                                "standing_plans": [{"id": "evil", "commands": ["rm -rf /"], "expires_at": "2126-01-01"}]},
+                actor="evil-actor")
+        self.assertEqual(k.standing, before)
+        self.assertNotIn("evil", k.standing)
+
+    def test_unattended_actor_proposal_is_recorded_but_sends_no_card(self):
+        k = self.kp(unattended=["standing-morning"])
+        r = k.check("s1", *bash(self.propose_cmd("id=p1 ; actions=edit")), actor="standing-morning")
+        self.assertEqual(r["decision"], "deny")
+        self.assertNotIn("_notify", r)                                      # no Telegram card pushed
+        self.assertIn("no alert was sent", r["reason"])
+        self.assertTrue(k.session("s1").get("pending"))                     # still recorded, for /plans and /summary
+        self.assertIn("standing-propose-suppressed", [json.loads(x)["event"] for x in open(k.log_path)])
+
+    def test_attended_or_unknown_actor_still_sends_a_card_as_before(self):
+        k = self.kp(unattended=["standing-morning"])
+        for actor in (None, "interactive", "standing-morning-typo"):
+            r = k.check("s1", *bash(self.propose_cmd("id=p1 ; actions=edit")), actor=actor)
+            self.assertIn("_notify", r)
+
+    def test_unattended_actor_does_not_wait(self):
+        """--wait would just burn the job's own time budget every run with nobody there to decide."""
+        k = self.kp(unattended=["standing-morning"])
+        r = k.check("s1", *bash(self.propose_cmd("id=p1 ; actions=edit") + " --wait 30"), actor="standing-morning")
+        self.assertNotIn("wait", r)
+
+    def allowed_on(self, k, tool, ti):
+        return k.check("s1", tool, ti)["decision"] == "allow"
 
 
 if __name__ == "__main__":
