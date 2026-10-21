@@ -341,7 +341,7 @@ shapes, not arguments. That is the same exposure as the approval cards.
   installer (idempotent, upgrades an old entry), the refusal of a `wait_max_sec` that does not fit under it, and
   keeperd's clamp. Each guard above is mutation-checked (the
   relevant line disabled or reordered in a scratch copy of keeperd.py): the test that exercises it fails.
-- A week in block mode on the Mac before v1.0.
+- A week in block mode on the Mac before v1.0 (done: 12/10 to 21/10/2026; see the v1.0 entry of the CHANGELOG).
 
 ## Open questions for the review
 
