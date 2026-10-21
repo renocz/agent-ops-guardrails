@@ -114,7 +114,11 @@ when a *root-owned* hook command line sets it (e.g. a distinct `--settings` prof
 an unattended `claude -p`: `env -i KEEPER_ACTOR=standing-morning /usr/bin/python3 -I .../keeper_client.py`) — the
 agent's own session cannot set or change it, for the same reason it cannot redirect the socket: the whole hook
 invocation is root-owned. List the tags that mean "nobody is watching" in `unattended_actors`. Full design and the
-alternatives considered: [docs/design-keeper-server.md](../docs/design-keeper-server.md).
+alternatives considered: [docs/design-keeper-server.md](../docs/design-keeper-server.md). Step-by-step commands
+for a real server (two non-root users, the Docker proxy, the sudoers allowlist, the `KEEPER_ACTOR` wiring) are in
+[docs/deploy-keeper-server.md](../docs/deploy-keeper-server.md), verified with
+[`check-keeper-server.sh`](check-keeper-server.sh) and the owner trial in
+[docs/keeper-server-dry-run.md](../docs/keeper-server-dry-run.md).
 
 ## Install
 

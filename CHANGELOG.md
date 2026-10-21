@@ -4,6 +4,23 @@ One version scheme: **a repository tag per release**. Components have no version
 
 ## Unreleased (towards v1.0)
 
+- **Server deployment of the keeper, documented and checkable, not yet applied anywhere (21/10/2026).**
+  `docs/deploy-keeper-server.md` turns `docs/design-keeper-server.md`'s decisions (two non-root users, the Docker
+  proxy, standing plans, `KEEPER_ACTOR`) into exact commands, each with an expected result and a rollback;
+  `docs/keeper-server-dry-run.md` is the owner's real-host trial checklist, mirroring
+  `docs/block-mode-dry-run.md`'s role for the laptop. `keeper/check-keeper-server.sh` is a new, read-only
+  verification script (users/groups, `/etc/keeper` permissions, the socket, the systemd units, a real Docker
+  version check, a real `inspect` on a container with and without a healthcheck, the sudoers allowlist, and that
+  an out-of-plan command is actually refused) that degrades to a clean SKIP, never a crash or a FAIL, on however
+  much of the install exists yet; `keeper/test_check_keeper_server.sh` checks that it never writes anything and
+  never crashes. Two real traps found by writing and running these against this repo's own test host, not
+  guessed: `install-keeper.sh`'s `agent_uids` key is silently reset to one entry by every reinstall, so a
+  two-user topology needs that step redone each time (documented, not changed here -- changing the installer's
+  own merge behavior is a separate decision); and Docker Engine ships its own, unrelated binary also named
+  `docker-proxy`, an exact basename collision with this kit's agent-facing wrapper that depends on `PATH` order
+  to resolve correctly (now checked for and warned about). No code from `keeper/` or `docker-proxy/`'s own
+  daemons/clients changed, and nothing in this entry was run with `--apply` against a real host.
+
 - **docker-proxy: `inspect` and `logs` no longer hand the agent raw secrets (owner review of PR #21, 21/10/2026).**
   `docker inspect` includes a container's entire environment verbatim (`Config.Env`) -- API keys, database
   passwords, tokens -- and `docker logs` prints whatever the container writes, which regularly includes secrets in
