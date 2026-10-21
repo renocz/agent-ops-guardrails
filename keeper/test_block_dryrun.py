@@ -123,6 +123,10 @@ class DryRunBase(unittest.TestCase):
     """A real Keeper in block mode, the real serve() socket, the real TelegramBot against a fake local Telegram,
     and the real poll() loop running in a background thread for the lifetime of the test."""
 
+    def extra_cfg(self):
+        """Override in a subclass to merge extra keys into cfg before the real Keeper/socket/poll loop start."""
+        return {}
+
     def setUp(self):
         self.dir = tempfile.mkdtemp(prefix="kbd", dir="/tmp")
         self.addCleanup(shutil.rmtree, self.dir, ignore_errors=True)
@@ -134,6 +138,7 @@ class DryRunBase(unittest.TestCase):
         self.cfg = dict(keeperd.DEFAULTS, state_dir=os.path.join(self.dir, "state"), owner_id=OWNER, chat_id=CHAT,
                         agent_uids=[os.getuid()], agent_home=self.home, socket=os.path.join(self.dir, "k.sock"),
                         bot_token_file=token_path, mode="block")
+        self.cfg.update(self.extra_cfg())
 
         self.fake = FakeTelegramServer()
         self.addCleanup(self.fake.shutdown)
@@ -577,6 +582,108 @@ class LongPollHygiene(DryRunBase):
         self.fake.state.fail_mode = None
         self.deliver_message("/summary")
         self.assertTrue(self.wait_for(lambda: self.fake.state.sent, timeout=5.0))
+
+
+class WaitForApproval(DryRunBase):
+    """keeper-propose --wait SECONDS, end to end: the real hook subprocess (keeper_client.py's hook(), not just
+    wait_for_decision() in isolation) blocks on the SAME socket it already used for "check", polling the new
+    "status" op, and the SINGLE Bash tool call it answers tells the agent what happened -- approved, rejected,
+    expired, or the wait itself running out -- instead of the agent having to re-run keeper-status itself."""
+
+    def hook_async(self, tool, ti):
+        """self.hook() blocks for the whole wait: run it on a thread so the test can click/advance the clock
+        while it is still waiting, then join it for the result."""
+        result = {}
+        def run():
+            result["decision"], result["reason"] = self.hook(tool, ti)
+        th = threading.Thread(target=run)
+        th.start()
+        return th, result
+
+    def test_approved_while_the_hook_is_still_waiting(self):
+        cmd = self.propose_cmd("id=p1 ; targets=web ; actions=deploy ; ttl=20") + " --wait 15"
+        th, result = self.hook_async(*bash(cmd))
+        self.assertTrue(self.wait_for(lambda: self.fake.state.sent))        # the card reached Telegram
+        ok, _no = self.pending_card_data()
+        self.deliver_click(ok)
+        th.join(20)
+        self.assertFalse(th.is_alive())
+        self.assertEqual(result["decision"], "deny")                        # the propose Bash call still never ran
+        self.assertIn("was approved", result["reason"])
+        self.assertEqual(self.hook(*bash("docker restart web"))[0], "allow")  # the actual approval is in effect
+
+    def test_rejected_while_the_hook_is_still_waiting(self):
+        cmd = self.propose_cmd("id=p1 ; targets=web ; actions=deploy") + " --wait 15"
+        th, result = self.hook_async(*bash(cmd))
+        self.assertTrue(self.wait_for(lambda: self.fake.state.sent))
+        _ok, no = self.pending_card_data()
+        self.deliver_click(no)
+        th.join(20)
+        self.assertEqual(result["decision"], "deny")
+        self.assertIn("was rejected", result["reason"])
+
+    def test_expired_is_noticed_within_one_poll_not_the_full_budget(self):
+        """The pending proposal's own age limit passes while the hook is waiting -- plan_status() finds that
+        itself, without anyone clicking anything, so the hook returns in roughly one poll interval, not the full
+        15s --wait budget."""
+        cmd = self.propose_cmd("id=p1 ; actions=edit") + " --wait 15"
+        th, result = self.hook_async(*bash(cmd))
+        self.assertTrue(self.wait_for(lambda: self.fake.state.sent))
+        self.clock_t[0] += (self.cfg["pending_max_age_min"] + 1) * 60
+        t0 = time.time()
+        th.join(20)
+        self.assertFalse(th.is_alive())
+        self.assertLess(time.time() - t0, 10)                               # well under the 15s budget
+        self.assertEqual(result["decision"], "deny")
+        self.assertIn("expired before a decision", result["reason"])
+
+    def test_wait_runs_out_while_still_pending(self):
+        cmd = self.propose_cmd("id=p1 ; actions=edit") + " --wait 2"
+        decision, reason = self.hook(*bash(cmd))                            # nobody ever decides: just let it run out
+        self.assertEqual(decision, "deny")
+        self.assertIn("still waiting", reason)
+        self.assertIn("after 2s", reason)
+
+    def test_default_behaviour_is_unchanged_without_wait(self):
+        """No --wait: the hook must return immediately, exactly as before this feature existed."""
+        t0 = time.time()
+        reason = self.propose("id=p1 ; actions=edit")
+        self.assertLess(time.time() - t0, 5)
+        self.assertIn("sent to the human", reason)
+
+
+class IStandingPlansAndActor(DryRunBase):
+    """End to end (design: docs/design-keeper-server.md §2): KEEPER_ACTOR, as only a root-owned hook command line
+    could ever set it, carried by the REAL keeper_client.py subprocess over the REAL socket into Keeper.check()."""
+
+    def extra_cfg(self):
+        return {"standing_plans": [{"id": "morning", "commands": ["python3 morning-act.py restart-arr"],
+                                     "expires_at": "2126-01-01"}],
+                "unattended_actors": ["standing-morning"]}
+
+    def test_standing_command_allowed_through_the_real_hook_with_no_plan_and_no_card(self):
+        decision, _ = self.hook(*bash("python3 morning-act.py restart-arr"))
+        self.assertEqual(decision, "allow")
+        self.assertEqual(self.fake.state.sent, [])                          # no Telegram message of any kind
+
+    def test_same_command_denied_without_the_actor_tag_mattering_here(self):
+        """The standing grant itself does not depend on KEEPER_ACTOR at all -- only card suppression does."""
+        env = dict(self.env, KEEPER_ACTOR="standing-morning")
+        decision, _ = self.hook(*bash("python3 morning-act.py restart-arr"), env=env)
+        self.assertEqual(decision, "allow")
+
+    def test_out_of_scope_call_from_the_actor_tag_proposes_quietly(self):
+        env = dict(self.env, KEEPER_ACTOR="standing-morning")
+        decision, reason = self.hook(*bash(self.propose_cmd("id=p1 ; actions=edit")), env=env)
+        self.assertEqual(decision, "deny")
+        self.assertIn("no alert was sent", reason)
+        self.assertTrue(self.wait_for(lambda: self.log_records("standing-propose-suppressed")))
+        self.assertEqual(self.fake.state.sent, [])                          # still no Telegram message
+
+    def test_out_of_scope_call_without_the_actor_tag_sends_a_card_as_before(self):
+        reason = self.propose("id=p1 ; actions=edit")
+        self.assertIn("sent to the human", reason)
+        self.assertTrue(self.wait_for(lambda: self.fake.state.sent))
 
 
 if __name__ == "__main__":

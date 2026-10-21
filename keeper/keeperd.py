@@ -6,7 +6,12 @@ Telegram bot whose token only this user can read. The agent can propose a plan a
 it cannot approve, change or read the approval state.
 
 Requests (one JSON object per line on the socket):
-  {"op": "check", "session": s, "tool": "Bash", "input": {...}}   -> {"decision": "allow"|"deny", "reason": …}
+  {"op": "check", "session": s, "tool": "Bash", "input": {...}, "actor": a}   -> {"decision": "allow"|"deny", "reason": …}
+
+`actor` is optional and only ever meaningful when it is a tag set by a root-owned hook command (docs/design-
+keeper-server.md §2: a distinct `--settings` profile per systemd unit, not anything the agent's own session can
+set) that also appears in the config's `unattended_actors`: it suppresses the Telegram card a `keeper-propose`
+would otherwise push, for an agent nobody is watching at the time. It never widens what a call is allowed to do.
 
 The agent proposes a plan by running `keeper-propose --scope "id=… ; targets=… ; actions=… ; ttl=…" --text "why"`.
 keeperd sees that command in the hook's check, with the session id Claude Code gave the hook, sends the plan to the
@@ -23,7 +28,67 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 DEFAULTS = {"socket": "/var/run/keeper/keeper.sock", "state_dir": "/var/lib/keeper", "agent_uids": [],
             "owner_id": None, "chat_id": None, "bot_token_file": "/etc/keeper/bot.token",
             "ttl_default_min": 60, "ttl_max_min": 240, "pending_max_age_min": 120, "max_proposals_per_hour": 3,
-            "mode": "block", "agent_home": None, "client_group": None, "safe_git_repos": [], "lang": "en"}
+            "mode": "block", "agent_home": None, "client_group": None, "safe_git_repos": [], "lang": "en",
+            "wait_max_sec": 50, "hook_timeout_sec": 60, "max_active_plans": 3,
+            "standing_plans": [], "unattended_actors": []}
+MAX_ACTIVE_PLANS_HARD_CAP = 5          # a config typo (or an attempt from a writable config) cannot go past this
+# Standing plans (design: docs/design-keeper-server.md §2): a closed, exact-literal allowlist for an agent nobody is
+# watching (a systemd timer, e.g.), defined ONLY in the root-owned config file -- never created, approved or widened
+# through the socket or Telegram. "Long but bounded": a typo in the config's expires_at cannot create a silent,
+# effectively permanent grant, the same defence-in-depth pattern as MAX_ACTIVE_PLANS_HARD_CAP above.
+STANDING_MAX_DAYS = 45
+
+
+def parse_expiry(val, now):
+    """A standing plan's `expires_at`: a unix timestamp (int/float), or a "YYYY-MM-DD" string read as UTC midnight.
+    Anything else (missing, malformed, wrong type) returns None -- the caller drops the entry rather than guessing
+    a default, since a standing plan with no real expiry is exactly the "silently permanent" shape this exists to
+    refuse."""
+    if isinstance(val, bool):
+        return None
+    if isinstance(val, (int, float)):
+        return float(val)
+    if isinstance(val, str):
+        try:
+            return datetime.datetime.strptime(val, "%Y-%m-%d").replace(tzinfo=datetime.timezone.utc).timestamp()
+        except ValueError:
+            return None
+    return None
+
+
+def load_standing(cfg, now):
+    """Every usable standing plan from cfg["standing_plans"], keyed by id. A malformed entry (no id, no commands,
+    an unparsable or missing expires_at) is dropped and skipped -- never a crash, and never treated as "allow
+    everything": the daemon simply has one fewer standing plan than the config intended, which is the fail-closed
+    direction, not fail-open. expires_at is clamped to at most STANDING_MAX_DAYS from now regardless of what the
+    config says."""
+    out = {}
+    for raw in cfg.get("standing_plans") or []:
+        try:
+            sid = str(raw["id"]).strip()
+            raw_cmds = raw["commands"]
+            if not isinstance(raw_cmds, list):           # a string here would silently iterate into characters
+                continue
+            cmds = [c.strip() for c in raw_cmds if isinstance(c, str) and c.strip()]
+            if not sid or not cmds:
+                continue
+            exp = parse_expiry(raw.get("expires_at"), now)
+            if exp is None:
+                continue
+            exp = min(exp, now + STANDING_MAX_DAYS * 86400)
+            out[sid] = {"commands": cmds, "expires_at": exp, "note": str(raw.get("note") or "")}
+        except (KeyError, TypeError, AttributeError):
+            continue
+    return out
+# keeper-propose --wait blocks the PreToolUse hook process. Claude Code kills a command hook at its "timeout" and, on
+# PreToolUse, a timed-out hook does NOT block the tool call (it falls through to the normal permission flow), so the
+# wait must always end first: wait_max_sec + this margin (one in-flight status poll, process start-up) <= hook_timeout_sec.
+HOOK_TIMEOUT_MARGIN_SEC = 10
+
+
+def effective_wait_max(cfg):
+    """The longest --wait the hook may be asked to do: wait_max_sec, clamped under the hook's own timeout."""
+    return max(0, min(int(cfg["wait_max_sec"]), int(cfg["hook_timeout_sec"]) - HOOK_TIMEOUT_MARGIN_SEC))
 
 
 # ---------------------------------------------------------------------------------------------------------------
@@ -40,9 +105,14 @@ MESSAGES = {
         "card_actions": "Actions: {actions}",
         "card_duration": "Duration: {ttl} min",
         "card_fingerprint": "Fingerprint: {fp}",
+        "card_adds_to": "Adds to the active plans: {ids}",
+        "card_replaces": "Renews (same id): {id}",
+        "card_replaces_cap": "⚠️ {limit} plans are already active: approving this drops the oldest, {id}.",
         "warn_script": "⚠️ script: the agent may run ANY program during this plan.",
         "warn_delete": "⚠️ delete: the agent may delete files.",
         "warn_no_targets": "⚠️ no targets: the actions apply to everything.",
+        "warn_dir_prefix": "⚠️ {dirs}: covers everything under that directory, not just one path.",
+        "card_context": "Requested after a refusal: the active plan does not cover {gap}.",
         "card_stop_note": "Stop ends the plan; it does not stop a process already started.",
         "card_explain": "The agent's explanation:",
         "btn_approve": "✅ Approve",
@@ -57,6 +127,9 @@ MESSAGES = {
         "ans_rejected": "rejected",
         "ans_expired": "expired: ask the agent to propose again",
         "ans_approved": "approved for {ttl} min",
+        "ans_approved_evicted": "approved for {ttl} min (the oldest active plan, {evicted}, was dropped: the limit was reached)",
+        "ans_stopped_one": "stopped: plan {id}",
+        "ans_nothing_active_one": "nothing was active for plan {id}",
         "start_block": "🔐 keeper started: changes now need your approval here.",
         "start_observe": "🔐 keeper started in observe mode: nothing is blocked, events are only logged. "
                          "Send /summary to see what would have been refused.",
@@ -80,6 +153,8 @@ MESSAGES = {
         "status_pending": "Pending proposals: {n} (ids: {ids})",
         "status_no_pending": "No pending proposal.",
         "status_hourly": "Proposals in the last hour: {n}/{limit}",
+        "status_standing_line": "• standing {id}: {n} command(s), expires in {days} d",
+        "status_no_standing": "No standing plan configured.",
         "plans_title": "📜 Last plan events",
         "plans_empty": "No plan event recorded yet.",
         "plans_line": "{at} — {id}: {outcome}",
@@ -89,7 +164,8 @@ MESSAGES = {
         "plans_outcome_expired": "expired",
         "plans_outcome_revoked": "revoked (stop)",
         "help_title": "Commands:",
-        "help_stop": "/stop — revoke every active and pending plan right now",
+        "help_stop": "/stop [id] — revoke every active and pending plan right now, or just the one named plan "
+                     "(a standing plan's id works too)",
         "help_status": "/status — mode, active/pending plans, proposals left this hour",
         "help_plans": "/plans [n] — last n plan events (default 5, max 20)",
         "help_summary": "/summary [days] — log summary of would-deny/denied/allowed (alias /resume)",
@@ -108,9 +184,14 @@ MESSAGES = {
         "card_actions": "Actions : {actions}",
         "card_duration": "Durée : {ttl} min",
         "card_fingerprint": "Empreinte : {fp}",
+        "card_adds_to": "S'ajoute aux plans actifs : {ids}",
+        "card_replaces": "Renouvelle (même identifiant) : {id}",
+        "card_replaces_cap": "⚠️ {limit} plans sont déjà actifs : approuver ceci abandonne le plus ancien, {id}.",
         "warn_script": "⚠️ script : l'agent peut lancer N'IMPORTE QUEL programme pendant ce plan.",
         "warn_delete": "⚠️ delete : l'agent peut supprimer des fichiers.",
         "warn_no_targets": "⚠️ aucune cible : les actions s'appliquent à tout.",
+        "warn_dir_prefix": "⚠️ {dirs} : couvre tout le contenu de ce répertoire, pas un seul chemin.",
+        "card_context": "Demandé après un refus : le plan actif ne couvre pas {gap}.",
         "card_stop_note": "Arrêter met fin au plan ; cela n'interrompt pas un processus déjà lancé.",
         "card_explain": "Explication de l'agent :",
         "btn_approve": "✅ Approuver",
@@ -125,6 +206,9 @@ MESSAGES = {
         "ans_rejected": "refusé",
         "ans_expired": "expiré : demandez à l'agent de proposer à nouveau",
         "ans_approved": "approuvé pour {ttl} min",
+        "ans_approved_evicted": "approuvé pour {ttl} min (le plan actif le plus ancien, {evicted}, a été abandonné : la limite était atteinte)",
+        "ans_stopped_one": "arrêté : plan {id}",
+        "ans_nothing_active_one": "rien n'était actif pour le plan {id}",
         "start_block": "🔐 keeper démarré : les modifications demandent maintenant votre approbation ici.",
         "start_observe": "🔐 keeper démarré en mode observation : rien n'est bloqué, les événements sont seulement "
                          "journalisés. Envoyez /summary (ou /resume) pour voir ce qui aurait été refusé.",
@@ -148,6 +232,8 @@ MESSAGES = {
         "status_pending": "Propositions en attente : {n} (identifiants : {ids})",
         "status_no_pending": "Aucune proposition en attente.",
         "status_hourly": "Propositions dans la dernière heure : {n}/{limit}",
+        "status_standing_line": "• permanent {id} : {n} commande(s), expire dans {days} j",
+        "status_no_standing": "Aucun plan permanent configuré.",
         "plans_title": "📜 Derniers événements de plan",
         "plans_empty": "Aucun événement de plan enregistré pour l'instant.",
         "plans_line": "{at} — {id} : {outcome}",
@@ -157,7 +243,8 @@ MESSAGES = {
         "plans_outcome_expired": "expiré",
         "plans_outcome_revoked": "révoqué (stop)",
         "help_title": "Commandes :",
-        "help_stop": "/stop — révoque immédiatement tout plan actif et toute proposition en attente",
+        "help_stop": "/stop [id] — révoque immédiatement tout plan actif et toute proposition en attente, ou "
+                     "seulement le plan nommé (l'identifiant d'un plan permanent fonctionne aussi)",
         "help_status": "/status — mode, plans actifs/en attente, propositions restantes cette heure",
         "help_plans": "/plans [n] — les n derniers événements de plan (5 par défaut, 20 au maximum)",
         "help_summary": "/summary [jours] — résumé du journal des refus/autorisations (alias /resume)",
@@ -209,17 +296,34 @@ def render_plan_card(lang, p):
     prose, so prose cannot hide a wide scope; the agent's explanation comes last, labelled as such."""
     plan, h = p["plan"], p["hash"][:12]
     warn = ""
+    # Multiple active plans (requirement 6): say, BEFORE approval, what approving this one will do to the plans
+    # already active in this session -- never silently. "first" (no active plan yet) adds nothing, so a session's
+    # first card is unchanged (and test_plan_card_in_english_is_unchanged pins that exact text).
+    preview = p.get("preview") or {}
+    pk = preview.get("kind")
+    if pk == "renew":
+        warn += t(lang, "card_replaces", id=preview["id"]) + "\n"
+    elif pk == "evict":
+        warn += t(lang, "card_replaces_cap", id=preview["id"], limit=preview.get("limit", "")) + "\n"
+    elif pk == "add":
+        warn += t(lang, "card_adds_to", ids=", ".join(preview.get("ids") or [])) + "\n"
     if "script" in plan["actions"]:
         warn += t(lang, "warn_script") + "\n"
     if "delete" in plan["actions"]:
         warn += t(lang, "warn_delete") + "\n"
     if not plan["targets"]:
         warn += t(lang, "warn_no_targets") + "\n"
+    dirs = [tg for tg in plan["targets"] if tg.lower().startswith("dir:")]
+    if dirs:                                             # K-dir: a subtree grant must be visible, never silent
+        warn += t(lang, "warn_dir_prefix", dirs=", ".join(dirs)) + "\n"
     head = "\n".join([t(lang, "card_head"), t(lang, "card_plan", id=plan.get("id") or "-"),
                       t(lang, "card_targets", targets=", ".join(plan["targets"]) or t(lang, "card_any")),
                       t(lang, "card_actions", actions=", ".join(plan["actions"])),
                       t(lang, "card_duration", ttl=plan["ttl"]), t(lang, "card_fingerprint", fp=h)]) + "\n"
-    head += warn + t(lang, "card_stop_note") + "\n———\n" + t(lang, "card_explain") + "\n"
+    head += warn
+    if p.get("context"):                                 # this proposal follows a refusal (item 2): say what of it
+        head += t(lang, "card_context", gap=p["context"]) + "\n"
+    head += t(lang, "card_stop_note") + "\n———\n" + t(lang, "card_explain") + "\n"
     kb = {"inline_keyboard": [[{"text": t(lang, "btn_approve"), "callback_data": f"approve:{h}:{p['nonce']}"},
                                {"text": t(lang, "btn_reject"), "callback_data": f"reject:{h}:{p['nonce']}"}],
                               [{"text": t(lang, "btn_stop"), "callback_data": "stop:all"}]]}
@@ -436,7 +540,8 @@ def tally(path, since):
 # Events that make up a plan's lifecycle, each carrying a "plan" id field (set in propose()/decide()); mapped to the
 # outcome word /plans shows. Reuses the exact same event names tally() already counts, so the two stay in sync.
 PLAN_EVENTS = {"proposed": "proposed", "approved": "approved", "rejected": "rejected",
-               "approval-of-expired-plan-ignored": "expired", "revoked-all": "revoked"}
+               "approval-of-expired-plan-ignored": "expired", "revoked-all": "revoked",
+               "revoked-one": "revoked", "plan-evicted": "revoked"}
 
 
 def plan_events(path, limit):
@@ -505,10 +610,24 @@ def render_summary(lang, st, days, mode):
 # existing log(), no free text, kept small by only firing on the slow path. Measures where a delay could sit:
 # waiting for keeper.lock, a single Telegram api() call, and the end-to-end handling of one update.
 # ---------------------------------------------------------------------------------------------------------------
+LAST_GAP_TTL_S = 600                   # a refusal's "what the plan lacks" is shown on the next card only within 10 min
 LOCK_WAIT_LOG_THRESHOLD = 1.0          # log keeper-lock-wait only once the wait itself is user-visible
 API_SLOW_LOG_THRESHOLD = 2.0           # log telegram-api-slow only when an api() call is this slow (or failed)
 UPDATE_SLOW_LOG_THRESHOLD = 5.0        # tally()'s own "slow" counter: telegram-update is logged for every update
                                         # (never conditional), so this is where "slow enough to count" is decided
+
+
+def migrate_state(state):
+    """Compatibility (requirement 8): before multi-plan support, a session held at most one active plan, as a
+    dict directly under `active`. Now `active` is a list. An old state.json is upgraded in place to the list
+    form, same plan, same hash, same expiry -- no right is widened, nothing is dropped. A state already in the
+    new (list) form, or with no `active` key at all, is returned unchanged. Safe to call on every load, so a
+    daemon restarted against a pre-upgrade state.json just works."""
+    for s in (state.get("sessions") or {}).values():
+        act = s.get("active")
+        if isinstance(act, dict):
+            s["active"] = [act]
+    return state
 
 
 # ---------------------------------------------------------------------------------------------------------------
@@ -518,6 +637,14 @@ class Keeper:
     def __init__(self, cfg, notifier, clock=time.time):
         self.cfg, self.notify, self.now = cfg, notifier, clock
         self.lang = norm_lang(cfg.get("lang"))                             # what the human reads; the agent's stays English
+        # Requirement 1: several active plans at once, bounded. A config typo or a tampered config file cannot
+        # raise this past MAX_ACTIVE_PLANS_HARD_CAP -- the clamp runs here, every time, not just at install.
+        self.max_active_plans = max(1, min(int(cfg.get("max_active_plans") or 3), MAX_ACTIVE_PLANS_HARD_CAP))
+        # Standing plans (docs/design-keeper-server.md §2): loaded ONLY from cfg, once, at start-up. There is no
+        # socket op, Telegram command or agent-reachable code path that writes self.standing -- the only way to
+        # create, widen or renew one is a root edit to the config file followed by a daemon restart.
+        self.standing = load_standing(cfg, self.now())
+        self.unattended_actors = frozenset(str(a) for a in (cfg.get("unattended_actors") or []))
         self.gate = load_gate(cfg.get("agent_home"))
         self.gate.SAFE_GIT_REPOS[:] = cfg.get("safe_git_repos") or []      # K6: trusted repos for git read verbs
         self.lock = threading.Lock()
@@ -526,9 +653,12 @@ class Keeper:
         self.state_path = os.path.join(cfg["state_dir"], "state.json")
         self.log_path = os.path.join(cfg["state_dir"], "log.jsonl")
         try:
-            self.state = json.load(open(self.state_path))
+            self.state = migrate_state(json.load(open(self.state_path)))
         except (OSError, ValueError):
             self.state = {"sessions": {}, "used_nonces": [], "proposals": []}
+        self.state.setdefault("plan_status", {})               # hash12 -> {state, at}; see _record_plan_status
+        self.state.setdefault("standing_disabled", [])          # ids stopped at runtime; see _revoke_all
+        self.state.setdefault("standing_usage", {})             # id -> {count, last_used}; see _touch_standing
 
     def save(self):
         tmp = self.state_path + ".tmp"
@@ -553,7 +683,7 @@ class Keeper:
         return self.state["sessions"].setdefault(str(sid or "no-session"), {})
 
     # ----- agent side ------------------------------------------------------------------------------------------
-    def propose(self, sid, text, scope_line):
+    def propose(self, sid, text, scope_line, actor=None):
         plan = self.gate.parse_scope("Scope: " + (scope_line or "")) or self.gate.parse_scope(text or "")
         if not plan:
             return {"ok": False, "reason": "no valid scope (actions=edit,git,deploy,api,browser,delete,script,doc)"}
@@ -567,13 +697,78 @@ class Keeper:
         body = json.dumps({"text": text, "scope": plan}, sort_keys=True)
         phash = hashlib.sha256(body.encode()).hexdigest()
         nonce = secrets.token_hex(8)
-        pending = {"plan": plan, "text": (text or "")[:3000], "hash": phash, "nonce": nonce, "proposed_at": now}
-        self.session(sid)["pending"] = pending
+        # Requirement 6 (multi-plans): the card must say, BEFORE approval, what approving this plan will do to the plans
+        # already active in this session. Purely advisory -- decide() recomputes the real outcome at approval time.
+        preview = self._preview_outcome(self.session(sid).get("active") or [], plan)
+        pending = {"plan": plan, "text": (text or "")[:3000], "hash": phash, "nonce": nonce, "proposed_at": now,
+                   "preview": preview}
+        s = self.session(sid)
+        last = s.pop("last_gap", None)        # this proposal may follow a refusal; say what of it, once
+        # ...but only if the refusal is recent: a refusal from an hour ago has nothing to do with this plan, and
+        # showing it on an unrelated card would send the human to read the wrong thing. A bare string (state written
+        # by an earlier version, no timestamp) is dropped the same way.
+        if isinstance(last, dict) and now - float(last.get("at", 0)) <= LAST_GAP_TTL_S and last.get("text"):
+            pending["context"] = last["text"]
+        s["pending"] = pending
         self.state["proposals"] = recent + [now]
         self.save()
         self.log({"event": "proposed", "session": sid, "plan": plan.get("id"), "hash": phash[:12]})
-        return {"ok": True, "hash": phash[:12], "message": "sent to the human for approval",
-                "_notify": (sid, pending)}                     # sent by the caller, outside the lock
+        out = {"ok": True, "hash": phash[:12], "message": "sent to the human for approval"}
+        # Standing-plan design, §2: an unattended actor's proposal is still recorded (so /plans and /summary show
+        # it the next time the owner looks), but must never push a Telegram card -- nobody is there to tap it, and
+        # training the owner to approve a card they cannot explain at 3am is worse than no gate. `actor` only ever
+        # carries this meaning when it is a root-configured tag (see keeper_client.py): the agent cannot set it.
+        if actor is not None and str(actor) in self.unattended_actors:
+            self.log({"event": "standing-propose-suppressed", "session": sid, "actor": str(actor),
+                       "plan": plan.get("id"), "hash": phash[:12]})
+            out["unattended"] = True
+        else:
+            out["_notify"] = (sid, pending)                   # sent by the caller, outside the lock
+        return out
+
+    def _preview_outcome(self, active, new_plan):
+        """What approving `new_plan` would do to this session's `active` list, right now (requirement 6). A plan
+        with the same id as one already active renews it (requirement 4); otherwise it is added, unless the cap
+        is already reached, in which case the oldest active plan would be dropped (requirement 3)."""
+        new_id = new_plan.get("id")
+        if new_id is not None:
+            for a in active:
+                if a["plan"].get("id") == new_id:
+                    return {"kind": "renew", "id": new_id}
+        if len(active) >= self.max_active_plans:
+            oldest = min(range(len(active)), key=lambda i: (active[i]["approved_at"], i))
+            return {"kind": "evict", "id": active[oldest]["plan"].get("id") or "-", "limit": self.max_active_plans}
+        if active:
+            return {"kind": "add", "ids": [a["plan"].get("id") or "-" for a in active]}
+        return {"kind": "first"}
+
+    # ----- standing plans (docs/design-keeper-server.md §2) -----------------------------------------------------
+    def _standing_lookup(self, command):
+        """The id of a standing plan whose literal commands include exactly `command` (already stripped), not
+        expired, not disabled via /stop -- or None. Exact string equality only, deliberately: no prefix, no
+        substring, no pattern. A standing plan is a finite, owner-written list of commands, not a category."""
+        now = self.now()
+        disabled = self.state.get("standing_disabled") or []
+        for sid, p in self.standing.items():
+            if sid in disabled or p["expires_at"] <= now:
+                continue
+            if command in p["commands"]:
+                return sid
+        return None
+
+    def _touch_standing(self, sid):
+        usage = self.state.setdefault("standing_usage", {})
+        rec = usage.setdefault(sid, {"count": 0, "last_used": None})
+        rec["count"] += 1
+        rec["last_used"] = self.now()
+        self.save()
+
+    def _standing_view(self):
+        """Every currently-valid (not expired, not disabled) standing plan, for keeper-status and /status."""
+        now = self.now()
+        disabled = self.state.get("standing_disabled") or []
+        return [{"id": sid, "commands": p["commands"], "expires_in_days": max(0, int((p["expires_at"] - now) / 86400))}
+                for sid, p in sorted(self.standing.items()) if sid not in disabled and p["expires_at"] > now]
 
     def keeper_command(self, cmd):
         """`keeper-propose …` or `keeper-status` alone in a Bash call: (name, {option: value}), else None."""
@@ -584,31 +779,58 @@ class Keeper:
             toks = shlex.split(cmd)
         except (ValueError, TypeError):
             return None
-        if not toks or os.path.basename(toks[0]) not in ("keeper-propose", "keeper-status") \
+        name = os.path.basename(toks[0]) if toks else ""
+        if name not in ("keeper-propose", "keeper-status") \
                 or os.path.dirname(toks[0]) not in ("", "/opt/agent-guardrails/bin"):
             return None
+        allowed = ("--scope", "--text", "--wait") if name == "keeper-propose" else ("--scope", "--text")
         opts, i = {}, 1
         while i < len(toks):
-            if toks[i] in ("--scope", "--text") and i + 1 < len(toks):
+            if toks[i] in allowed and i + 1 < len(toks):
                 opts[toks[i][2:]] = toks[i + 1]
                 i += 2
             else:
                 return None
-        return os.path.basename(toks[0]), opts
+        if "wait" in opts and not re.fullmatch(r"\d{1,7}", opts["wait"]):     # a plain non-negative integer only
+            return None                                                      # (clamped to wait_max_sec in check());
+            # anything else (negative, decimal, non-numeric) is not recognized, same fallback as any other option
+        return name, opts
 
-    def check(self, sid, tool, tool_input, cwd=None):
+    def check(self, sid, tool, tool_input, cwd=None, actor=None):
         self.gate.CWD = cwd                                            # the dir the agent ran the tool in (K6)
         kc = self.keeper_command(tool_input.get("command", "")) if tool == "Bash" else None
         if kc and kc[0] == "keeper-status":
             return {"decision": "deny", "reason": "keeper status (nothing was run): " + json.dumps(self.status(sid))}
         if kc:
-            out = self.propose(sid, kc[1].get("text", ""), kc[1].get("scope", ""))
-            why = (f"keeper: plan sent to the human for approval (fingerprint {out['hash']}). Nothing was run. Wait for "
-                   "their decision, then retry the actions." if out["ok"] else f"keeper: proposal refused: {out['reason']}")
+            opts = kc[1]
+            out = self.propose(sid, opts.get("text", ""), opts.get("scope", ""), actor=actor)
+            if out.get("unattended"):
+                why = (f"keeper: plan recorded for the owner's next review (fingerprint {out['hash']}); no alert was "
+                       "sent (unattended actor, nobody is watching right now). Nothing was run." if out["ok"]
+                       else f"keeper: proposal refused: {out['reason']}")
+            else:
+                why = (f"keeper: plan sent to the human for approval (fingerprint {out['hash']}). Nothing was run. Wait for "
+                       "their decision, then retry the actions." if out["ok"] else f"keeper: proposal refused: {out['reason']}")
             res = {"decision": "deny", "reason": why}
             if out.get("_notify"):
                 res["_notify"] = out["_notify"]
+            if out["ok"] and "wait" in opts and not out.get("unattended"):
+                # The hook polls keeperd's "status" op (by fingerprint only) for up to this many seconds instead of
+                # the agent having to re-run keeper-status itself. Clamped here, never inside propose(): wait is a
+                # per-call client preference, not part of the plan, and must never enter the plan's hash/scope.
+                # Skipped for an unattended actor (design §2): nobody is there to decide, so waiting would only
+                # burn the headless job's own time budget on every single run.
+                res["hash"], res["wait"] = out["hash"], min(int(opts["wait"]), effective_wait_max(self.cfg))
             return res
+        if tool == "Bash":
+            # Standing plans (design §2): an exact literal match is allowed immediately, logged, and never even
+            # reaches the heuristic classifier below -- there is no category/target ambiguity to get wrong for a
+            # command the owner approved character-for-character in the config file.
+            std_id = self._standing_lookup((tool_input.get("command") or "").strip())
+            if std_id:
+                self._touch_standing(std_id)
+                self.log({"event": "standing-used", "session": sid, "standing": std_id})
+                return {"decision": "allow", "reason": ""}
         try:
             kind, detail = self.gate.classify(tool, tool_input)
         except Exception as e:                                   # a classifier crash must never let a change through
@@ -618,33 +840,88 @@ class Keeper:
             return {"decision": "allow", "reason": ""}
         items = [(k, d, st) for k, d, st in self.gate.CHANGES] if tool == "Bash" and self.gate.CHANGES else [(kind, detail, None)]
         s = self.session(sid)
-        act = s.get("active")
-        if act and act["expires"] < self.now():
-            s.pop("active", None)
-            act = None
+        # Requirement 2: several plans can be active at once; an item (one stage of a compound Bash command, as
+        # go-gate already splits it) is allowed when AT LEAST ONE of them covers it ENTIRELY. covers() itself
+        # never lets two plans' targets/actions add up to cover one call -- it is always asked about a single
+        # plan, whole -- so this loop never unions pieces of different plans into one approval; it only lets
+        # DIFFERENT stages of one already-split compound command be covered by different plans, which is the one
+        # exception the task calls for ("sauf cas des actions multi-étapes déjà découpées par go-gate").
+        active = [a for a in (s.get("active") or []) if a["expires"] >= self.now()]
+        if len(active) != len(s.get("active") or []):
+            s["active"] = active
             self.save()
+        used = []
         for k, d, st in items:
             cat = self.gate.category(tool, tool_input, k, d)
-            if not (act and self.gate.covers(act["plan"], tool, tool_input, cat, st)):
+            match, gaps = None, []
+            for a_ in active:                       # one plan must cover the item ENTIRELY; the gaps explain why none did
+                g_ = self.gate.coverage_gap(a_["plan"], tool, tool_input, cat, st)
+                if g_ is None:
+                    match = a_
+                    break
+                gaps.append((a_, g_))
+            if match is None:
+                ids = [a_["plan"].get("id") or "-" for a_ in active]
                 self.log({"event": "denied" if self.cfg["mode"] == "block" else "would-deny", "session": sid,
-                          "tool": tool, "category": cat, "shape": command_shape(tool, st, cat),
-                          "plan": act["plan"].get("id") if act else None})
+                          "tool": tool, "category": cat, "shape": command_shape(tool, st, cat), "plans": ids})
                 if self.cfg["mode"] != "block":
                     return {"decision": "allow", "reason": ""}
-                why = (f"keeper: this is a change ({cat}) and no approved plan covers it. Propose a plan with "
-                       "keeper-propose; the human approves it on the keeper bot.")
-                if act:
-                    why = f"keeper: the approved plan '{act['plan'].get('id')}' does not cover this {cat} action."
+                if active:
+                    detail_gap = "; ".join(f"plan '{a_['plan'].get('id') or '-'}': {self.gate.describe_gap(g_, a_['plan'])}"
+                                           for a_, g_ in gaps)
+                    why = (f"keeper: this is a change ({cat}); no active plan covers it: {detail_gap}. Propose a plan "
+                           "with keeper-propose, or check keeper-status.")
+                    s["last_gap"] = {"text": detail_gap[:500], "at": self.now()}   # next proposal's card, once, if recent
+                    self.save()
+                else:
+                    why = (f"keeper: this is a change ({cat}) and no approved plan covers it. Propose a plan with "
+                           "keeper-propose; the human approves it on the keeper bot.")
                 return {"decision": "deny", "reason": why}
-        self.log({"event": "allowed", "session": sid, "tool": tool, "plan": act["plan"].get("id")})
+            used.append(match["plan"].get("id"))
+        self.log({"event": "allowed", "session": sid, "tool": tool, "plans": used})
         return {"decision": "allow", "reason": ""}
 
     def status(self, sid):
-        s = self.session(sid)
-        act = s.get("active")
-        if act and act["expires"] > self.now():
-            return {"active": act["plan"], "expires_in_min": int((act["expires"] - self.now()) / 60)}
-        return {"active": None, "pending": bool(s.get("pending"))}
+        """`keeper-status`: every active plan of this session (requirement 5), never the agent's free-form text.
+        Also lists every currently-valid standing plan (design §2): an agent that wants to know what it can already
+        do without proposing can read this instead of guessing."""
+        now = self.now()
+        active = [a for a in (self.session(sid).get("active") or []) if a["expires"] > now]
+        return {"active": [dict(a["plan"], expires_in_min=int((a["expires"] - now) / 60)) for a in active],
+                "pending": bool(self.session(sid).get("pending")), "standing": self._standing_view()}
+
+    # ----- plan status by fingerprint (keeper-propose --wait) ----------------------------------------------------
+    # A read-only view of what decide() already decided, keyed by the plan's hash12 instead of a session. Exists so
+    # a client can wait for a decision without re-running keeper-status itself. The vocabulary is closed to exactly
+    # four words -- pending/approved/rejected/expired -- and "never proposed" / "ledger entry aged out" both answer
+    # "expired" too: a fifth, distinguishable "unknown" would let a socket client tell those two apart and probe
+    # for live fingerprints. Never includes the plan's text or scope (council constraint: only the state travels).
+    PLAN_STATUS_RETENTION_SEC = 86400
+
+    def _record_plan_status(self, h, state):
+        """Called from decide() only (approve/reject/expired-on-decide), never from anything the socket drives: the
+        ledger is write-once per outcome and has no path back to "pending", so a socket client can only ever learn
+        of a decision decide() already made, never cause one. Bounded by age, not by a click: unlike used_nonces
+        (bounded by count because a replay is cheap to attempt), a decision is written at most once per plan, so
+        the only growth to bound here is time."""
+        now = self.now()
+        self.state["plan_status"] = {k: v for k, v in self.state["plan_status"].items()
+                                      if now - v["at"] < self.PLAN_STATUS_RETENTION_SEC}
+        self.state["plan_status"][h] = {"state": state, "at": now}
+
+    def plan_status(self, h):
+        """pending / approved / rejected / expired for a plan's hash12 -- never the plan itself. Read-only: it does
+        not pop or mutate a pending entry even past its age limit, so it can never race decide()'s own, separate
+        expiry check (which still applies when a late approval actually arrives)."""
+        rec = self.state["plan_status"].get(h)
+        if rec:
+            return rec["state"]
+        for s in self.state["sessions"].values():
+            p = s.get("pending")
+            if p and p["hash"][:12] == h:
+                age = self.now() - p["proposed_at"]
+                return "expired" if age > self.cfg["pending_max_age_min"] * 60 else "pending"
+        return "expired"                                        # never proposed, or its ledger entry aged out
 
     # ----- human side (only reached from the bot) ---------------------------------------------------------------
     def is_owner(self, from_id, chat_id):
@@ -673,11 +950,18 @@ class Keeper:
                 self.log({"event": "command-from-stranger-ignored"})
             return None
         text = text.strip()
-        if re.fullmatch(r"/stop(?:@\w+)?", text, re.I):
+        # Requirement 5: /stop with no argument still revokes every plan (unchanged); /stop <id> revokes only the
+        # named plan, active or pending, in every session (plans are not scoped to a session, see is_owner()'s
+        # neighbour docstring on sessions not being a security boundary).
+        m = re.fullmatch(r"/stop(?:@\w+)?(?:\s+([A-Za-z0-9_.-]{1,40}))?", text, re.I)
+        if m:
             # Unlike /status and /plans below (reads, same no-lock precedent as /summary), this mutates self.state:
             # it must take the lock, exactly as decide()'s own stop branch does when the button is pressed instead.
+            plan_id = m.group(1)
             with self.lock_scope("stop"):
-                had = self._revoke_all()
+                had = self._revoke_all(plan_id)
+            if plan_id:
+                return [self.msg("ans_stopped_one", id=plan_id) if had else self.msg("ans_nothing_active_one", id=plan_id)]
             return [self.msg("ans_stopped") if had else self.msg("ans_nothing_active")]
         if re.fullmatch(r"/status(?:@\w+)?", text, re.I):
             return self.status_report()
@@ -713,14 +997,15 @@ class Keeper:
         skipped, the same way it would stop covering a call in check())."""
         lines = [self.msg("status_title", mode=self.cfg["mode"])]
         active = []
+        now = self.now()
         for sid, s in sorted(self.state["sessions"].items()):
-            act = s.get("active")
-            if act and act["expires"] > self.now():
-                plan = act["plan"]
-                active.append(str(self.msg("status_active_line", session=sid, id=plan.get("id") or "-",
-                                            actions=", ".join(plan["actions"]),
-                                            targets=", ".join(plan["targets"]) or self.msg("card_any"),
-                                            left=max(0, int((act["expires"] - self.now()) / 60)))))
+            for act in sorted(s.get("active") or [], key=lambda a: a["plan"].get("id") or ""):
+                if act["expires"] > now:
+                    plan = act["plan"]
+                    active.append(str(self.msg("status_active_line", session=sid, id=plan.get("id") or "-",
+                                                actions=", ".join(plan["actions"]),
+                                                targets=", ".join(plan["targets"]) or self.msg("card_any"),
+                                                left=max(0, int((act["expires"] - now) / 60)))))
         lines += active if active else [self.msg("status_no_active")]
         pending = [s["pending"]["plan"].get("id") or "-" for _sid, s in sorted(self.state["sessions"].items())
                    if s.get("pending")]
@@ -728,6 +1013,9 @@ class Keeper:
                      else self.msg("status_no_pending"))
         recent = len([t for t in self.state["proposals"] if t > self.now() - 3600])
         lines.append(self.msg("status_hourly", n=recent, limit=self.cfg["max_proposals_per_hour"]))
+        standing = [str(self.msg("status_standing_line", id=p["id"], n=len(p["commands"]), days=p["expires_in_days"]))
+                    for p in self._standing_view()]
+        lines += standing if standing else [self.msg("status_no_standing")]
         return split_message(mask_text("\n".join(str(x) for x in lines)))
 
     def plans(self, n=PLANS_DEFAULT):
@@ -772,16 +1060,61 @@ class Keeper:
             self._lock_holder = None
             self.lock.release()
 
-    def _revoke_all(self):
-        """Every active and pending plan of every session (council review 08/10: Stop is global, not per-card).
-        Shared by the Stop button (decide()) and the `/stop` text command — one revocation path, not two."""
+    def _revoke_all(self, plan_id=None):
+        """Every active and pending plan of every session (council review 08/10: Stop is global, not per-card),
+        or -- requirement 5 -- just the ones whose id is `plan_id`. Shared by the Stop button (decide()) and the
+        `/stop` / `/stop <id>` text command — one revocation path, not two. As before plan_id=None, dropping a
+        pending proposal never by itself counts towards `had`: the answer ("nothing was active") only ever
+        speaks of ACTIVE plans, even though a pending one is always dropped too."""
         had = False
         for s in self.state["sessions"].values():
-            had = bool(s.pop("active", None)) or had
-            s.pop("pending", None)
+            if plan_id is None:
+                had = bool(s.pop("active", None)) or had
+                s.pop("pending", None)
+                continue
+            active = s.get("active") or []
+            keep = [a for a in active if a["plan"].get("id") != plan_id]
+            if len(keep) != len(active):
+                had = True
+                s["active"] = keep
+            pending = s.get("pending")
+            if pending and pending["plan"].get("id") == plan_id:
+                s.pop("pending", None)
+        # A standing plan's id works with /stop too (design §2): disabled at once, persisted in standing_disabled.
+        # This is the one runtime change the socket/Telegram side can make to a standing plan -- revoke, never
+        # create or widen. Re-enabling one needs a root edit (removing it from standing_disabled, or restarting
+        # without it in standing_disabled) -- not reachable from here, by design.
+        if plan_id is not None and plan_id in self.standing:
+            disabled = self.state.setdefault("standing_disabled", [])
+            if plan_id not in disabled:
+                disabled.append(plan_id)
+                had = True
         self.save()
-        self.log({"event": "revoked-all"})
+        self.log({"event": "revoked-all" if plan_id is None else "revoked-one", "plan": plan_id})
         return had
+
+    def _activate(self, s, p):
+        """Add p's plan to session `s`'s active list (requirements 3 and 4). A plan whose id matches one already
+        active renews it in place (same slot, fresh hash/expiry) rather than adding a second entry. Otherwise it
+        is appended; past the cap, the OLDEST active plan (by approval time, ties broken towards the one approved
+        first) is dropped to make room -- the brand new entry, just appended, is never a candidate for that, so
+        a fresh approval can never evict itself. Returns the dropped plan's id, or None (requirement 3: this is
+        reported to both the human, in the return value callers turn into ans_approved_evicted, and the agent,
+        which sees the current active ids in keeper-status and in the next denied call's reason)."""
+        active = s.setdefault("active", [])
+        new_id = p["plan"].get("id")
+        if new_id is not None:
+            for i, a in enumerate(active):
+                if a["plan"].get("id") == new_id:
+                    active[i] = {"plan": p["plan"], "hash": p["hash"], "approved_at": self.now(),
+                                 "expires": self.now() + p["plan"]["ttl"] * 60}
+                    return None
+        active.append({"plan": p["plan"], "hash": p["hash"], "approved_at": self.now(),
+                       "expires": self.now() + p["plan"]["ttl"] * 60})
+        if len(active) > self.max_active_plans:
+            oldest = min(range(len(active) - 1), key=lambda i: (active[i]["approved_at"], i))
+            return active.pop(oldest)["plan"].get("id") or "-"
+        return None
 
     def decide(self, from_id, chat_id, data):
         """A button press. data = approve:<hash12>:<nonce> | reject:<hash12>:<nonce> | stop:<session>"""
@@ -804,17 +1137,27 @@ class Keeper:
                 self.state["used_nonces"] = (self.state["used_nonces"] + [nonce])[-1000:]
                 s.pop("pending", None)
                 if action == "reject":
+                    self._record_plan_status(h, "rejected")
                     self.save()
                     self.log({"event": "rejected", "session": sid, "plan": p["plan"].get("id")})
                     return self.msg("ans_rejected")
                 if self.now() - p["proposed_at"] > self.cfg["pending_max_age_min"] * 60:
+                    self._record_plan_status(h, "expired")
                     self.save()
                     self.log({"event": "approval-of-expired-plan-ignored", "session": sid, "plan": p["plan"].get("id")})
                     return self.msg("ans_expired")
-                s["active"] = {"plan": p["plan"], "hash": p["hash"], "approved_at": self.now(),
-                               "expires": self.now() + p["plan"]["ttl"] * 60}
+                evicted = self._activate(s, p)
+                self._record_plan_status(h, "approved")
                 self.save()
-                self.log({"event": "approved", "session": sid, "plan": p["plan"].get("id"), "hash": h})
+                self.log({"event": "approved", "session": sid, "plan": p["plan"].get("id"), "hash": h,
+                          "evicted": evicted})
+                if evicted:
+                    # A visible lifecycle event of its own (requirement 3: never silently), under the dropped
+                    # plan's own id, so /plans shows it as "revoked" without having to parse the approval's
+                    # "evicted" field.
+                    self.log({"event": "plan-evicted", "session": sid, "plan": evicted,
+                              "replaced_by": p["plan"].get("id")})
+                    return self.msg("ans_approved_evicted", ttl=p["plan"]["ttl"], evicted=evicted)
                 return self.msg("ans_approved", ttl=p["plan"]["ttl"])
         self.log({"event": "decision-unknown-plan-ignored"})
         return self.msg("ans_unknown")
@@ -1051,6 +1394,15 @@ def serve(keeper, cfg, ready=None):
             if uid not in cfg["agent_uids"]:                            # empty list = nobody (fail closed)
                 keeper.log({"event": "socket-peer-refused", "uid": uid})
                 return self.reply({"decision": "deny", "reason": "keeper: unknown client"})
+            if req.get("op") == "status":
+                # keeper-propose --wait polls this instead of re-running keeper-status: by fingerprint only, never
+                # the plan itself. Same peer check as "check" above; no lock_scope label needed, the read is brief.
+                h = req.get("hash")
+                if not isinstance(h, str) or not re.fullmatch(r"[0-9a-f]{12}", h):
+                    return self.reply({"error": "bad hash"})
+                with keeper.lock_scope("status"):
+                    state = keeper.plan_status(h)
+                return self.reply({"state": state})
             if req.get("op") != "check" or not isinstance(req.get("input") or {}, dict):
                 return self.reply({"error": "unknown op"})
             # Lock audit (13/10, chasing the reported lag): check() runs the go-gate classifier, which is slower
@@ -1061,9 +1413,10 @@ def serve(keeper, cfg, ready=None):
             # classification. Making that safe would mean changing go-gate itself, out of scope here. send_plan()
             # below (the actual network call) already runs after this scope ends, not inside it; propose() has no
             # lock site of its own, it runs inside this same one.
+            actor = req.get("actor")                            # an optional, root-set tag (see keeper_client.py)
             with keeper.lock_scope("check"):
                 out = keeper.check(req.get("session"), str(req.get("tool", "")), req.get("input") or {},
-                                   req.get("cwd"))
+                                   req.get("cwd"), actor if isinstance(actor, str) else None)
             note = out.pop("_notify", None)
             # Dry run (11/10): send_plan() used to run AFTER the reply, so the agent was told "sent to the human"
             # even when Telegram was down and nothing reached them. Attempted first; the reason is rewritten only
@@ -1102,6 +1455,13 @@ def load_config(path=None):
     p = path or os.environ.get("KEEPER_CONFIG", "/etc/keeper/config.json")
     with open(p) as f:
         cfg.update(json.load(f))
+    for k in ("wait_max_sec", "hook_timeout_sec"):
+        if isinstance(cfg[k], bool) or not isinstance(cfg[k], int) or cfg[k] < 0:
+            raise ValueError(f"config: {k} must be a non-negative integer (seconds)")
+    if cfg["wait_max_sec"] > effective_wait_max(cfg):
+        print(f"keeperd: wait_max_sec={cfg['wait_max_sec']} does not fit under hook_timeout_sec={cfg['hook_timeout_sec']} "
+              f"(needs {HOOK_TIMEOUT_MARGIN_SEC}s of margin): --wait is clamped to {effective_wait_max(cfg)}s. A hook killed "
+              "by its timeout does not block the tool call.", file=sys.stderr)
     return cfg
 
 
