@@ -1,4 +1,4 @@
-# Results so far (late September – early October 2026)
+# Results so far (29 September – 22 October 2026)
 
 ## At a glance
 
@@ -15,10 +15,14 @@
 | go-gate | Changes within 2 h of a short explicit GO (simulation, 4,693 changes) | 45% | 06/10 | Medium: proximity in time, not a replay |
 | council | Backtest on 3 real past mistakes | 2 of 3 caught; 3 of 3 with full context | 29/09 | Medium: the agent picked the cases |
 | council | Runs where the cross-review step added a point or a correction | 27 of 28 runs; 16% of synthesis points; 15 wrong claims added | 06/10 | Medium: judged by a model |
+| keeper | Block mode in real use, 7 days to 22/10 (one machine, one user): decisions | **986**: 841 allowed under an approved plan, 145 refused, 0 simulated refusals; 86 plans proposed (81 approved, 1 refused, 1 expired) | 22/10 | Medium: real use, but one person on one machine in an unusually busy week; most refusals are "no plan yet", not errors |
+| keeper | Observe mode, first review (08/10 to 11/10, before block mode) | 414 would-deny events; most are real changes | 11/10 | Medium: a log reviewed by the owner |
+| go-gate | One week of observation, before the keeper | 1,186 would-block events | 11/10 | Medium: same |
+| tests | Automated tests at the release candidate | **520**: keeper 278, go-gate 133, docker-proxy 54, leak-check 32, council 14, secret-guard 9 | 22/10 | Low as a quality measure (a count, not coverage); CI runs on Linux, macOS is not covered |
 
 Blind-set scores measure **agreement with another model's labels**, so they say how much of what a fresh model thinks of is covered. They don't count leaks. leak-check counts leaks, but only the ones it can see. Its inventory (what was checked) is the denominator, not the total of secrets in existence.
 
-About 20 runs, roughly $3 in total, and four members from four vendors. Each run is logged with two questions:
+53 saved reports between 29/09 and 22/10 (9 of them on 22/10 alone, for the public texts and the release), four members from four vendors. The first ~20 runs cost roughly $3 in total; the later ones sent much longer inputs and the key's budget had to be raised to $20 per 30 days on 22/10, so cost per run was not re-measured. Each run is logged with two questions:
 - did it find a real problem the agent had missed?
 - did it change the decision?
 
@@ -47,8 +51,28 @@ What it found that the agent had missed:
 | Media pipeline audit | the torrent client was reachable from the whole LAN with CSRF/Host checks disabled |
 | On-call agent update rights | it agreed the restriction was right, and required: abort if the snapshot fails, automatic purge of backups that contain secrets, a tested per-service restore, and a disk-space check |
 | What to borrow from another news-digest project | a links and numbers guardrail; deduplication by event |
+| Keeper design (08/10) | classification moved into the daemon, hook code owned by root, the human display generated from the scope, an authenticated socket, the server left out of v1 |
+| Keeper code review (08/10) | 6 isolated alerts, each verified real and fixed: a missing private group, `~/bin/cat` after an edit plan, modifiable parents of `/usr/local`, a session guessable within 60 s, and more |
+| Release review of the public texts (22/10, 9 passes) | "it has root" contradicted the keeper's non-root precondition; absolute guarantees on the IT-leaders page; a "v1.0" date before any tag existed; a comparison row that could not be sourced; later passes found smaller inaccuracies |
 
-It changed the decision 7 times.
+It changed the decision 7 times (count from the log up to 06/10; the later reviews in the table above are listed, not recounted).
+
+## The keeper in real use (7 days to 22/10/2026)
+
+From the keeper's own `/summary 7` on one laptop, one user, in block mode, a week that included an unusually busy day of work done through the agent. These are field numbers, not a benchmark.
+
+| | |
+|---|---|
+| Decisions | 986: **841 allowed** under an approved plan, **145 refused**, 0 simulated refusals (block mode) |
+| Plans | 86 proposed, 81 approved, 1 refused, 1 expired (the summary does not account for the other 3) |
+| What was asked about | by category: script 66, edit 35, deploy 10, browser 8, git 7, doc 7, api 6, delete 6; by tool: Bash 117, Edit 10, then a few browser, scheduling and web tools |
+| Telegram | 12 errors in the week (URLError 6, HTTPError 4, ConnectionResetError 2); 454 idle polls were cut and restarted, no loss observed; 2 bursts of proposals were ignored by design |
+
+How to read it:
+- A refusal is mostly the first call of a task that no approved plan covers yet: the agent is told, proposes a plan, and a card arrives. It is not a malfunction, and it is also friction that a person has to accept.
+- The most frequent shapes (`python3 …`, a GitHub API script, `Edit`, `cp`, `rm`) show where plans have to be broad, which is also where the classifier's limits matter most: `actions=script` is unbounded by design.
+- What real use found that the tests had not, all fixed in v1.0: a hook that outlives its timeout let the command run (measured on Claude Code 2.1.302: it ran after about 67 s; with `onFailure: block` it was blocked); `Write(...)` deny rules that Claude Code ignores; only one active plan per session; a reinstall that overwrote a hand-edited setting; a reinstall that dropped the second agent from `agent_uids`.
+- What it does not measure: no forged approval was attempted against it in real use, nothing was tested against a hostile agent, the block-mode period (nine days by 21/10) ran on macOS while CI is Linux, and the server deployment has not been applied to a real host.
 
 ## Limits
 
@@ -56,6 +80,7 @@ It changed the decision 7 times.
 - **It can't judge UX.** It endorsed a Telegram annotation bot that the human found unpleasant to use within an hour. Mock-ups beat councils for that.
 - **Silent members.** One model returned empty answers in 6 runs: its hidden reasoning used up the whole token budget. A larger budget alone did not help. Medium reasoning effort fixed it. The quorum rule kept those runs honest (`INCOMPLETE`, or 3 voters).
 - **It is a problem finder, not a judge.** It rarely approves outright, even on good plans. What matters is the content of the BLOCKING list, not the label.
+- **Stale input.** On 22/10 one pass ran on a copy of the texts served from a cache right after a merge and flagged defects that were already fixed. Send the commit SHA with the text, and read the SHA of what was reviewed.
 - **What didn't work:** an LLM-judge scoring service scored every proposal, good or bad, between 0.03 and 0.06, so it was removed.
 
 ## secret-guard on a blind test set (06/10/2026)

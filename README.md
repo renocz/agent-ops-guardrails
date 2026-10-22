@@ -146,34 +146,9 @@ These are one person's field notes, not a benchmark.
 
 ## How this compares
 
-As read on 2026-10-11, from each project's own README/landing page or primary documentation (no blog posts, no
-sponsored write-ups). Quotes are paraphrased from the cited page; "not verified" means the page does not say and no
-other primary source was checked. These are young, mostly single-maintainer projects, including this one: none of
-this is an endorsement, and a thin or missing cell is not evidence of absence, only that the page does not say.
+The closest projects each pick a different answer to the same question, *who may say yes, and where does that yes live*: a keypress in the same terminal (sudo-proxy), a separate signer with a signed audit log (infrabroker), a typed catalogue of actions the model cannot go beyond (sysknife), an artefact-level approval runtime (chap), a local web approval with signed receipts (term_mcp_deepseek), a closed-source daemon (Proofpane). This project's choice is a separate user plus a button on a second Telegram bot the agent cannot read, with a heuristic classifier deciding what counts as a change. Others are stronger on audit logs (several sign or hash-chain them) and on typed actions; like infrabroker (which uses Slack), this one approves through a channel separate from the terminal, here Telegram.
 
-| Project | Approval lives | Covers | Granularity | Out-of-band channel | Observe mode | Audit log | Secrets kept from the model |
-|---|---|---|---|---|---|---|---|
-| **keeper** (this repo) | Separate user (`_keeper`/`keeper` daemon); go-gate alone is same-process | Every tool call, via go-gate's classifier | Per plan (scope + TTL), checked call by call | Yes — a second Telegram bot the agent cannot read | Yes, default | Plain JSON lines (`log.jsonl`); not hash-chained or signed | **No.** Output filtering is secret-guard's job, in the agent's own process (keeper/README.md, "What the keeper does and does not guarantee") |
-| [tarides/sudo-proxy](https://github.com/tarides/sudo-proxy) | Same terminal as the human approver; a separate machine when used over SSH | Its own `execute` tool (shell), not other tool calls | Per command, no auto-approve | No — the keypress is in the same terminal flow, not a separate channel | Not documented | Only with `-v`; format not documented | Yes, claimed: no password stored, "sanitized allowlist" environment |
-| [luisgf/infrabroker](https://github.com/luisgf/infrabroker) | Separate process (`cmd/signer`) in server mode; same process in local/quickstart mode | SSH and Kubernetes only | Per command (SSH); per verb/resource/namespace (k8s) | Yes, an optional control-plane `/v1/approvals/{id}` endpoint (channel not named) | Yes, action budgets ("observe or enforce"); dry-run for commands | Yes, strong: append-only, Ed25519-signed, SHA-256-chained | Yes, explicit: "nothing enters the model's context" |
-| [BrightbeamAI/chap](https://github.com/BrightbeamAI/chap) | Not specified — coordinator can be "embedded in your own process or run as a server" | Work artefacts (diffs, tasks, reviews); an MCP gate exists but its scope isn't detailed | Per artefact (e.g. a diff), not per command | Not described | Yes, named ("shadow and trial modes"), no details given | Yes, strong: hash-chained, optional transparency log | Not verified |
-| [lacs-project/sysknife](https://github.com/lacs-project/sysknife) | Separate process **and** separate user (privileged daemon) | A catalogue of 192 typed actions only — "the AI never supplies a command" (though some actions still run via `sh -c`, built by SysKnife itself) | Per step, with a transaction id; `--yes` can skip up to a risk ceiling | Yes, the terminal ("a channel the model does not sit on"); Telegram is roadmap only | `--dry-run` (plan only) and a read-only observer role | Yes, strong: hash-chained SQLite/Postgres, Ed25519-signed | Not verified |
-| [OthmaneBlial/term_mcp_deepseek](https://github.com/OthmaneBlial/term_mcp_deepseek) | Local web UI on the same machine (`127.0.0.1:8000`); not stated as a separate OS user | Shell commands ("parsed without a shell"); coverage of non-shell tool calls not verified | Attaches to a versioned plan, not clearly per command | Not documented — approval is in the same local UI | `inspect` mode is read-only by default, but the README does not say it blocks execution | Yes: signed receipts per action | Not verified |
-| [Proofpane](https://github.com/Proofpane/releases) | Local MCP daemon on the same machine (stdio); **daemon is closed-source** | Claims coding agents, workflow tools and LLM APIs; the daemon itself ships 13 tools and its own `coverage` command admits "ungoverned" paths exist | Per call, claimed | "Pause for a human" / "human-approval gates" mentioned, channel not documented | Not documented | Claimed: SHA-256 hash-chained, Ed25519-anchored — **not verifiable, the daemon's code is proprietary** | Claimed for the daemon's mediated tools — **not verifiable, closed-source** |
-
-**Where others are stronger than this project, plainly:** infrabroker, sysknife and (on paper) chap and Proofpane
-sign and hash-chain their audit log; keeper's `log.jsonl` is a plain, unsigned file an operator with disk access
-could edit. sysknife's typed-action catalogue is a stronger guarantee than go-gate's heuristic classifier — "the AI
-never supplies a command" closes a whole class of disguise this project can only chase case by case (see
-[go-gate/test_disguise.py](go-gate/test_disguise.py)). infrabroker states outright that secrets never enter the
-model's context; this project does not make that claim for keeper itself, only for secret-guard, which runs
-in-process.
-
-**Not verified:** sysknife and term_mcp_deepseek make no claim about secrets reaching the model; chap gives no
-detail on its out-of-band channel, MCP-gate scope or model secrecy; Proofpane's audit-log and secret-masking claims
-could not be checked past its README, since the daemon implementing them is proprietary; LangGraph's
-`interrupt()` was looked at and left out of the table: its official documentation could not be reached from this
-environment on 2026-10-11 (checked three times), and a secondary summary is not enough to compare it fairly.
+The full table, read from each project's own page on 2026-10-22, with what changed since the first reading and where others are stronger: [docs/comparison.md](docs/comparison.md).
 
 ## License
 
