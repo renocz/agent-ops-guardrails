@@ -2,7 +2,7 @@
 
 One version scheme: **a repository tag per release**. Components have no version of their own. Commit messages from 06/10/2026 that say "secret-guard v0.3/v0.4/v0.5" refer to the intermediate revisions listed under v0.6.
 
-## v1.0 (21/10/2026)
+## v1.0 (release candidate; the date is set when the tag is created)
 
 - **`install-keeper.sh`: `--agent-user` is repeatable, and a reinstall no longer silently drops a second agent
   from `agent_uids` (owner review of the server deployment entry below, 21/10/2026).** The bug: every `--apply`
@@ -40,7 +40,7 @@ One version scheme: **a repository tag per release**. Components have no version
   guessed: `install-keeper.sh`'s `agent_uids` key was silently reset to one entry by every reinstall (fixed
   above, same day); and Docker Engine ships its own, unrelated binary also named `docker-proxy`, an exact
   basename collision with this kit's agent-facing wrapper that depends on `PATH` order to resolve correctly (now
-  checked for and warned about). No code from `keeper/` or `docker-proxy/`'s own daemons/clients changed, and
+  checked for and warned about). For this entry only: no code from `keeper/` or `docker-proxy/`'s own daemons/clients changed, and
   nothing in this entry was run with `--apply` against a real host.
 
 - **docker-proxy: `inspect` and `logs` no longer hand the agent raw secrets (owner review of PR #21, 21/10/2026).**
