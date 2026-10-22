@@ -16,7 +16,7 @@ Each step answers one way an AI ops agent fails. None of them is enough alone. B
 flowchart TB
     H(["👤 <b>You ask</b>"]):::human --> A["🤖 <b>The agent investigates</b><br/>read-only, always allowed"]
     A --> P["📝 <b>It writes a plan</b><br/>what · why · risk · dry-run · rollback"]
-    P --> C["🏛️ <b>Big decisions only:</b> four AIs from four vendors<br/>review the plan separately (council).<br/>They can send it back to be fixed.<br/>Routine changes skip this step."]:::guard
+    P --> C["🏛️ <b>Big decisions only:</b><br/>four AIs from four vendors<br/>review the plan (council).<br/>Routine changes skip this step."]:::guard
     C --> G{"👤 <b>You say GO?</b><br/>one tap, for a limited time"}:::human
     G -->|"no"| X["⛔ <b>Nothing happens</b>"]
     G -->|"yes"| S["📸 <b>Snapshot first</b><br/>the host takes it,<br/>the agent cannot roll back"]:::guard
