@@ -1,5 +1,7 @@
 # docker-proxy: filtered Docker access for a non-root agent
 
+**Status: experimental.** Not applied to a real host yet. `inspect` and `logs` output is masked; `docker top` and `docker stats` output is not.
+
 Design and threat model: [docs/design-keeper-server.md](../docs/design-keeper-server.md), section 1 ("A non-root
 user for the agents"), option C.
 

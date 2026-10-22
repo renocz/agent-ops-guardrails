@@ -345,6 +345,8 @@ shapes, not arguments. That is the same exposure as the approval cards.
 
 ## Open questions for the review
 
+These were the questions asked before v1.0. Where they led: the classification stays in the hook and is stated as the main limit (README, "Limits, stated precisely"); the non-root precondition is enforced by the installer, which refuses root; the second Telegram bot stayed the approval channel for v1.
+
 1. Is a second Telegram bot the right approval channel, or should the approval come through something else the agent
    cannot read (e.g. a passkey-protected web page served by keeperd)?
 2. Is the classification still in the hook acceptable for v1, given the hook runs as the agent?
