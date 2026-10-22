@@ -119,7 +119,7 @@ No. It only sees the commands and file reads the agent asks for, before they run
 - other tools or MCP servers that return data.
 
 ### How was it tested?
-- Unit tests cover 235 cases, including every bypass found during the reviews and two external evaluations.
+- The unit tests cover 235 cases, including every bypass found during the reviews and two external evaluations. (The suite has 9 test functions, several of which loop over tables of cases, so the figure "9 tests" elsewhere counts functions, not cases.)
 - CI runs an independent harness, [Hook Gym](https://pypi.org/project/hook-gym/), on its credentials and secrets cases and on this repo's homelab cases. Scores: 12/12 on ours, 6/11 on theirs. **Read 12/12 with care:** our homelab cases are the probes of the first external evaluation, written after the fixes. A second evaluation of v0.2 found 15 more holes on probes it had never shown us (`~/.pgpass`, `/etc/pve/priv/`, `rclone config show`, `sops -d`, `curl -u admin:pw`, `mysql -pS3cret`, Tailscale keys…). They are fixed now, which proves the point: a pattern list closes one layer per audit. A score on cases we never saw is the number that matters; see [results](results.md).
 - Before each deployment, it was replayed against about 5,700 real past commands to compare its decisions with the previous version.
 - It went through 5 multi-model council reviews, which found 7 real gaps. An external evaluation then found 13 more common homelab cases it missed (`printenv VAR`, WireGuard keys, `acme.json`, logs…). All of them are fixed and tested.
@@ -173,7 +173,7 @@ The approval is a button press on a bot only the keeper's user can read, tied to
 A root agent could edit the keeper's files, stop it or change the hook, and the approval would mean nothing. The installer refuses root as the agent user.
 
 ### How do I install it, and how do I remove it?
-Install: `sudo ./keeper/install-keeper.sh --agent-user YOU --owner-id YOUR_TELEGRAM_NUMERIC_ID`. It only prints what it would do until you add `--apply`. `--observe` installs it in log-only mode. `--agent-user` can be repeated for several non-root users, and a reinstall merges into your existing `/etc/keeper/config.json` instead of overwriting it. There is no uninstall script: [Emergency rollback](../keeper/README.md#emergency-rollback) lists the three ways to hand control back (switch the running keeper to observe, stop the daemon, or restore the managed settings the installer backed up).
+Install: `sudo ./keeper/install-keeper.sh --agent-user YOU --owner-id YOUR_TELEGRAM_NUMERIC_ID`. It only prints what it would do until you add `--apply`. `--observe` installs it in log-only mode. `--agent-user` can be repeated for several non-root users, and a reinstall merges into your existing `/etc/keeper/config.json` instead of overwriting it. There is no uninstall script: [Emergency rollback](../keeper/README.md#emergency-rollback) lists the three ways to hand control back: switch the running keeper to observe and restart it; set the mode file to observe and then stop the daemon (stopping the daemon alone leaves changes refused in block mode); or restore the managed settings the installer backed up.
 
 ### Observe mode or block mode?
 Observe mode logs every call that would have been refused and blocks nothing; `/summary` on the bot reads that log. Block mode refuses. Start in observe mode and read the log before switching, as the author did (observe from 08/10/2026, block from 12/10/2026).

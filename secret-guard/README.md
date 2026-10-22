@@ -84,7 +84,8 @@ Site-specific patterns, such as the API endpoints of your own apps that return k
 
 Failure behaviour:
 - a broken or invalid extras file, or any internal error, makes the hook **refuse** (fail closed);
-- input that is not a valid tool call (not JSON) is let through, because there is nothing to judge.
+- input that is not a valid tool call (not JSON) is let through, because there is nothing to judge;
+- if the hook itself times out, Claude Code decides, not secret-guard: measured on Claude Code 2.1.302, a PreToolUse hook that outlived its timeout let the command run, and `"onFailure": "block"` on the hook entry makes it block. The hook takes a few milliseconds, so keep a generous timeout.
 
 Run the tests with `python3 -m unittest test_secret_guard.py`. CI also runs it against [Hook Gym](https://pypi.org/project/hook-gym/), an independent test harness for Claude Code hooks. Two suites run there: its built-in *credentials* cases, and homelab cases from this repo (`ci/hook-gym-cases/`). Hook Gym also tests things secret-guard does not try to cover (destructive commands, git hygiene…), so only those two suites are reported.
 
