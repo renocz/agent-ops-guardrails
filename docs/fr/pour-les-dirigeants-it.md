@@ -34,7 +34,7 @@ d'approbation, et le masquage ne l'arrête pas non plus. L'approbation est la co
    fin à toutes les approbations immédiatement, depuis n'importe où (une commande déjà en cours continue de tourner).
 3. **Les secrets sont masqués — un filet de sécurité, pas une barrière.** Un hook refuse une commande qui
    pourrait afficher un secret, sauf si toute sa sortie passe par un filtre de masquage, et masque les motifs
-   connus (clés, jetons, mots de passe) partout où l'agent affiche quelque chose. Il tourne dans le propre
+   connus (clés, jetons, mots de passe) dans la sortie des commandes et des lectures de fichiers auxquelles il est relié. Il tourne dans le propre
    processus de l'agent : contrairement à l'étape d'approbation ci-dessus, qui est la couche forte, il attrape
    les maladresses d'un agent coopératif, pas les contournements d'un agent manipulé et déterminé.
 

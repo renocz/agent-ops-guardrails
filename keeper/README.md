@@ -29,9 +29,10 @@ state, replay a GO or remove the hook. The keeper moves the approval out of the 
   the back-and-forth that used to cost a round trip (and a card) per missing word. Anything secret-shaped is masked
   out the same way the log already masks it.
 - **`targets=dir:<path>`** grants the whole subtree under `<path>`, explicitly: a target is normally a single
-  path/file/host, matched whole-word (see go-gate's own README for the matching rules); `dir:` is the one way to
-  widen that to "and everything under it", and it always shows on the card as the warning above so you are not
-  approving a subtree without knowing it. It is refused outright (never matches anything, as if the target were
+  path/file/host, matched whole-word, and a path target already covers its own sub-paths (see go-gate's own README for
+  the matching rules); `dir:` does the same for a subtree but says so explicitly, is stricter (every path the action
+  names must resolve inside it), and always shows on the card as the warning above so you are not approving a subtree
+  without knowing it. It is refused outright (never matches anything, as if the target were
   missing) for `/`, your home directory, go-gate's own state/hooks/settings, and the keeper's own paths
   (`/etc/keeper`, `/opt/agent-guardrails`, its managed-settings file) — even if you declare it, even if a token the
   agent writes resolves inside one of those through a broader `dir:` (say `dir:/etc`).
@@ -62,7 +63,7 @@ state, replay a GO or remove the hook. The keeper moves the approval out of the 
   classifies the call with the go-gate classifier (root-owned copy).
 - The hook is registered in Claude Code's root-owned **managed settings**. Its code lives in
   `/opt/agent-guardrails/lib/` (root, 644) and runs as `/usr/bin/env -i /usr/bin/python3 -I`.
-- If keeperd is down, the hook lets reads through and refuses changes.
+- If keeperd is down, in block mode the hook lets reads through and refuses changes (in observe mode everything passes).
 
 ## Several plans active at once
 
@@ -82,7 +83,7 @@ In short:
 - `/stop` still ends every active and pending plan everywhere, like before. `/stop <id>` ends only the plan with
   that id (active or pending), in every session — plans are not scoped to a session, see "Known limits" below.
 - `/status` and `keeper-status` list **every** active plan of a session (id, expiration, targets, actions), never
-  more than one.
+  the agent's free-form text.
 - An old `state.json` (one active plan per session, not a list) is upgraded automatically on the next start; nothing
   it already granted is widened or lost.
 
