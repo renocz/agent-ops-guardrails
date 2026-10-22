@@ -8,7 +8,7 @@
 ## General
 
 ### What is this, in one sentence?
-It is a set of guardrails for letting an AI agent operate real infrastructure: a multi-model review of its plans, a guard against leaking secrets, and a written method around them. Each piece came from a real incident.
+It is a set of guardrails for letting an AI agent operate real infrastructure: a multi-model review of its plans, an approval step the agent cannot grant itself (the keeper), a guard against leaking secrets, and a written method around them. Each piece came from a real incident.
 
 ### Who is it for?
 It is for people who already let an AI agent run commands on servers they care about (a homelab, a small company's infrastructure) and want it to stay useful without becoming dangerous. If your agent only writes code in a sandbox, you probably need less than this.
@@ -17,6 +17,7 @@ It is for people who already let an AI agent run commands on servers they care a
 No, it works with several vendors.
 - **council** works with any OpenAI-compatible endpoint, and it is meant to mix models from *different* vendors.
 - **secret-guard** is written as a Claude Code hook, because that is the agent I run. Its decision logic is one plain Python function, `decide()`, that takes a tool call and returns a refusal reason or nothing. Porting it to another agent that offers a "before running a command" hook should be a small wrapper. I have not tested other agents.
+- **go-gate and the keeper** are Claude Code hooks too (the keeper registers its hook in Claude Code's managed settings); I have not tested other agents with them either.
 
 ### Is it production-ready?
 It runs every day on my homelab, and it has tests and documented limits. It is still one person's project, so read the limits and adapt it to your setup.
@@ -157,6 +158,44 @@ Its precondition is that the agent is not root. Where the agent is root, rely on
 
 ### Does a pasted alert count as a GO?
 Not any more. It used to on my setup, and the council objected: the alert is external text, and with that rule it triggered a change whose plan I hadn't read. Now an alert makes the agent propose a plan, and I answer GO.
+
+## keeper
+
+### What is the keeper, in two sentences?
+A small service, running under its own user, that holds the approvals for an AI agent's changes. The agent proposes a plan, the human approves it with a button on a second Telegram bot, and a root-owned hook refuses every change outside an approved plan. Reads stay free.
+
+### Why can't the agent approve its own plan?
+The approval is a button press on a bot only the keeper's user can read, tied to the plan's fingerprint and usable once. The keeper's code, its state and the hook belong to root or to the keeper's user; the agent's own account cannot write them. That is the strong claim, and it is only about the approval. What counts as a "change" is decided by a heuristic classifier, which is not a proof (see [keeper/README.md](../keeper/README.md#what-the-keeper-does-and-does-not-guarantee-read-these)).
+
+### Why must the agent not run as root?
+A root agent could edit the keeper's files, stop it or change the hook, and the approval would mean nothing. The installer refuses root as the agent user.
+
+### How do I install it, and how do I remove it?
+Install: `sudo ./keeper/install-keeper.sh --agent-user YOU --owner-id YOUR_TELEGRAM_NUMERIC_ID`. It only prints what it would do until you add `--apply`. `--observe` installs it in log-only mode. `--agent-user` can be repeated for several non-root users, and a reinstall merges into your existing `/etc/keeper/config.json` instead of overwriting it. There is no uninstall script: [Emergency rollback](../keeper/README.md#emergency-rollback) lists the three ways to hand control back (switch the running keeper to observe, stop the daemon, or restore the managed settings the installer backed up).
+
+### Observe mode or block mode?
+Observe mode logs every call that would have been refused and blocks nothing; `/summary` on the bot reads that log. Block mode refuses. Start in observe mode and read the log before switching, as the author did (observe from 08/10/2026, block from 12/10/2026).
+
+### What happens if Telegram is down?
+A plan that cannot be delivered is reported to the agent as not sent, and nothing is approved: the agent stays blocked on changes, while reads still work.
+
+### What happens if the keeper daemon is down, or the hook times out?
+In block mode a change is refused and reads pass; in observe mode calls pass. The installer writes `"onFailure": "block"` on the hook entry because, measured on Claude Code 2.1.302, a PreToolUse hook that outlives its timeout otherwise lets the command run (it ran after about 67 s; with `onFailure: block` it was blocked).
+
+### How do I stop everything at once?
+`/stop` on the keeper bot revokes every active and pending plan; `/stop <id>` revokes one. A process already started under an approved plan keeps running: the keeper gates tool calls, not what an approved process does afterwards.
+
+### What is in a plan, and how long does it last?
+An id, `targets` (paths, hosts or words the command must name), `actions` (`edit`, `git`, `deploy`, `api`, `browser`, `delete`, `script`, `doc`) and a time to live (60 minutes by default, 240 at most). A session can hold several plans at once (3 by default, 5 at most), and the number of proposals per hour is limited (3 by default, configurable in `config.json`).
+
+### What is `actions=script`, and why is it special?
+A plan that allows `script` lets the approved script do anything the agent's user can do. Opaque commands (a program run by path, a changed `PATH`, a write into `~/bin`) always need it. It is unbounded by design: the human decides what to allow.
+
+### Does the keeper keep what the agent should not see away from it?
+No. Hiding sensitive values is secret-guard's job, and it runs inside the agent's own process, so it catches accidents, not an agent that tries to get around it. The keeper makes no claim about that.
+
+### What are standing plans and the Docker proxy? (server, experimental)
+Standing plans are a closed list of exact commands, written only in the root-owned config, for an agent nobody is watching (a systemd timer): they expire after at most 45 days and `/stop <id>` disables one. The Docker proxy lets a non-root agent read and restart an allowlist of containers without joining the `docker` group (which is root-equivalent): `inspect` and `logs` output is masked, `docker top` and `docker stats` output is not. Both are documented in [deploy-keeper-server.md](deploy-keeper-server.md) and have a read-only checker, but neither has been applied to a real host yet.
 
 ## Method and the other pillars
 

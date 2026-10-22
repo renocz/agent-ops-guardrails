@@ -4,7 +4,7 @@
 
 **An operating model for an AI agent that runs real infrastructure: the guardrails, the method, and the field notes.**
 
-I let an AI agent run my homelab: a hypervisor, about forty containers, backups and a VPN. The agent is Claude Code; the reviewers in the council come from four different vendors. It has root, and it is good at the work. It is also confidently wrong a few times a week, and early on it printed secrets into its own transcript.
+I let an AI agent run my homelab: a hypervisor, about forty containers, backups and a VPN. The agent is Claude Code; the reviewers in the council come from four different vendors. It has broad access to all of it, and it is good at the work. It is also confidently wrong a few times a week, and early on it printed secrets into its own transcript.
 
 This repo collects the guardrails that grew around it. Each one exists because something went wrong once.
 
@@ -28,10 +28,34 @@ flowchart LR
     SG -.->|"watches"| E
 ```
 
-**What these guardrails are, and are not.** They catch the mistakes of a *cooperative* agent: a careless command, a plan it didn't run past the human, a secret that slipped into a transcript. They are hooks that run with the agent's own rights and judge the text it writes, so an agent that *tries* to get around them can: an external audit of v0.8 did it 16 ways for secret-guard alone (all closed in v0.9, but the class remains). Against an agent that tries to get around them, the approval must live in a separate process the agent cannot write to. That is the [**keeper**](keeper/) (new, experimental):
+### The keeper in one picture
+
+The picture above is the *method*. This one is the strongest *mechanism*: who may say yes, and why the agent cannot say it to itself.
+
+```mermaid
+flowchart LR
+    subgraph AG["Agent's own account (not root)"]
+        T["🤖 Agent wants to run a command"]
+        HK["🪝 Root-owned hook<br/>read, or change?"]
+    end
+    subgraph KP["Keeper: another user, files the agent cannot touch"]
+        KD["🔒 keeperd<br/>holds the approved plans"]
+    end
+    HU["📱 Human<br/>card on a second Telegram bot"]
+    T --> HK
+    HK -->|"read"| OK["✅ runs"]
+    HK -->|"change: asks the keeper"| KD
+    KD -->|"inside an approved plan"| OK
+    KD -->|"no plan: refused, the agent proposes one"| HU
+    HU -->|"one tap: approved, expires on its own"| KD
+    HK -.->|"keeper unreachable: changes refused"| NO["⛔ blocked"]
+```
+
+**What these guardrails are, and are not.** They catch the mistakes of a *cooperative* agent: a careless command, a plan it didn't run past the human, a secret that slipped into a transcript. They are hooks that run with the agent's own rights and judge the text it writes, so an agent that *tries* to get around them can: an external audit of v0.8 did it 16 ways for secret-guard alone (all closed in v0.9, but the class remains). Against an agent that tries to get around them, the approval must live in a separate process the agent cannot write to. That is the [**keeper**](keeper/) (v1.0 on a workstation; server deployment experimental):
 - it runs under its own user;
 - approvals come from button presses on a second Telegram bot that only it can read;
-- the hook is root-owned and registered in managed settings.
+- the hook is root-owned and registered in managed settings;
+- it requires an agent whose own account is **not root** (otherwise the agent could edit the keeper itself): the installer refuses root.
 
 It ran on my laptop in observe mode from 08/10/2026, then switched to block mode on 12/10/2026 after an end-to-end dry run (checklist in [docs/block-mode-dry-run.md](docs/block-mode-dry-run.md)); every change the agent makes on that machine now goes through an approval card on the second Telegram bot. Block mode ran there for nine days of everyday work; v1.0 (21/10/2026) is the keeper on one workstation. Its server deployment is documented and has a read-only checker, but it has not been applied to a real host, so it stays experimental. Output filtering (secret-guard) still runs in the agent's process.
 
