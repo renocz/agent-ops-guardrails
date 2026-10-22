@@ -96,7 +96,7 @@ What makes it hold:
 - the hook is root-owned and registered in managed settings;
 - it requires an agent whose own account is **not root** (otherwise the agent could edit the keeper itself): the installer refuses root.
 
-Track record: it ran on my laptop in observe mode for four days, then in block mode for nine days of everyday work, after an end-to-end dry run (checklist in [docs/block-mode-dry-run.md](docs/block-mode-dry-run.md)). On that machine, every change the classifier recognises as a change goes through an approval card. v1.0 (release candidate) is the keeper on one workstation: the nine days ran on macOS, while the automated tests and CI run on Linux, so the macOS installer path has no automated test. Its server deployment is documented and has a read-only checker, but it has not been applied to a real host, so it stays experimental.
+Track record: it ran on my laptop in observe mode for four days, then in block mode for nine days of everyday work, after an end-to-end dry run (checklist in [docs/block-mode-dry-run.md](docs/block-mode-dry-run.md)). On that machine, every change the classifier recognises as a change goes through an approval card. v1.0 is the keeper on one workstation: the nine days ran on macOS, while the automated tests and CI run on Linux, so the macOS installer path has no automated test. Its server deployment is documented and has a read-only checker, but it has not been applied to a real host, so it stays experimental.
 
 ### Limits, stated precisely
 

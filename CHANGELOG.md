@@ -2,7 +2,7 @@
 
 One version scheme: **a repository tag per release**. Components have no version of their own. Commit messages from 06/10/2026 that say "secret-guard v0.3/v0.4/v0.5" refer to the intermediate revisions listed under v0.6.
 
-## v1.0 (release candidate; the date is set when the tag is created)
+## v1.0 (22/10/2026)
 
 - **`install-keeper.sh`: `--agent-user` is repeatable, and a reinstall no longer silently drops a second agent
   from `agent_uids` (owner review of the server deployment entry below, 21/10/2026).** The bug: every `--apply`
