@@ -18,7 +18,7 @@
 | keeper | Block mode in real use, 7 days to 22/10 (one machine, one user): decisions | **986**: 841 allowed under an approved plan, 145 refused, 0 simulated refusals; 86 plans proposed (81 approved, 1 refused, 1 expired) | 22/10 | Medium: real use, but one person on one machine in an unusually busy week; most refusals are "no plan yet", not errors |
 | keeper | Observe mode, first review (08/10 to 11/10, before block mode) | 414 would-deny events; most are real changes | 11/10 | Medium: a log reviewed by the owner |
 | go-gate | One week of observation, before the keeper | 1,186 would-block events | 11/10 | Medium: same |
-| tests | Automated tests at the release candidate | **520**: keeper 278, go-gate 133, docker-proxy 54, leak-check 32, council 14, secret-guard 9 | 22/10 | Low as a quality measure (a count, not coverage); CI runs on Linux, macOS is not covered |
+| tests | Automated tests at v1.0 | **520**: keeper 278, go-gate 133, docker-proxy 54, leak-check 32, council 14, secret-guard 9 | 22/10 | Low as a quality measure (a count, not coverage); CI runs on Linux, macOS is not covered |
 
 Blind-set scores measure **agreement with another model's labels**, so they say how much of what a fresh model thinks of is covered. They don't count leaks. leak-check counts leaks, but only the ones it can see. Its inventory (what was checked) is the denominator, not the total of secrets in existence.
 
