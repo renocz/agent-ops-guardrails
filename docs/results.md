@@ -16,7 +16,7 @@
 | council | Backtest on 3 real past mistakes | 2 of 3 caught; 3 of 3 with full context | 29/09 | Medium: the agent picked the cases |
 | council | Runs where the cross-review step added a point or a correction | 27 of 28 runs; 16% of synthesis points; 15 wrong claims added | 06/10 | Medium: judged by a model |
 | keeper | Block mode in real use, 7 days to 22/10 (one machine, one user): decisions | **986**: 841 allowed under an approved plan, 145 refused, 0 simulated refusals; 86 plans proposed (81 approved, 1 refused, 1 expired) | 22/10 | Medium: real use, but one person on one machine in an unusually busy week; most refusals are "no plan yet", not errors |
-| keeper | Observe mode, first review (08/10 to 12/10, before block mode) | 414 would-deny events; most are real changes | 11/10 | Medium: a log reviewed by the owner |
+| keeper | Observe mode, first review (08/10 to 11/10, before block mode) | 414 would-deny events; most are real changes | 11/10 | Medium: a log reviewed by the owner |
 | go-gate | One week of observation, before the keeper | 1,186 would-block events | 11/10 | Medium: same |
 | tests | Automated tests at the release candidate | **520**: keeper 278, go-gate 133, docker-proxy 54, leak-check 32, council 14, secret-guard 9 | 22/10 | Low as a quality measure (a count, not coverage); CI runs on Linux, macOS is not covered |
 
@@ -64,15 +64,15 @@ From the keeper's own `/summary 7` on one laptop, one user, in block mode, a wee
 | | |
 |---|---|
 | Decisions | 986: **841 allowed** under an approved plan, **145 refused**, 0 simulated refusals (block mode) |
-| Plans | 86 proposed, 81 approved, 1 refused, 1 expired |
+| Plans | 86 proposed, 81 approved, 1 refused, 1 expired (the summary does not account for the other 3) |
 | What was asked about | by category: script 66, edit 35, deploy 10, browser 8, git 7, doc 7, api 6, delete 6; by tool: Bash 117, Edit 10, then a few browser, scheduling and web tools |
-| Telegram | 12 errors in the week (URLError 6, HTTPError 4, ConnectionResetError 2); 454 idle polls were cut and restarted, nothing lost; 2 bursts of proposals were ignored by design |
+| Telegram | 12 errors in the week (URLError 6, HTTPError 4, ConnectionResetError 2); 454 idle polls were cut and restarted, no loss observed; 2 bursts of proposals were ignored by design |
 
 How to read it:
 - A refusal is mostly the first call of a task that no approved plan covers yet: the agent is told, proposes a plan, and a card arrives. It is not a malfunction, and it is also friction that a person has to accept.
 - The most frequent shapes (`python3 …`, a GitHub API script, `Edit`, `cp`, `rm`) show where plans have to be broad, which is also where the classifier's limits matter most: `actions=script` is unbounded by design.
 - What real use found that the tests had not, all fixed in v1.0: a hook that outlives its timeout let the command run (measured on Claude Code 2.1.302: it ran after about 67 s; with `onFailure: block` it was blocked); `Write(...)` deny rules that Claude Code ignores; only one active plan per session; a reinstall that overwrote a hand-edited setting; a reinstall that dropped the second agent from `agent_uids`.
-- What it does not measure: no forged approval was attempted against it in real use, nothing was tested against a hostile agent, the nine days ran on macOS while CI is Linux, and the server deployment has not been applied to a real host.
+- What it does not measure: no forged approval was attempted against it in real use, nothing was tested against a hostile agent, the block-mode period (nine days by 21/10) ran on macOS while CI is Linux, and the server deployment has not been applied to a real host.
 
 ## Limits
 
