@@ -25,7 +25,7 @@ One version scheme: **a repository tag per release**. Components have no version
   - `docs/deploy-keeper-server.md` §2.2 and `docs/keeper-server-dry-run.md`'s item 2, previously the by-hand
     workaround for this gap, are rewritten: the two-user install is now one `install-keeper.sh` command with two
     `--agent-user` flags, and no by-hand `python3 -c '...'` step survives reinstalls to be forgotten.
-  An install with a single `--agent-user` behaves as before, with one difference: a reinstall that names a different single user now keeps the previous one in `agent_uids` (the merge is a union). To revoke a user, reinstall with `--replace-agent-uids`.
+  An install with a single `--agent-user` behaves as before, with one difference: a reinstall that names a different single user now keeps the previous one in `agent_uids` (the merge is a union). To revoke a user, reinstall with `--replace-agent-uids` (this removes the daemon's authorisation; the user's membership of the `keeperclients` group is not removed).
 
 - **Server deployment of the keeper, documented and checkable, not yet applied anywhere (21/10/2026).**
   `docs/deploy-keeper-server.md` turns `docs/design-keeper-server.md`'s decisions (two non-root users, the Docker

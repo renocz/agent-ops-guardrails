@@ -117,7 +117,7 @@ demandent un geste de l'humain sur son téléphone, généralement quelques seco
 déjà, en principe, une décision humaine. Des premières mesures sur l'historique réel suggèrent que moins de la
 moitié des changements passés de l'agent avaient eu lieu dans les deux heures suivant un feu vert explicite
 d'un humain — c'est l'écart que ce système referme, pas un coût qu'il ajoute à quelque chose qui était déjà
-sûr.
+sûr. (Ce chiffre mesure une proximité dans le temps, pas un rejeu : il ne prouve pas qu'aucune approbation n'existait.)
 
 **Peut-on déployer ça chez nous ?**
 Commencez en **mode observation** : le système observe et journalise ce qu'il *aurait* bloqué, sans rien

@@ -22,7 +22,7 @@ flowchart TB
     G -->|"yes"| S["📸 <b>Snapshot first</b><br/>the host takes it,<br/>the agent cannot roll back"]:::guard
     S --> E["⚙️ <b>The agent acts</b><br/>and proves it worked"]
     E --> D["📚 <b>Change record written</b>"]
-    D ~~~ SG["🔐 <b>secret-guard, throughout:</b> checks every command<br/>and every file the agent reads"]:::guard
+    D ~~~ SG["🔐 <b>secret-guard, throughout:</b> a safety net on the<br/>commands the agent runs and the files it reads"]:::guard
     classDef human stroke:#2f81f7,stroke-width:3px
     classDef guard stroke:#3fb950,stroke-width:3px
 ```

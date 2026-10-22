@@ -18,7 +18,8 @@ reports about a way around a guardrail are exactly the feedback it needs.
 
 These limits are stated in the README and in `keeper/README.md` and are not secrets:
 - The guardrails are hooks that catch the mistakes of a *cooperative* agent. They do not claim to stop a hostile
-  agent, a compromised machine or a human administrator who misuses their own rights.
+  agent, a compromised machine or a human administrator who misuses their own rights. That limit is about the hooks
+  that run in the agent's own process; a way to defeat the keeper's separate approval (listed above) is in scope.
 - An approval for `actions=script` lets the approved script do anything the agent's user can do.
 - The classifier is a heuristic, not a proof. A new disguise is a bug to fix; please report it, with a harmless
   reproduction.
