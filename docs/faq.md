@@ -28,12 +28,12 @@ Not by design, but today most of the pieces are tied to Claude Code.
 council and secret-guard run every day on my homelab, and the keeper has run in block mode on my laptop for nine days of everyday work (v1.0 covers that workstation setup). The server deployment of the keeper, the Docker proxy and go-gate on its own are experimental. Everything has tests and documented limits, and it is still one person's project, so read the limits and adapt it to your setup. The automated tests and CI run on Linux: the macOS laptop where the nine days ran has no automated test of its installer.
 
 ### Does it stop a malicious agent?
-No. v1.0 catches the mistakes and tricks of a cooperative agent, not a determined attacker or a compromised machine. The approval cannot be forged by the agent (a separate user, a button on a bot it cannot read, a root-owned hook), but what counts as a change is decided by a heuristic classifier, not a proof, and the hooks judge the text the agent writes. Against an agent that tries to get around them, rely on least privilege. See [the README's limits](../README.md#limits-stated-precisely) and [SECURITY.md](../SECURITY.md).
+Not fully. v1.0 is built against the mistakes of a cooperative agent, not a determined attacker or a compromised machine. The approval itself cannot be forged by the agent, as long as the agent is not root and cannot become root (a separate user, a button on a bot it cannot read, a root-owned hook). But what counts as a change is decided by a heuristic classifier, not a proof, and the hooks judge the text the agent writes, so an agent that disguises a command can get past it. For that threat, rely on least privilege. See [the README's limits](../README.md#limits-stated-precisely) and [SECURITY.md](../SECURITY.md).
 
 ### What do I need to run it?
-- Python 3.9 or later, standard library only (CI runs 3.9 and 3.12), and a shell.
+- Python and a shell: the tools use the standard library only, and CI runs Python 3.9 and 3.12 (secret-guard states 3.9+).
 - secret-guard's `mask` is a Perl filter; `env -S` needs coreutils 8.30+ on Linux and is built in on macOS.
-- The keeper needs macOS or Linux, root once to install it (the agent itself must not be root), and a second Telegram bot created with BotFather. After any install or reinstall, restart the Claude Code sessions that were already open. Claude Code 2.1.295 or later is needed for `"onFailure": "block"`, which makes a timed-out hook a refusal.
+- The keeper needs macOS or Linux, root once to install it (the agent itself must not be root, and must not be able to sudo without a password it does not have), and a second Telegram bot created with BotFather. After any install or reinstall, restart the Claude Code sessions that were already open. `"onFailure": "block"`, which makes a timed-out hook a refusal, needs a Claude Code version that knows the field (2.1.295 or later according to its release notes; I measured it on 2.1.302).
 - I have not tried Windows. CI runs on Linux only.
 
 ## council
@@ -60,7 +60,7 @@ It is a BLOCKING point raised by only one member. Consensus-style summaries tend
 Without the human's own words and the approval status, reviewers spent their effort on "this was done without approval!". In one test, that made them miss the real flaw. With the context, they catch it. The script refuses proposals that lack these two lines.
 
 ### How much does it cost, and how long does it take?
-A run makes 9 model calls: 4 reviews, 4 cross-rankings and 1 synthesis. With frontier models a short plan costs roughly $0.10–0.25 per run and usually takes a few minutes. My first ~20 runs, all short plans, cost about $3 in total. Sending whole documents (tens of KB) costs noticeably more: on 22/10, a series of reviews of this repository's own texts used up the council key's budget until it was raised, and the cost per run was not re-measured (see [results.md](results.md)).
+A run makes 9 model calls: 4 reviews, 4 cross-rankings and 1 synthesis. With frontier models a short plan costs roughly $0.10–0.25 per run and usually takes a few minutes. My first ~20 runs cost about $3 in total; the later ones sent much longer inputs. Sending whole documents (tens of KB) costs noticeably more: on 22/10, a series of reviews of this repository's own texts used up the council key's budget until it was raised, and the cost per run was not re-measured (see [results.md](results.md)).
 
 ### Which models should I use?
 Use four models from four different vendors, ideally strong ones. One practical catch: some reasoning models spend their whole token budget thinking and return an empty answer. Give them a larger `max_tokens`, or a medium reasoning effort, through `model_overrides` in the config.
@@ -112,7 +112,7 @@ They happen, and they are annoying by design. The guard is conservative: heredoc
 - end the command with `# secret-ok` when the output provably contains no values (a count, a hash, key names).
 
 ### Isn't `# secret-ok` a loophole?
-It is a deliberate, visible claim. It must be a real shell comment at the very end of the command, so it shows up in the transcript and in reviews. Since v0.9 it is also logged, and it cannot cover a command that reads a secret file unless every reader only counts or lists (`grep -c`, `-l`, `-q`). If you don't want the agent to have that choice, remove the opt-out from the code.
+It is a deliberate, visible claim. It must be a real shell comment at the very end of the command, so it shows up in the transcript and in reviews. Since v0.9 it is also logged, and it cannot cover a command that reads a secret file unless every reader only counts (`grep -c/-l/-q`). If you don't want the agent to have that choice, remove the opt-out from the code.
 
 ### How do I add patterns for my own apps?
 Create `~/.config/secret-guard/extra.json` with a list of `[regex, label]` pairs:
@@ -151,10 +151,10 @@ The mask only filters the output. A value typed into the command is already in t
 ## leak-check
 
 ### What is leak-check, and why do I need it if secret-guard is on?
-secret-guard prevents leaks with patterns, and no pattern list is complete. leak-check measures them. It runs as root, outside the agent's reach, reads the real values of your secrets (environment, compose files, app configs, URLs, private keys) and looks for those exact values in what the agent produced: transcripts, shell history and reports sent to outside models. On my setup (06/10/2026) it found real leaks that secret-guard had missed, among them a Telegram bot token, a Cloudflare tunnel token and three OIDC client secrets, all since rotated ([leak-check/README.md](../leak-check/README.md)).
+secret-guard prevents leaks with patterns, and no pattern list is complete. leak-check measures them. It runs as root, outside the agent's reach, reads the real values of your secrets (environment, compose files, app configs, URLs, private keys) and looks for those exact values in what the agent produced: transcripts, shell history, go-gate's log and reports sent to outside models. On my setup (06/10/2026) it found real leaks that secret-guard had missed, among them a Telegram bot token, a Cloudflare tunnel token and three OIDC client secrets, all since rotated ([leak-check/README.md](../leak-check/README.md)).
 
 ### How far can I trust a clean leak-check result?
-Read it as a floor: it only finds the secrets it has inventoried. Each report says what was checked and which sources were missing, and each run starts with a canary. Against gitleaks over the same folders, its inventory covered 68 of the 128 distinct values gitleaks flagged (53%). The findings table is a 06/10/2026 snapshot and has not been refreshed since.
+Read it as a floor: it only finds the secrets it has inventoried. Each report says what was checked and which sources were missing, and each run starts with a canary. Against gitleaks over the same folders, its inventory covered 68 of the 128 distinct values gitleaks flagged (53%, a single measurement). The findings table is a 06/10/2026 snapshot and has not been refreshed since.
 
 ## go-gate
 
@@ -162,7 +162,7 @@ Read it as a floor: it only finds the secrets it has inventoried. Each report sa
 No. Instructions are advice the model weighs against everything else in its context. My agent had the rule for weeks and still acted outside what I had approved twice: a real rollback during a "should be refused" test, and a deployment when I had said "prepare locally". A hook runs every time, whatever the model thinks.
 
 ### Why not Claude Code's plan mode or its permission prompts?
-They answer a different question. Permission prompts approve one call at a time, at the keyboard; they don't work when I approve from my phone, and after a hundred prompts the answer becomes a reflex. In my use, plan mode approves a plan once and then lets its calls through, with no scope or expiry that I could set. go-gate ties a GO to a written scope (targets, kinds of action) and a duration, works from a chat channel such as Telegram, and treats any call it can't classify as a change. Use them together: permissions for what the agent may never do, go-gate for what it may do once you said GO.
+They answer a different question. Permission prompts approve one call at a time, at the keyboard; they don't work when I approve from my phone, and after a hundred prompts the answer becomes a reflex. Plan mode approves a plan once; in my use it gave me no way to bound that approval by target or by duration. go-gate ties a GO to a written scope (targets, kinds of action) and a duration, works from a chat channel such as Telegram, and treats any call it can't classify as a change. Use them together: permissions for what the agent may never do, go-gate for what it may do once you said GO.
 
 ### Will it get in my way?
 It will at first, which is why it starts in observe mode. On my history, about half of the agent's changes had no recent explicit approval: work in resumed sessions, browser clicks I had asked for, docs after a change. The gate works when proposals end with a `Scope:` line and you answer with one word. Run `go-gate/simulate.py` on your own history to see your number before installing.
@@ -225,7 +225,7 @@ Each plan arrives as a card on the keeper bot: lines generated from the scope (i
 A refusal tells the agent what is missing: the kind of action the active plan lacks, or the words in the command that none of the plan's targets cover. The agent can then propose a plan that fits, and the new card says what the previous plan did not cover. Approve it, reject it, or press Stop. `/plans` and `/summary` on the bot show the recent plan events and the refusal and approval log.
 
 ### How do I give the agent a whole directory?
-Write `targets=dir:<path>`. It grants the whole subtree explicitly and shows a warning on the card. Every path the command names must resolve inside it (symlinks and `..` are followed), the working directory must be inside it, and a command that runs elsewhere (`ssh`, `pct`, `docker exec`) is never covered by a `dir:` target. A plain target matches by word and is looser. See [keeper/README.md](../keeper/README.md).
+Write `targets=dir:<path>`. It grants the whole subtree explicitly and shows a warning on the card. A `dir:` target covers an action only when every path the command names resolves inside it (symlinks and `..` are followed) and the working directory is inside it; a command that runs elsewhere, such as `ssh`, `pct` or `docker exec`, is never covered by one. `/`, your home directory and the keeper's and go-gate's own paths are never granted this way. A plain target matches by word and is looser. See [keeper/README.md](../keeper/README.md).
 
 ### How does the agent wait for my tap?
 With `keeper-propose --wait SECONDS`, the call blocks until you decide, up to `wait_max_sec` (50 s by default, always held below the hook timeout minus 10 s). Without it, `keeper-propose` returns at once and the agent has to retry the action later.
@@ -240,7 +240,7 @@ No. `log.jsonl` belongs to the keeper's user, which the agent cannot write, but 
 The keeper judges the commands the agent runs on its own machine. `ssh host '…'`, `pct exec` and `docker exec` are unwrapped and the inner command is judged, but a plan's targets are not tied to a host, and the remote account's rights are unchanged: if that account is root, only the plan limits it. Least privilege on the remote side is a separate measure ([method.md](method.md#3-an-on-call-agent-that-cannot-undo)). The server deployment, which would put the agent under a non-root user on the server, is experimental.
 
 ### What are standing plans and the Docker proxy? (server, experimental)
-Standing plans are a closed list of exact commands, written only in the root-owned config, for an agent nobody is watching (a systemd timer): they expire after at most 45 days and `/stop <id>` disables one. The Docker proxy lets a non-root agent list containers, read them (`logs`, `inspect`, `stats`, `top`) and restart a listed set, without joining the `docker` group (which is root-equivalent). Restarting needs a listed container; reads are unrestricted unless you add a `read_allow` list. `inspect` and `logs` output is masked, `docker top` and `docker stats` output is not. Both are documented in [deploy-keeper-server.md](deploy-keeper-server.md) and have a read-only checker, but neither has been applied to a real host yet.
+Standing plans are a closed list of exact commands, written only in the root-owned config, for an agent nobody is watching (a systemd timer): they expire after at most 45 days and `/stop <id>` disables one. The Docker proxy lets a non-root agent list containers, read them (`logs`, `inspect`, `stats`, `top`) and restart, start or stop a listed set, without joining the `docker` group (which is root-equivalent). Restart, start and stop need a listed container; reads are unrestricted unless you add a `read_allow` list. `inspect` and `logs` output is masked, `docker top` and `docker stats` output is not. Both are documented in [deploy-keeper-server.md](deploy-keeper-server.md) and have a read-only checker, but neither has been applied to a real host yet.
 
 ## Method and the other pillars
 
