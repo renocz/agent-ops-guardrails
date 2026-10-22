@@ -34,7 +34,7 @@ issue that says only that you have a security report (no details), and I will re
 This is a one-person project, so this is a best effort, not a service level:
 - I aim to acknowledge a report within a few days.
 - A confirmed problem gets a fix with a test, a line in `CHANGELOG.md`, and credit if you want it.
-- Version support: the keeper on a workstation is v1.0 (21/10/2026); fixes go to the latest release. The server
+- Version support: the keeper on a workstation is v1.0 (a release candidate until the tag exists); fixes go to the latest release. The server
   deployment of the keeper and the Docker proxy are experimental.
 
 ## Test data

@@ -17,8 +17,9 @@ une preuve ; c'est donc une couche de sécurité solide, pas la garantie que rie
 
 ## Comment ça marche
 
-Trois couches, comme un coffre-fort à trois serrures. Elles se complètent : en perdre une laisse les
-deux autres debout, mais elles n'ont pas la même force (l'étape d'approbation est la solide, le masquage des secrets est un filet).
+Trois couches, comme un coffre-fort à trois serrures. Chacune couvre une façon différente de mal tourner, et
+aucune ne couvre les failles d'une autre : un changement que le tri prend pour une lecture n'atteint jamais l'étape
+d'approbation, et le masquage ne l'arrête pas non plus. L'approbation est la couche solide ; le masquage des secrets est un filet.
 
 1. **La lecture est libre, le changement est bloqué par défaut.** Chaque commande que l'agent veut exécuter
    est contrôlée (par un **hook** — une vérification automatique qui s'exécute avant la commande, à chaque
@@ -69,7 +70,7 @@ laisse passer.
 
 - C'est un **projet jeune** : la version 1.0 couvre un poste de travail, construit et éprouvé sur l'environnement
   personnel d'une seule personne. Le déploiement sur serveur est documenté et dispose d'un vérificateur en lecture
-  seule, mais n'a pas encore été appliqué sur une vraie machine. C'est une preuve de concept validée, pas un
+  seule, mais n'a pas encore été appliqué sur une vraie machine. C'est une preuve de concept, pas un
   produit d'entreprise packagé.
 - **L'agent ne doit pas tourner en administrateur.** L'approbation ne tient que si le compte de l'agent ne peut
   pas modifier les fichiers du keeper : l'agent doit travailler sous un utilisateur ordinaire, pas en root
@@ -90,7 +91,7 @@ laisse passer.
 L'idée sous-jacente ne se limite pas à ce seul projet : c'est un schéma réutilisable pour autoriser un agent IA
 à opérer une infrastructure sans lui signer un chèque en blanc.
 
-- **Moindre privilège par défaut.** L'agent peut tout regarder ; tout ce que le système reconnaît comme un
+- **Les changements demandent une approbation par défaut.** L'agent peut tout regarder ; tout ce que le système reconnaît comme un
   changement a besoin d'une approbation séparée et tracée.
 - **Chaque approbation est rattachée à une personne**, avec un périmètre (ce qu'elle couvre) et une durée
   (sa validité).
@@ -131,7 +132,7 @@ blocage réel. Ne passez en mode bloquant qu'une fois ce journal propre.
 2. **Lisez le journal avant de toucher à quoi que ce soit.** Regardez ce qu'il aurait bloqué : surtout de
    vrais changements (c'est bon signe, c'est le but), ou du bruit causé par une tâche routinière mal
    interprétée (à corriger avant d'aller plus loin) ?
-3. **Corrigez les fausses alertes.** Chacune est un bug concret et testable du classifieur, pas une raison
+3. **Corrigez les fausses alertes, et cherchez l'inverse.** Chacune est un bug concret et testable du classifieur, pas une raison
    d'abandonner l'approche.
 4. **Passez en mode bloquant pour une période d'essai**, avec le contrôle « tout arrêter » testé et compris
    par la personne qui le détiendra, avant de s'y fier pour quoi que ce soit d'important.

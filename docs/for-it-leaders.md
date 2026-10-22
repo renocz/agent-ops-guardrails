@@ -16,8 +16,9 @@ strong safety layer, not a guarantee that nothing can ever slip through.)
 
 ## How it works
 
-Three layers, like a safe with three locks. They complement each other: losing one still leaves the others
-standing, though they are not equally strong (the approval step is the strong one, the secret masking is a safety net).
+Three layers, like a safe with three locks. Each covers a different way things go wrong, and none covers the
+gaps of another: a change the sorting mistakes for a read never reaches the approval step, and masking does not stop
+it either. The approval step is the strong layer; the secret masking is a safety net.
 
 1. **Reading is free, changing is blocked by default.** Every command the agent wants to run is checked (by a
    **hook** — a small, automatic check that runs before the command does, every single time) and sorted into
@@ -64,7 +65,7 @@ this **fail-closed**: uncertainty defaults to "ask a human," never to "let it th
 
 - This is a **young project**: v1.0 covers one workstation setup, built and proven on one person's homelab. The
   server deployment is documented and has a read-only checker, but has not been applied to a real host yet. It
-  is a validated proof of concept, not a packaged enterprise product.
+  is a proof of concept, not a packaged enterprise product.
 - **The agent must not run as an administrator.** The approval only holds if the agent's own account cannot edit
   the keeper's files, so the agent has to work under an ordinary user, not as root (the installer refuses root).
 - **An approval is an approval.** A plan that allows running a script lets that script do anything the agent's
@@ -82,8 +83,8 @@ this **fail-closed**: uncertainty defaults to "ask a human," never to "let it th
 The underlying idea isn't specific to this one project: it's a reusable pattern for letting an AI agent operate
 infrastructure without writing it a blank cheque.
 
-- **Least privilege by default.** The agent can look at anything; whatever the system recognises as a change needs a
-  separate, logged approval.
+- **Changes need an approval by default.** The agent can look at anything; whatever the system recognises as a change
+  needs a separate, logged approval. This is not a restriction on what the agent's account may read.
 - **Every approval is traced to a person**, with a scope (what it covers) and a duration (how long it's valid).
 - **A decision log** exists independently of the agent, so "what did it almost do, and what did we actually
   approve" is answerable after the fact.
@@ -119,8 +120,9 @@ before anyone has to trust it with real blocking. Only move to enforcing mode af
    for at least a week.
 2. **Read the log before touching anything.** Look at what it would have blocked: is it mostly real changes
    (good — that's the point), or noise from one routine task it keeps misreading (fix that before moving on)?
-3. **Fix the false alarms.** Each one is a concrete, testable bug in the classifier, not a reason to abandon the
-   approach.
+3. **Fix the false alarms, and look for the opposite.** Each false alarm is a concrete, testable bug in the classifier,
+   not a reason to abandon the approach. Also sample the calls it allowed as reads: a change it let through is the
+   costlier mistake, and it will not show up as a refusal.
 4. **Switch to blocking mode for a trial period**, with the "stop everything" control tested and understood by
    whoever will hold it, before relying on it for anything that matters.
 5. **Keep measuring.** How many approvals per day, how many rejections, how often does the system "fail closed"
