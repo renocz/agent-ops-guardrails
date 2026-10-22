@@ -16,10 +16,10 @@ It is a set of guardrails for letting an AI agent operate real infrastructure: a
 It is for people who already let an AI agent run commands on servers they care about (a homelab, a small company's infrastructure) and want it to stay useful without becoming dangerous. If your agent only writes code in a sandbox, you probably need less than this.
 
 ### Is it tied to one AI vendor?
-No, it works with several vendors.
+Not by design, but today three of the four pieces run only in Claude Code.
 - **council** works with any OpenAI-compatible endpoint, and it is meant to mix models from *different* vendors.
-- **secret-guard** is written as a Claude Code hook, because that is the agent I run. Its decision logic is one plain Python function, `decide()`, that takes a tool call and returns a refusal reason or nothing. Porting it to another agent that offers a "before running a command" hook should be a small wrapper. I have not tested other agents.
-- **go-gate and the keeper** are Claude Code hooks too (the keeper registers its hook in Claude Code's managed settings); I have not tested other agents with them either.
+- **secret-guard, go-gate and the keeper** are Claude Code hooks, because that is the agent I run (the keeper registers its hook in Claude Code's managed settings). secret-guard's decision logic is one plain Python function, `decide()`, that takes a tool call and returns a refusal reason or nothing, so porting it to another agent that offers a "before running a command" hook should be a small wrapper. I have not tested other agents with any of them.
+- A version that is not tied to one agent (one adapter per agent) is planned for v1.1. v1.0 is announced for Claude Code only.
 
 ### Is it production-ready?
 council and secret-guard run every day on my homelab, and the keeper has run in block mode on my laptop for nine days of everyday work (v1.0 covers that workstation setup). The server deployment of the keeper, the Docker proxy and go-gate on its own are experimental. Everything has tests and documented limits, and it is still one person's project, so read the limits and adapt it to your setup.
