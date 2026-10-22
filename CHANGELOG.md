@@ -2,7 +2,7 @@
 
 One version scheme: **a repository tag per release**. Components have no version of their own. Commit messages from 06/10/2026 that say "secret-guard v0.3/v0.4/v0.5" refer to the intermediate revisions listed under v0.6.
 
-## Unreleased (towards v1.0)
+## v1.0 (21/10/2026)
 
 - **`install-keeper.sh`: `--agent-user` is repeatable, and a reinstall no longer silently drops a second agent
   from `agent_uids` (owner review of the server deployment entry below, 21/10/2026).** The bug: every `--apply`
@@ -117,7 +117,8 @@ One version scheme: **a repository tag per release**. Components have no version
   `Write(...)` duplicates, leaving foreign rules alone. Tests: default entry, in-place upgrade of an old entry, edit-only
   deny rules with legacy cleanup and a kept foreign rule; mutation-checked (each of four mutants makes them fail).
 
-Next: finish the block-mode trial (started 12/10/2026, after the end-to-end dry run of refusal, approval, expiry, replay and a Telegram outage) -- a few days of varied real work, no deadlock, an acceptable number of cards -- then v1.0.
+What v1.0 means (21/10/2026). **v1.0 is the keeper on one workstation**: the daemon, the root-owned hook (`onFailure: block`), the approval cards on a second Telegram bot, several active plans per session, `dir:` targets, refusal messages that name what a plan is missing, and an installer that merges into an existing config instead of overwriting it. It ran in block mode on the owner's laptop from 12/10/2026 (observe mode from 08/10), nine days of everyday work, with no deadlock; the defects that trial exposed are the entries below. Be precise about what those nine days cover: they ran on a codebase that kept changing, and two fixes in this release are recent (`"onFailure": "block"` on 20/10/2026, the installer merging an existing config and several `--agent-user` on 21/10/2026), so the final code was observed for hours, not days; its tests (278 for the keeper, run on the release branch) and a read of the installer run in a temporary `--prefix` are what back it, not the nine days. The feedback is one person on one machine (macOS for the trial; the CI runs on Linux only, so the macOS installer path, including the group handling for several users, was read and used by the owner but has no automated test). The number of cards it asks for is a judgement the owner made, not a measurement this repository can give you.
+What v1.0 does **not** mean: the **server deployment** (standing plans, the filtered Docker proxy, the two-user topology) is documented and has a read-only checker, but it has not been applied to a real host, so it stays **experimental**; the open unknowns are listed in `docs/keeper-server-dry-run.md` (whether two hooks fire for one tool call when `--settings` is layered on managed settings -- this concerns only the server layout with a per-unit settings profile, not the single managed hook the workstation install writes --, `docker top`/`stats` output not masked by the Docker proxy, which also makes `docker top` a way to see process arguments, and the `docker inspect` template tested on one Docker version only). The kits of PR #12 (`change-sop`, `snapshot-gate`, `oncall`) are not part of this release. As before, none of this protects against a hostile agent or a compromised machine: it catches the mistakes of a cooperative one.
 
 - **keeper: standing plans, for an agent nobody is watching (design: `docs/design-keeper-server.md`, written
   first, before any code here -- the keeper's own precondition, "the agent must not be root," is false on the

@@ -1,4 +1,13 @@
-# Fake values on purpose: a case of the blind test set, written by another model and kept exactly as generated.
-secret-guard/blind/2026-10-06-gemini.json:curl-auth-header:356
-secret-guard/blind/2026-10-06-mistral.json:curl-auth-user:440
-secret-guard/blind/2026-10-06-claude.json:curl-auth-header:308
+# Known gitleaks findings in this repository's own history, reviewed by the owner on 21/10/2026 before v1.0:
+# all nine are test fixtures or blind-test corpus entries (fake tokens, a fake JWT, a fake private key, fake
+# URL credentials) that exist to exercise the secret masks. Listed by exact fingerprint (commit:file:rule:line),
+# not by path, so a real secret added to the same files later is still reported.
+b2caa3f6bffdda5ccf6063e293215318fd82111b:docker-proxy/test_docker_proxy.py:generic-api-key:463
+b2caa3f6bffdda5ccf6063e293215318fd82111b:docker-proxy/test_docker_proxy.py:generic-api-key:473
+b2caa3f6bffdda5ccf6063e293215318fd82111b:docker-proxy/test_docker_proxy.py:jwt:467
+b2caa3f6bffdda5ccf6063e293215318fd82111b:docker-proxy/test_docker_proxy.py:curl-auth-user:474
+2428ffbabca0c2062262b170503d9425cb185a44:secret-guard/test_secret_guard.py:curl-auth-user:164
+7ce93b9b964568ddc7de80354d0c7548ee86aac7:keeper/test_keeper.py:generic-api-key:675
+06d0defdef9a424d576284684a5ba8968df511cb:secret-guard/blind/2026-10-06-mistral.json:curl-auth-user:440
+9d0af46d331e987594cc59851771752f2e0bf577:secret-guard/blind/2026-10-06-gemini.json:curl-auth-header:356
+c3ea2534f4100829a35e257097b7a51c65d9c450:secret-guard/blind/2026-10-06-claude.json:curl-auth-header:308
