@@ -54,13 +54,18 @@ this **fail-closed**: uncertainty defaults to "ask a human," never to "let it th
 | | |
 |---|---|
 | **Caught in practice** | A week of watching the agent's real activity in dry-run mode (nothing was actually blocked yet) flagged 1,186 commands that would have needed approval as changes. Reviewing that log found a handful of false alarms, which were fixed before any real blocking started. |
-| **Tested, not just designed** | Nearly 300 automated tests across the project's components, run on every change. Each release has generally gone through a review by four AI models from different vendors before being tagged, specifically looking for security and design flaws. A dedicated test suite throws disguised and obfuscated commands at the classifier (quoting tricks, encoding, look-alike characters) to check it isn't fooled by the kind of thing a manipulated agent — or a prompt-injection attack — might try. |
-| **In daily use** | The secret-masking layer and the multi-model review already run on the owner's real, if small-scale, infrastructure. The approval mechanism (the "plan card on your phone") has run in block mode on the owner's own laptop since 12/10/2026, after an end-to-end dry run; a trial of several days of varied real work is under way, with v1.0 coming after it. Real use already found things the dry run and the automated tests had not: the "Stop everything" button disappears once a plan is decided, so a standing `/stop` command was added; some approval clicks arrived a minute or two late, which needed its own fix; and the hourly proposal limit, set at 3 to be cautious, was raised to 8 once real work needed more. Each of these is a point in favour of piloting in observe mode first — a young system meets real use with gaps, and that is where you want to find them. |
+| **Tested, not just designed** | More than 500 automated tests across the project's components, run on every change. Each release has generally gone through a review by four AI models from different vendors before being tagged, specifically looking for security and design flaws. A dedicated test suite throws disguised and obfuscated commands at the classifier (quoting tricks, encoding, look-alike characters) to check it isn't fooled by the kind of thing a manipulated agent — or a prompt-injection attack — might try. |
+| **In daily use** | The secret-masking layer and the multi-model review already run on the owner's real, if small-scale, infrastructure. The approval mechanism (the "plan card on your phone") has run in block mode on the owner's own laptop since 12/10/2026, after an end-to-end dry run: nine days of everyday work by 21/10/2026, which is what v1.0 (one workstation) rests on. Real use already found things the dry run and the automated tests had not: the "Stop everything" button disappears once a plan is decided, so a standing `/stop` command was added; some approval clicks arrived a minute or two late, which needed its own fix; and the hourly proposal limit, set at 3 to be cautious, was raised to 8 once real work needed more. Each of these is a point in favour of piloting in observe mode first — a young system meets real use with gaps, and that is where you want to find them. |
 
 **Honest limits, stated plainly:**
 
-- This is a **young project** (pre-1.0), built and proven on one person's homelab. It is a validated proof of
-  concept, not a packaged enterprise product.
+- This is a **young project**: v1.0 covers one workstation setup, built and proven on one person's homelab. The
+  server deployment is documented and has a read-only checker, but has not been applied to a real host yet. It
+  is a validated proof of concept, not a packaged enterprise product.
+- **The agent must not run as an administrator.** The approval only holds if the agent's own account cannot edit
+  the keeper's files, so the agent has to work under an ordinary user, not as root (the installer refuses root).
+- **An approval is an approval.** A plan that allows running a script lets that script do anything the agent's
+  user can do: the human decides what to allow, the system makes sure nothing happens without that decision.
 - It does **not replace** access management, network segmentation, or a human occasionally reviewing what the
   agent has been doing. It is one more layer, not a substitute for the others.
 - It **adds friction on purpose**: approval cards take a few seconds of a human's attention. That friction is
@@ -81,7 +86,7 @@ infrastructure without writing it a blank cheque.
   approve" is answerable after the fact.
 
 The message underneath all of it: **we are not asking the AI to be perfect. We are building the system so that
-one mistake cannot do damage.**
+one mistake is much less likely to do lasting damage, and is caught early.**
 
 ## Likely questions
 

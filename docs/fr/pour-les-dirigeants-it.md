@@ -59,13 +59,21 @@ laisse passer.
 | | |
 |---|---|
 | **Ce qui a été intercepté en pratique** | Une semaine d'observation de l'activité réelle de l'agent en mode à blanc (rien n'était encore réellement bloqué) a repéré 1186 commandes qui auraient nécessité une approbation en tant que changements. L'examen de ce journal a révélé une poignée de fausses alertes, corrigées avant le début du blocage réel. |
-| **Testé, pas seulement conçu** | Près de 300 tests automatisés sur l'ensemble des composants du projet, exécutés à chaque modification. La plupart des versions publiées sont passées par une revue de quatre modèles d'IA de fournisseurs différents avant d'être taguées, spécifiquement pour chercher des failles de sécurité et de conception. Une suite de tests dédiée soumet au classifieur des commandes déguisées et obfusquées (astuces de guillemets, encodages, caractères visuellement trompeurs) pour vérifier qu'il n'est pas dupé par le genre de ruse qu'un agent manipulé — ou une attaque par injection de prompt — pourrait tenter. |
-| **En usage quotidien** | La couche de masquage des secrets et la revue multi-modèle tournent déjà sur l'infrastructure réelle, bien que modeste, du créateur du projet. Le mécanisme d'approbation (la « carte de plan sur le téléphone ») tourne en mode bloquant sur l'ordinateur réel du créateur depuis le 12/10/2026, après une répétition complète à blanc ; un essai de plusieurs jours de travail réel et varié est en cours, avant la version 1.0. L'usage réel a déjà révélé des choses que la répétition et les tests automatisés n'avaient pas vues : le bouton « Tout arrêter » disparaît une fois qu'un plan est décidé, d'où l'ajout d'une commande `/stop` permanente ; certains clics d'approbation arrivaient avec une à deux minutes de retard, ce qui a nécessité un correctif dédié ; et la limite horaire de propositions, fixée par prudence à 3, a été relevée à 8 une fois que le travail réel l'a exigé. Chacun de ces points plaide pour piloter d'abord en mode observation : un système jeune révèle des failles à l'usage réel, et c'est justement là qu'on veut les trouver. |
+| **Testé, pas seulement conçu** | Plus de 500 tests automatisés sur l'ensemble des composants du projet, exécutés à chaque modification. La plupart des versions publiées sont passées par une revue de quatre modèles d'IA de fournisseurs différents avant d'être taguées, spécifiquement pour chercher des failles de sécurité et de conception. Une suite de tests dédiée soumet au classifieur des commandes déguisées et obfusquées (astuces de guillemets, encodages, caractères visuellement trompeurs) pour vérifier qu'il n'est pas dupé par le genre de ruse qu'un agent manipulé — ou une attaque par injection de prompt — pourrait tenter. |
+| **En usage quotidien** | La couche de masquage des secrets et la revue multi-modèle tournent déjà sur l'infrastructure réelle, bien que modeste, du créateur du projet. Le mécanisme d'approbation (la « carte de plan sur le téléphone ») tourne en mode bloquant sur l'ordinateur réel du créateur depuis le 12/10/2026, après une répétition complète à blanc : neuf jours de travail quotidien au 21/10/2026, sur lesquels s'appuie la version 1.0 (un poste de travail). L'usage réel a déjà révélé des choses que la répétition et les tests automatisés n'avaient pas vues : le bouton « Tout arrêter » disparaît une fois qu'un plan est décidé, d'où l'ajout d'une commande `/stop` permanente ; certains clics d'approbation arrivaient avec une à deux minutes de retard, ce qui a nécessité un correctif dédié ; et la limite horaire de propositions, fixée par prudence à 3, a été relevée à 8 une fois que le travail réel l'a exigé. Chacun de ces points plaide pour piloter d'abord en mode observation : un système jeune révèle des failles à l'usage réel, et c'est justement là qu'on veut les trouver. |
 
 **Limites assumées, dites sans détour :**
 
-- C'est un **projet jeune** (pré-version 1.0), construit et éprouvé sur l'environnement personnel d'une seule
-  personne. C'est une preuve de concept validée, pas un produit d'entreprise packagé.
+- C'est un **projet jeune** : la version 1.0 couvre un poste de travail, construit et éprouvé sur l'environnement
+  personnel d'une seule personne. Le déploiement sur serveur est documenté et dispose d'un vérificateur en lecture
+  seule, mais n'a pas encore été appliqué sur une vraie machine. C'est une preuve de concept validée, pas un
+  produit d'entreprise packagé.
+- **L'agent ne doit pas tourner en administrateur.** L'approbation ne tient que si le compte de l'agent ne peut
+  pas modifier les fichiers du keeper : l'agent doit travailler sous un utilisateur ordinaire, pas en root
+  (l'installateur refuse root).
+- **Une approbation reste une approbation.** Un plan qui autorise l'exécution d'un script laisse ce script faire
+  tout ce que l'utilisateur de l'agent peut faire : l'humain décide de ce qu'il autorise, le système garantit que
+  rien n'a lieu sans cette décision.
 - Il **ne remplace pas** la gestion des accès, la segmentation réseau, ni une relecture humaine occasionnelle
   de ce que l'agent a fait. C'est une couche supplémentaire, pas un substitut aux autres.
 - Il **ajoute de la friction volontairement** : les cartes d'approbation demandent quelques secondes
@@ -86,8 +94,8 @@ L'idée sous-jacente ne se limite pas à ce seul projet : c'est un schéma réut
 - **Un journal de décision** existe indépendamment de l'agent, pour pouvoir répondre après coup à « qu'a-t-il
   presque fait, et qu'avons-nous réellement approuvé ».
 
-Le message de fond : **on ne demande pas à l'IA d'être parfaite. On construit le système pour qu'une erreur ne
-puisse pas faire de dégâts.**
+Le message de fond : **on ne demande pas à l'IA d'être parfaite. On construit le système pour qu'une erreur ait
+beaucoup moins de chances de faire des dégâts durables, et soit repérée tôt.**
 
 ## Questions probables
 
