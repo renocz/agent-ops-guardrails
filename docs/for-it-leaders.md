@@ -107,7 +107,8 @@ Reads — the large majority of what an agent does day to day — are unaffected
 their phone, typically a few seconds, and most of that was already supposed to involve a human decision. Early
 measurements on real history suggest fewer than half of an agent's past changes had happened within a couple of
 hours of an explicit go-ahead from a human — which is the gap this closes, not a cost it adds on top of
-something that was already safe.
+something that was already safe. (That figure measures closeness in time, not a replay: it does not prove that no
+approval existed.)
 
 **Can we deploy this here?**
 Start in **observe mode**: the system watches and logs what it *would* block, but blocks nothing. That gives a
