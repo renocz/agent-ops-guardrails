@@ -16,8 +16,8 @@ strong safety layer, not a guarantee that nothing can ever slip through.)
 
 ## How it works
 
-Three layers, like a safe with three locks. Each one is independent; losing one still leaves the others
-standing.
+Three layers, like a safe with three locks. They complement each other: losing one still leaves the others
+standing, though they are not equally strong (the approval step is the strong one, the secret masking is a safety net).
 
 1. **Reading is free, changing is blocked by default.** Every command the agent wants to run is checked (by a
    **hook** — a small, automatic check that runs before the command does, every single time) and sorted into
@@ -68,7 +68,7 @@ this **fail-closed**: uncertainty defaults to "ask a human," never to "let it th
 - **The agent must not run as an administrator.** The approval only holds if the agent's own account cannot edit
   the keeper's files, so the agent has to work under an ordinary user, not as root (the installer refuses root).
 - **An approval is an approval.** A plan that allows running a script lets that script do anything the agent's
-  user can do: the human decides what to allow, the system makes sure nothing happens without that decision.
+  user can do: the human decides what to allow, and anything the system recognises as a change waits for that decision.
 - It does **not replace** access management, network segmentation, or a human occasionally reviewing what the
   agent has been doing. It is one more layer, not a substitute for the others.
 - It **adds friction on purpose**: approval cards take a few seconds of a human's attention. That friction is
@@ -82,8 +82,8 @@ this **fail-closed**: uncertainty defaults to "ask a human," never to "let it th
 The underlying idea isn't specific to this one project: it's a reusable pattern for letting an AI agent operate
 infrastructure without writing it a blank cheque.
 
-- **Least privilege by default.** The agent can look at anything; it can change nothing without a separate,
-  logged approval.
+- **Least privilege by default.** The agent can look at anything; whatever the system recognises as a change needs a
+  separate, logged approval.
 - **Every approval is traced to a person**, with a scope (what it covers) and a duration (how long it's valid).
 - **A decision log** exists independently of the agent, so "what did it almost do, and what did we actually
   approve" is answerable after the fact.
