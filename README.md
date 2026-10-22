@@ -10,22 +10,21 @@ This repo collects the guardrails that grew around it. Each one exists because s
 
 ## The principle in one picture
 
-Each layer answers one way an AI ops agent fails. None of them is enough alone.
+Each step answers one way an AI ops agent fails. None of them is enough alone. Blue = a human decides; green = a guardrail checks.
 
 ```mermaid
-flowchart LR
-    H(["👤 Human request"]) --> A["🤖 Agent analyses<br/>(read-only)"]
-    A --> P["📝 Written plan:<br/>what, why, risk,<br/>dry-run, rollback"]
-    P -->|"decision that matters"| C{{"🏛️ council<br/>4 models, 4 vendors"}}
-    C -->|"FIX FIRST"| P
-    C -->|"APPROVE, or HUMAN REVIEW<br/>if one member blocks"| G{"👤 Human GO?"}
-    P -->|"routine change"| G
-    G -->|"no"| P
-    G -->|"yes: plan + scope approved<br/>(checked by go-gate: action category,<br/>every named object in scope)"| S["📸 snapshot gate<br/>host takes a snapshot<br/>(agent can't roll back)"]
-    S --> E["⚙️ Execute + verify<br/>with evidence"]
-    E --> D["📚 Document<br/>(change record)"]
-    SG["🔐 secret-guard<br/>every command and file read"] -.->|"watches"| A
-    SG -.->|"watches"| E
+flowchart TB
+    H(["👤 <b>You ask</b>"]):::human --> A["🤖 <b>The agent investigates</b><br/>read-only, always allowed"]
+    A --> P["📝 <b>It writes a plan</b><br/>what · why · risk · dry-run · rollback"]
+    P --> C["🏛️ <b>Big decisions only:</b><br/>four AIs from four vendors<br/>review the plan (council).<br/>Routine changes skip this step."]:::guard
+    C --> G{"👤 <b>You say GO?</b><br/>one tap, for a limited time"}:::human
+    G -->|"no"| X["⛔ <b>Nothing happens</b>"]
+    G -->|"yes"| S["📸 <b>Snapshot first</b><br/>the host takes it,<br/>the agent cannot roll back"]:::guard
+    S --> E["⚙️ <b>The agent acts</b><br/>and proves it worked"]
+    E --> D["📚 <b>Change record written</b>"]
+    D ~~~ SG["🔐 <b>secret-guard, throughout:</b> checks every command<br/>and every file the agent reads"]:::guard
+    classDef human stroke:#2f81f7,stroke-width:3px
+    classDef guard stroke:#3fb950,stroke-width:3px
 ```
 
 ### The keeper in one picture
@@ -33,22 +32,28 @@ flowchart LR
 The picture above is the *method*. This one is the strongest *mechanism*: who may say yes, and why the agent cannot say it to itself.
 
 ```mermaid
-flowchart LR
-    subgraph AG["Agent's own account (not root)"]
-        T["🤖 Agent wants to run a command"]
-        HK["🪝 Root-owned hook<br/>read, or change?"]
+sequenceDiagram
+    participant Ag as 🤖 The agent<br/>(its own account, not root)
+    participant Hk as 🪝 Root-owned hook
+    participant Kp as 🔒 The keeper<br/>(another user)
+    participant Hu as 📱 You<br/>(second Telegram bot)
+    Ag->>Hk: I want to run a command
+    Hk->>Hk: is it a read, or a change?
+    alt a read
+        Hk-->>Ag: ✅ runs
+    else a change, inside an approved plan
+        Hk->>Kp: is there an approved plan for this?
+        Kp-->>Hk: yes
+        Hk-->>Ag: ✅ runs
+    else a change, no plan yet
+        Hk->>Kp: is there an approved plan for this?
+        Kp-->>Hk: no
+        Hk-->>Ag: ⛔ refused: propose a plan
+        Ag->>Kp: here is my plan (what, on what, for how long)
+        Kp->>Hu: a card with the plan
+        Hu->>Kp: one tap: approved, expires on its own
     end
-    subgraph KP["Keeper: another user, files the agent cannot touch"]
-        KD["🔒 keeperd<br/>holds the approved plans"]
-    end
-    HU["📱 Human<br/>card on a second Telegram bot"]
-    T --> HK
-    HK -->|"read"| OK["✅ runs"]
-    HK -->|"change: asks the keeper"| KD
-    KD -->|"inside an approved plan"| OK
-    KD -->|"no plan: refused, the agent proposes one"| HU
-    HU -->|"one tap: approved, expires on its own"| KD
-    HK -.->|"keeper unreachable: changes refused"| NO["⛔ blocked"]
+    Note over Hk,Kp: Keeper unreachable: changes are refused, reads still pass
 ```
 
 **What these guardrails are, and are not.** They catch the mistakes of a *cooperative* agent: a careless command, a plan it didn't run past the human, a secret that slipped into a transcript. They are hooks that run with the agent's own rights and judge the text it writes, so an agent that *tries* to get around them can: an external audit of v0.8 did it 16 ways for secret-guard alone (all closed in v0.9, but the class remains). Against an agent that tries to get around them, the approval must live in a separate process the agent cannot write to. That is the [**keeper**](keeper/) (v1.0 on a workstation; server deployment experimental):
