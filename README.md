@@ -7,9 +7,9 @@
 In one minute:
 - The agent reads and analyses freely.
 - Anything the system recognises as a change waits for a human yes: one tap on your phone, valid for a limited time.
-- The agent cannot give itself that yes: the approval lives in a separate service it cannot touch.
+- The agent cannot give itself that yes: the approval lives in a separate service it cannot touch, and the agent must not run as root.
 
-It catches an agent's mistakes and tricks, not a determined attacker, and the sorting of commands is a set of rules, not a proof. The [limits](#limits-stated-precisely) are written down, not hidden.
+v1.0 covers this approval step on one workstation; the server deployment is experimental. It catches an agent's mistakes and tricks, not a determined attacker, and the sorting of commands is a set of rules, not a proof. The [limits](#limits-stated-precisely) are written down, not hidden.
 
 I let an AI agent run my homelab: a hypervisor, about forty containers, backups and a VPN. The agent is Claude Code; the reviewers in the council come from four different vendors. It has broad access to all of it, and it is good at the work. It is also confidently wrong a few times a week, and early on it printed secrets into its own transcript.
 
