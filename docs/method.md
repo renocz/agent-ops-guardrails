@@ -1,7 +1,7 @@
 # The harness around the agent
 
 The setup: one person, one hypervisor host, and two Claude Code agents with the same rules and a shared memory.
-- The **main agent** runs on the laptop, has root on the host, and is driven from a chat app.
+- The **main agent** runs on the laptop as an ordinary user (which is what the keeper requires), has root on the host over SSH, and is driven from a chat app.
 - The **on-call agent** runs inside the container that hosts all the services. It is deliberately weaker; see below.
 
 Everything below exists because something went wrong once.
@@ -11,7 +11,7 @@ Everything below exists because something went wrong once.
 Every change follows the same steps:
 1. **Analyse.** Read-only: the reference doc, the running state, logs, and who depends on what.
 2. **Plan.** A short message in plain words: what changes and why, impact and downtime, risk, the dry-run result, the rollback, and how it will be verified.
-3. **GO.** Nothing changes without an explicit "go" from the human in the conversation.
+3. **GO.** Nothing changes without an explicit "go" from the human in the conversation. [go-gate](../go-gate/) and the [keeper](../keeper/) make this mechanical instead of a rule the agent is asked to follow.
    - A pasted automated alert is **not** a GO: the agent verifies it and proposes a plan, and the human answers GO (see the [FAQ](faq.md#does-a-pasted-alert-count-as-a-go)).
    - Any new **external exposure** is always the human's decision.
 4. **Dry-run.** `docker compose up -d --no-deps --dry-run <svc>` shows which containers would be recreated. Scripts that edit files print their diff first.

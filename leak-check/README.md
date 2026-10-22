@@ -10,6 +10,8 @@ It runs where the secrets live, as root and outside the agent's reach. It reads 
 
 ## What it found on my setup (06/10/2026)
 
+This table is the 06/10/2026 snapshot; it has not been updated since.
+
 | Leak | Where | Status |
 |---|---|---|
 | A Telegram bot token, used by 7 services | 4 server transcripts | was valid: rotated |

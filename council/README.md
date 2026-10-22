@@ -75,7 +75,7 @@ python3 ops_council.py --title "auth service update" < proposal.md
 
 `api_base` may be `http://host:port`, `.../v1` or the full `.../chat/completions` URL. Provider-specific request fields (for example a reasoning effort) go in `model_overrides`, keyed by model-name prefix; check what your endpoint accepts.
 
-It writes a Markdown report to `reports_dir` and prints a JSON line (`verdict`, `votes`, `synthesis`, ...) for the agent to act on. A run makes 9 model calls and costs roughly $0.10–0.25 with frontier models.
+It writes a Markdown report to `reports_dir` and prints a JSON line (`verdict`, `votes`, `synthesis`, ...) for the agent to act on. A run makes 9 model calls and costs roughly $0.10–0.25 with frontier models for a short plan. Sending whole documents (tens of KB) costs noticeably more, and on 22/10/2026 a series of such runs exhausted the budget of a small key: set a budget with some room, and keep proposals short.
 
 Tests run offline: `python3 -m unittest -v test_council.py`.
 
