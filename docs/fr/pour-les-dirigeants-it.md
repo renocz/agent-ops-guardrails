@@ -17,8 +17,8 @@ une preuve ; c'est donc une couche de sécurité solide, pas la garantie que rie
 
 ## Comment ça marche
 
-Trois couches, comme un coffre-fort à trois serrures. Chacune est indépendante : en perdre une laisse les
-deux autres debout.
+Trois couches, comme un coffre-fort à trois serrures. Elles se complètent : en perdre une laisse les
+deux autres debout, mais elles n'ont pas la même force (l'étape d'approbation est la solide, le masquage des secrets est un filet).
 
 1. **La lecture est libre, le changement est bloqué par défaut.** Chaque commande que l'agent veut exécuter
    est contrôlée (par un **hook** — une vérification automatique qui s'exécute avant la commande, à chaque
@@ -75,8 +75,8 @@ laisse passer.
   pas modifier les fichiers du keeper : l'agent doit travailler sous un utilisateur ordinaire, pas en root
   (l'installateur refuse root).
 - **Une approbation reste une approbation.** Un plan qui autorise l'exécution d'un script laisse ce script faire
-  tout ce que l'utilisateur de l'agent peut faire : l'humain décide de ce qu'il autorise, le système garantit que
-  rien n'a lieu sans cette décision.
+  tout ce que l'utilisateur de l'agent peut faire : l'humain décide de ce qu'il autorise, tout ce que le système reconnaît
+  comme un changement attend cette décision.
 - Il **ne remplace pas** la gestion des accès, la segmentation réseau, ni une relecture humaine occasionnelle
   de ce que l'agent a fait. C'est une couche supplémentaire, pas un substitut aux autres.
 - Il **ajoute de la friction volontairement** : les cartes d'approbation demandent quelques secondes
@@ -90,8 +90,8 @@ laisse passer.
 L'idée sous-jacente ne se limite pas à ce seul projet : c'est un schéma réutilisable pour autoriser un agent IA
 à opérer une infrastructure sans lui signer un chèque en blanc.
 
-- **Moindre privilège par défaut.** L'agent peut tout regarder ; il ne peut rien changer sans une approbation
-  séparée et tracée.
+- **Moindre privilège par défaut.** L'agent peut tout regarder ; tout ce que le système reconnaît comme un
+  changement a besoin d'une approbation séparée et tracée.
 - **Chaque approbation est rattachée à une personne**, avec un périmètre (ce qu'elle couvre) et une durée
   (sa validité).
 - **Un journal de décision** existe indépendamment de l'agent, pour pouvoir répondre après coup à « qu'a-t-il
