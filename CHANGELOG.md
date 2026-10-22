@@ -102,7 +102,9 @@ One version scheme: **a repository tag per release**. Components have no version
   `agent_home`, `client_group`, `socket`, `state_dir`, `bot_token_file`, `mode`, `lang`, `hook_timeout_sec`,
   `wait_max_sec`, `safe_git_repos`); every other existing key -- known to this version of the script or not, a
   future version's key included -- survives untouched, value and presence both. With no existing file, behavior is
-  unchanged (the shipped defaults are written). Tests: a hand-edited key the installer never writes (`max_proposals_
+  unchanged (the shipped defaults are written). Correction (22/10/2026): `mode` is one of the keys the options
+  drive, so a reinstall without `--observe` writes `"mode": "block"` even over a hand-edited `observe` (found by the council's
+  check of the FAQ, measured in a throw-away prefix; the sentence above and the README said otherwise until then). Tests: a hand-edited key the installer never writes (`max_proposals_
   per_hour`) survives a reinstall with the other installer-owned keys still correct, an unknown key simulating a
   future script version survives too, the no-existing-file path is unchanged; mutation-checked (reinstating the old
   full-overwrite write in a sibling copy of the script makes both new tests fail).

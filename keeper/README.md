@@ -276,8 +276,9 @@ To hand control back fast (do this as a human with sudo; the agent cannot):
    (`managed-settings.json.bak-keeper`).
 
 A reinstall **merges** into an existing `/etc/keeper/config.json` instead of overwriting it: only the keys this run's
-own options drive (`--lang`, `--safe-git-repo`, `--hook-timeout`, …) are refreshed, and any key you edited by hand --
-`mode` above, `max_proposals_per_hour`, a key a newer script version adds -- survives untouched. With no existing
+own options drive are refreshed (`--lang`, `--safe-git-repo`, `--hook-timeout`, `--wait-max`, and the mode: without
+`--observe` a reinstall writes `"mode": "block"`, even over a hand-edited `observe`; measured 22/10/2026 in a throw-away
+prefix), and any other key you edited by hand -- `max_proposals_per_hour`, a key a newer script version adds -- survives untouched. With no existing
 file, the script writes its usual defaults, unchanged. `agent_uids` follows the same rule but one step further: a
 reinstall **unions** this run's `--agent-user` uids into the existing list rather than refreshing it outright (fixed
 21/10/2026 -- it used to refresh it to a single uid every time, dropping any other user silently); `--replace-agent-uids`

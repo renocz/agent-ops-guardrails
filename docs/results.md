@@ -22,7 +22,7 @@
 
 Blind-set scores measure **agreement with another model's labels**, so they say how much of what a fresh model thinks of is covered. They don't count leaks. leak-check counts leaks, but only the ones it can see. Its inventory (what was checked) is the denominator, not the total of secrets in existence.
 
-53 saved reports between 29/09 and 22/10 (9 of them on 22/10 alone, for the public texts and the release), four members from four vendors. The first ~20 runs cost roughly $3 in total; the later ones sent much longer inputs and the key's budget had to be raised to $20 per 30 days on 22/10, so cost per run was not re-measured. Each run is logged with two questions:
+60 saved reports between 29/09 and 22/10 (16 of them on 22/10 alone, for the public texts, the release and the FAQ), four members from four vendors. The first ~20 runs cost roughly $3 in total; the later ones sent much longer inputs and the key's budget had to be raised to $20 per 30 days on 22/10, so cost per run was not re-measured. Each run is logged with two questions:
 - did it find a real problem the agent had missed?
 - did it change the decision?
 
