@@ -132,8 +132,8 @@ blocage réel. Ne passez en mode bloquant qu'une fois ce journal propre.
 2. **Lisez le journal avant de toucher à quoi que ce soit.** Regardez ce qu'il aurait bloqué : surtout de
    vrais changements (c'est bon signe, c'est le but), ou du bruit causé par une tâche routinière mal
    interprétée (à corriger avant d'aller plus loin) ?
-3. **Corrigez les fausses alertes, et cherchez l'inverse.** Chacune est un bug concret et testable du classifieur, pas une raison
-   d'abandonner l'approche.
+3. **Corrigez les fausses alertes, et cherchez l'inverse.** Chaque fausse alerte est un bug concret et testable du classifieur, pas une raison
+   d'abandonner l'approche. Échantillonnez aussi les appels qu'il a laissés passer comme des lectures : un changement laissé passer est l'erreur la plus coûteuse, et elle n'apparaît pas comme un refus.
 4. **Passez en mode bloquant pour une période d'essai**, avec le contrôle « tout arrêter » testé et compris
    par la personne qui le détiendra, avant de s'y fier pour quoi que ce soit d'important.
 5. **Continuez à mesurer.** Combien d'approbations par jour, combien de refus, à quelle fréquence le système
