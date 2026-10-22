@@ -96,15 +96,15 @@ One version scheme: **a repository tag per release**. Components have no version
 - **keeper installer: a reinstall now MERGES into an existing `/etc/keeper/config.json` instead of overwriting it
   (20/10).** Rerunning `install-keeper.sh --apply` rewrote the whole file from the script's own defaults and
   command-line options, so any key the owner had edited by hand after the first install -- `max_proposals_per_hour`
-  raised from 3 to 8 (owner review of PR #8) --
+  raised from 3 to 8 (owner review of PR #8), or `mode` set to `observe` for the emergency rollback in the README --
   was silently lost on the next reinstall, reverting to the script's default. The script now reads the existing file
   first (if any) and only sets the keys this run's own options drive (`owner_id`, `chat_id`, `agent_uids`,
   `agent_home`, `client_group`, `socket`, `state_dir`, `bot_token_file`, `mode`, `lang`, `hook_timeout_sec`,
   `wait_max_sec`, `safe_git_repos`); every other existing key -- known to this version of the script or not, a
   future version's key included -- survives untouched, value and presence both. With no existing file, behavior is
-  unchanged (the shipped defaults are written). `mode` is one of the keys the options drive: a reinstall without
-  `--observe` writes `"mode": "block"` even over a hand-edited `observe` (found by the council's check of the FAQ and measured
-  in a throw-away prefix on 22/10/2026; the README said otherwise until then). Tests: a hand-edited key the installer never writes (`max_proposals_
+  unchanged (the shipped defaults are written). Correction (22/10/2026): `mode` is one of the keys the options
+  drive, so a reinstall without `--observe` writes `"mode": "block"` even over a hand-edited `observe` (found by the council's
+  check of the FAQ, measured in a throw-away prefix; the sentence above and the README said otherwise until then). Tests: a hand-edited key the installer never writes (`max_proposals_
   per_hour`) survives a reinstall with the other installer-owned keys still correct, an unknown key simulating a
   future script version survives too, the no-existing-file path is unchanged; mutation-checked (reinstating the old
   full-overwrite write in a sibling copy of the script makes both new tests fail).

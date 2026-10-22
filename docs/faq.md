@@ -33,7 +33,7 @@ Not fully. v1.0 is built against the mistakes of a cooperative agent, not a dete
 ### What do I need to run it?
 - Python and a shell: the tools use the standard library only, and CI runs Python 3.9 and 3.12 (secret-guard states 3.9+).
 - secret-guard's `mask` is a Perl filter; `env -S` needs coreutils 8.30+ on Linux and is built in on macOS.
-- The keeper needs macOS or Linux, root once to install it (the agent itself must not be root, and must not be able to sudo without a password it does not have), and a second Telegram bot created with BotFather. After any install or reinstall, restart the Claude Code sessions that were already open. `"onFailure": "block"`, which makes a timed-out hook a refusal, needs a Claude Code version that knows the field (2.1.295 or later according to its release notes; I measured it on 2.1.302).
+- The keeper needs macOS or Linux, root once to install it (the agent itself must not be root, and, as the installer's precondition says, must not be able to sudo without a password it does not have), and a second Telegram bot created with BotFather. After any install or reinstall, restart the Claude Code sessions that were already open. `"onFailure": "block"`, which makes a timed-out hook a refusal, needs a Claude Code version that knows the field (2.1.295 or later according to its release notes; I measured it on 2.1.302).
 - I have not tried Windows. CI runs on Linux only.
 
 ## council
@@ -146,15 +146,15 @@ Because the two tools disagree on 5 cases, on purpose:
 The run did find 2 real gaps: an AWS key and a GitHub token typed in clear inside a command. They are now refused. Replaying our own history showed why it matters: before the rule, 18 past commands held real secrets in clear, which then sat in the local transcripts.
 
 ### Why refuse a secret in the command, even through the mask?
-The mask only filters the output. A value typed into the command is already in the transcript, the shell history and the process list. Put it in a mode-600 file or the keychain and pass it by file or standard input (`curl -H @file`); a value read into a variable and then expanded into an argument is still visible in the process list. If it was already typed, rotate it.
+The mask only filters the output. A value typed into the command is already in the transcript, the shell history and the process list. Put it in a mode-600 file or the keychain and pass it by file or standard input (`curl -H @file`); a value read into a variable and then expanded into an argument is still visible in the process list (the hook accepts a variable; the process list does not hide it). If it was already typed, rotate it.
 
 ## leak-check
 
 ### What is leak-check, and why do I need it if secret-guard is on?
-secret-guard prevents leaks with patterns, and no pattern list is complete. leak-check measures them. It runs as root, outside the agent's reach, reads the real values of your secrets (environment, compose files, app configs, URLs, private keys) and looks for those exact values in what the agent produced: transcripts, shell history, go-gate's log and reports sent to outside models. On my setup (06/10/2026) it found real leaks that secret-guard had missed, among them a Telegram bot token, a Cloudflare tunnel token and three OIDC client secrets, all since rotated ([leak-check/README.md](../leak-check/README.md)).
+secret-guard prevents leaks with patterns, and no pattern list is complete. leak-check measures them. On the server it runs as root, outside the agent's reach (the laptop job runs as your user, so an agent could stop or fake it); it reads the real values of your secrets (environment, compose files, app configs, URLs, private keys) and looks for those exact values in what the agent produced: transcripts, shell history, go-gate's log and reports sent to outside models. On my setup (06/10/2026) it found real leaks that secret-guard had missed, among them a Telegram bot token, a Cloudflare tunnel token and three OIDC client secrets, all since rotated ([leak-check/README.md](../leak-check/README.md)).
 
 ### How far can I trust a clean leak-check result?
-Read it as a floor: it only finds the secrets it has inventoried. Each report says what was checked and which sources were missing, and each run starts with a canary. Against gitleaks over the same folders, its inventory covered 68 of the 128 distinct values gitleaks flagged (53%, a single measurement). The findings table is a 06/10/2026 snapshot and has not been refreshed since.
+Read it as a floor: it only finds the secrets it has inventoried. Each report says what was checked and which sources were missing, and each run starts with a canary. Against gitleaks over the same folders, its inventory covered 68 of the 128 distinct values gitleaks flagged (53%, a single measurement, counting live configuration and values of 12+ characters in `/opt/stacks` and `/etc` on the server). The findings table is a 06/10/2026 snapshot and has not been refreshed since.
 
 ## go-gate
 
@@ -195,7 +195,7 @@ The approval is a button press on a bot only the keeper's user can read, tied to
 A root agent could edit the keeper's files, stop it or change the hook, and the approval would mean nothing. The installer refuses root as the agent user.
 
 ### How do I install it, and how do I remove it?
-Install: `sudo ./keeper/install-keeper.sh --agent-user YOU --owner-id YOUR_TELEGRAM_NUMERIC_ID`. It only prints what it would do until you add `--apply`. `--observe` installs it in log-only mode. `--agent-user` can be repeated for several non-root users, and a reinstall merges into your existing `/etc/keeper/config.json` instead of overwriting it. There is no uninstall script: [Emergency rollback](../keeper/README.md#emergency-rollback) lists the three ways to hand control back: switch the running keeper to observe and restart it; set the mode file to observe and then stop the daemon (stopping the daemon alone leaves changes refused in block mode); or restore the managed settings the installer backed up.
+Install: `sudo ./keeper/install-keeper.sh --agent-user YOU --owner-id YOUR_TELEGRAM_NUMERIC_ID`. It only prints what it would do until you add `--apply`. `--observe` installs it in log-only mode. `--agent-user` can be repeated for several non-root users, and a reinstall merges into your existing `/etc/keeper/config.json` instead of overwriting it, except for the keys its own options drive (see "How do I upgrade the keeper?"). There is no uninstall script: [Emergency rollback](../keeper/README.md#emergency-rollback) lists the three ways to hand control back: switch the running keeper to observe and restart it; set the mode file to observe and then stop the daemon (stopping the daemon alone leaves changes refused in block mode); or restore the managed settings the installer backed up.
 
 ### Observe mode or block mode?
 Observe mode logs every call that would have been refused and blocks nothing; `/summary` on the bot reads that log. Block mode refuses. Start in observe mode and read the log before switching, as the author did (observe from 08/10/2026, block from 12/10/2026).
@@ -219,16 +219,16 @@ A plan that allows `script` lets the approved script do anything the agent's use
 No. Hiding sensitive values is secret-guard's job, and it runs inside the agent's own process, so it catches accidents, not an agent that tries to get around it. The keeper makes no claim about that.
 
 ### What does Telegram see?
-Each plan arrives as a card on the keeper bot: lines generated from the scope (id, targets, actions, time to live), warnings for risky shapes (`script`, `delete`, no targets, `dir:`), a line saying what a previous refusal lacked, and then the agent's own text. Telegram's servers therefore see those cards, and a bot chat is not end-to-end encrypted. Do not put secrets in plan text. See [keeper/README.md](../keeper/README.md).
+Each plan arrives as a card on the keeper bot: lines generated from the scope (id, targets, actions, time to live), warnings for risky shapes (`script`, `delete`, no targets, `dir:`), after a refusal in the same session (less than 10 minutes earlier), a line saying what the previous plan lacked, and then the agent's own text. Telegram's servers therefore see those cards, and a bot chat is not end-to-end encrypted. Do not put secrets in plan text. See [keeper/README.md](../keeper/README.md).
 
 ### What if the keeper refuses something legitimate?
 A refusal tells the agent what is missing: the kind of action the active plan lacks, or the words in the command that none of the plan's targets cover. The agent can then propose a plan that fits, and the new card says what the previous plan did not cover. Approve it, reject it, or press Stop. `/plans` and `/summary` on the bot show the recent plan events and the refusal and approval log.
 
 ### How do I give the agent a whole directory?
-Write `targets=dir:<path>`. It grants the whole subtree explicitly and shows a warning on the card. A `dir:` target covers an action only when every path the command names resolves inside it (symlinks and `..` are followed) and the working directory is inside it; a command that runs elsewhere, such as `ssh`, `pct` or `docker exec`, is never covered by one. `/`, your home directory and the keeper's and go-gate's own paths are never granted this way. A plain target matches by word and is looser. See [keeper/README.md](../keeper/README.md).
+Write `targets=dir:<path>`. It grants the whole subtree explicitly and shows a warning on the card. An action is covered through `dir:` targets only when every path the command names resolves inside one of them (symlinks and `..` are followed) and the working directory is inside one of them; a command that runs elsewhere, such as `ssh`, `pct` or `docker exec`, is never covered by one. Plans that mix `dir:` and plain targets have their own rules, see [go-gate/README.md](../go-gate/README.md). `/`, your home directory and the keeper's and go-gate's own paths are never granted this way. A plain target matches by word and is looser. See [keeper/README.md](../keeper/README.md).
 
 ### How does the agent wait for my tap?
-With `keeper-propose --wait SECONDS`, the call blocks until you decide, up to `wait_max_sec` (50 s by default, always held below the hook timeout minus 10 s). Without it, `keeper-propose` returns at once and the agent has to retry the action later.
+With `keeper-propose --wait SECONDS`, the call blocks until you decide, up to `wait_max_sec` (50 s by default, capped at the hook timeout minus 10 s). Without it, the agent has to run `keeper-status` again to find out.
 
 ### How do I upgrade the keeper?
 Run the new release's installer again, with a dry run first. A reinstall merges into `/etc/keeper/config.json` (it keeps keys such as `max_proposals_per_hour` and adds to `agent_uids`), but the options on the command line overwrite their keys: `--lang`, `--safe-git-repo`, `--hook-timeout`, `--wait-max`, and the mode (without `--observe` it installs in block mode). Pass the same options as the first install, back up `/etc/keeper` and `/opt/agent-guardrails` first, and restart the Claude Code sessions that were already open afterwards.
