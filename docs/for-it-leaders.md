@@ -9,9 +9,10 @@ guardrails like these. Five minutes, no code required. For the full technical pi
 
 Giving an AI agent real access to servers is risky — not mainly because the agent is malicious, but because it
 can be confidently wrong, or be manipulated into running something it shouldn't, while holding administrator
-rights. **agent-ops-guardrails** lets the agent read and analyse freely, but anything that *changes* something
-must first be approved by a human, on their phone, for a limited time — and the agent cannot grant that
-approval to itself.
+rights. **agent-ops-guardrails** lets the agent read and analyse freely, but anything the system recognises as a
+*change* must first be approved by a human, on their phone, for a limited time — and the agent cannot grant that
+approval to itself. ("Recognises" matters: the sorting of commands is a set of rules, not a proof, so this is a
+strong safety layer, not a guarantee that nothing can ever slip through.)
 
 ## How it works
 
@@ -20,11 +21,13 @@ standing.
 
 1. **Reading is free, changing is blocked by default.** Every command the agent wants to run is checked (by a
    **hook** — a small, automatic check that runs before the command does, every single time) and sorted into
-   "read" or "change." Reads always go through. A change needs step 2.
+   "read" or "change." Reads always go through. A change needs step 2. The sorting is done by rules, not by proof: a
+   cleverly disguised command that looks like a read can be misjudged. Each such case found is a bug to fix, and the
+   reason the project calls this a safety layer and not an absolute barrier.
 2. **A change needs a human's explicit approval, on their phone.** The agent writes a **plan**: what it wants
    to do, on what, and for how long. A card with that plan — in plain terms, rights spelled out — arrives on
    the human's phone. They approve or reject with one tap. An approved plan expires on its own after a set
-   time, and a single "stop everything" button or command ends every approval immediately, from anywhere.
+   time, and a single "stop everything" button or command ends every approval immediately, from anywhere (a command that is already running keeps running).
 3. **Secrets are masked — a safety net, not a barrier.** A hook refuses a command that might print a secret
    unless its whole output goes through a masking filter, and masks known patterns (keys, tokens, passwords)
    wherever the agent prints something. It runs inside the agent's own process, so — unlike the approval step
