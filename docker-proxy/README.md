@@ -65,7 +65,7 @@ Anything not explicitly matched below is refused.
   regexes, not a call out to the Perl script -- see the module's own docstring for why), so the agent cannot get
   an unmasked copy by skipping its own local `mask`. Like `secret-guard`'s own filter, this is best-effort and
   pattern-based, not a security boundary against an adversary who controls what the container prints -- see
-  [secret-guard's "Scope and limits"](../secret-guard/README.md#why).
+  [secret-guard's "Limits"](../secret-guard/README.md#limits).
 
 ## Why the daemon shells out to the `docker` CLI, not the raw socket
 
