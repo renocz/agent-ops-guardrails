@@ -2,11 +2,24 @@
 
 [![tests](https://github.com/renocz/agent-ops-guardrails/actions/workflows/tests.yml/badge.svg)](https://github.com/renocz/agent-ops-guardrails/actions/workflows/tests.yml)
 
-**An operating model for an AI agent that runs real infrastructure: the guardrails, the method, and the field notes.**
+**Let an AI agent run your servers, without letting it approve its own actions.**
+
+In one minute:
+- The agent reads and analyses freely.
+- Anything the system recognises as a change waits for a human yes: one tap on your phone, valid for a limited time.
+- The agent cannot give itself that yes: the approval lives in a separate service it cannot touch.
+
+It catches an agent's mistakes and tricks, not a determined attacker, and the sorting of commands is a set of rules, not a proof. The [limits](#limits-stated-precisely) are written down, not hidden.
 
 I let an AI agent run my homelab: a hypervisor, about forty containers, backups and a VPN. The agent is Claude Code; the reviewers in the council come from four different vendors. It has broad access to all of it, and it is good at the work. It is also confidently wrong a few times a week, and early on it printed secrets into its own transcript.
 
 This repo collects the guardrails that grew around it. Each one exists because something went wrong once.
+
+## Start here: pick your path
+
+- **I am a manager or a CIO** (five minutes, no code): [docs/for-it-leaders.md](docs/for-it-leaders.md) ([version française](docs/fr/pour-les-dirigeants-it.md)).
+- **I am an engineer:** the [FAQ](docs/faq.md) (why several LLMs, cost, use with other agents, the keeper, false positives, limits), then [keeper/README.md](keeper/README.md) to install the approval step (its installer only does a dry run unless you pass `--apply`).
+- **I want to see it first:** a real [council report](examples/council-report.md) and the hook's real [refusals](examples/secret-guard-refusals.md).
 
 ## The principle in one picture
 
@@ -27,9 +40,28 @@ flowchart TB
     classDef guard stroke:#3fb950,stroke-width:3px
 ```
 
-### The keeper in one picture
+## The keeper, in plain words
 
-The picture above is the *method*. This one is the strongest *mechanism*: who may say yes, and why the agent cannot say it to itself.
+The strongest piece is the [**keeper**](keeper/) (v1.0 on a workstation; server deployment experimental). It answers one question: who may say yes, and why the agent cannot say it to itself.
+
+1. The agent asks to change something.
+2. A card with its plan arrives on your phone. You approve it with one tap.
+3. It runs, for a limited time, and the approval expires on its own.
+
+The agent cannot press that button itself: the button lives in a separate service, under another user, on a second Telegram bot only that service can read.
+
+```mermaid
+flowchart TB
+    A["🤖 <b>The agent wants to change something</b>"] --> K["🔒 <b>The keeper</b> (another user) checks:<br/>is there a plan you approved?"]:::guard
+    K -->|"no"| Y["📱 <b>A card arrives on your phone</b>"]:::human
+    Y -->|"you tap: approve"| K
+    K -->|"yes, and still valid"| R["✅ <b>It runs</b>, then the approval expires"]
+    classDef human stroke:#2f81f7,stroke-width:3px
+    classDef guard stroke:#3fb950,stroke-width:3px
+```
+
+<details>
+<summary>The same thing, step by step (who talks to whom)</summary>
 
 ```mermaid
 sequenceDiagram
@@ -56,15 +88,28 @@ sequenceDiagram
     Note over Hk,Kp: Keeper unreachable: changes are refused, reads still pass
 ```
 
-**What these guardrails are, and are not.** They catch the mistakes of a *cooperative* agent: a careless command, a plan it didn't run past the human, a secret that slipped into a transcript. They are hooks that run with the agent's own rights and judge the text it writes, so an agent that *tries* to get around them can: an external audit of v0.8 did it 16 ways for secret-guard alone (all closed in v0.9, but the class remains). Against an agent that tries to get around them, the approval must live in a separate process the agent cannot write to. That is the [**keeper**](keeper/) (v1.0 on a workstation; server deployment experimental):
+</details>
+
+What makes it hold:
 - it runs under its own user;
 - approvals come from button presses on a second Telegram bot that only it can read;
 - the hook is root-owned and registered in managed settings;
 - it requires an agent whose own account is **not root** (otherwise the agent could edit the keeper itself): the installer refuses root.
 
-It ran on my laptop in observe mode from 08/10/2026, then switched to block mode on 12/10/2026 after an end-to-end dry run (checklist in [docs/block-mode-dry-run.md](docs/block-mode-dry-run.md)); every change the classifier recognises as a change, on that machine, now goes through an approval card on the second Telegram bot (what the classifier misjudges is a known limit, below). Block mode ran there for nine days of everyday work; v1.0 (release candidate) is the keeper on one workstation (the nine days ran on macOS; the automated tests and CI run on Linux, so the macOS installer path has no automated test). Its server deployment is documented and has a read-only checker, but it has not been applied to a real host, so it stays experimental. Output filtering (secret-guard) still runs in the agent's process.
+Track record: it ran on my laptop in observe mode for four days, then in block mode for nine days of everyday work, after an end-to-end dry run (checklist in [docs/block-mode-dry-run.md](docs/block-mode-dry-run.md)). On that machine, every change the classifier recognises as a change goes through an approval card. v1.0 (release candidate) is the keeper on one workstation: the nine days ran on macOS, while the automated tests and CI run on Linux, so the macOS installer path has no automated test. Its server deployment is documented and has a read-only checker, but it has not been applied to a real host, so it stays experimental.
+
+### Limits, stated precisely
+
+<details>
+<summary>What these guardrails are, and are not (read this before relying on them)</summary>
+
+They catch the mistakes of a *cooperative* agent: a careless command, a plan it didn't run past the human, a secret that slipped into a transcript. They are hooks that run with the agent's own rights and judge the text it writes, so an agent that *tries* to get around them can: an external audit of v0.8 did it 16 ways for secret-guard alone (all closed in v0.9, but the class remains). Against an agent that tries to get around them, the approval must live in a separate process the agent cannot write to. That is what the keeper is for. Output filtering (secret-guard) still runs in the agent's own process.
 
 Two claims, and only the first is strong: the **approval cannot be forged** by the agent (separate user, button on a bot it cannot read, root-owned hook); but **what counts as a change is decided by a heuristic classifier**, not a proof. A review on 08/10 found a class of "read" commands that actually execute or write through an option or a config file, now fixed and tested (K1-K9 in the [design's Known limits](docs/design-keeper.md#known-limits-be-precise-about-what-is-proven)). Do not read "unforgeable approval" as "the agent cannot act without approval": the gate is as good as the classifier, and `actions=script` is unbounded by design.
+
+</details>
+
+## What each piece guards against
 
 | Failure mode of the agent | Guardrail | Status |
 |---|---|---|
@@ -77,12 +122,9 @@ Two claims, and only the first is strong: the **approval cannot be forged** by t
 | Breaks something during an upgrade | **Snapshot gate**: the agent *requests* a snapshot; the host takes it. The agent can never roll back or delete. | 📄 [described](docs/method.md#3-an-on-call-agent-that-cannot-undo) |
 | Has too much power when working alone | **On-call restrictions**: a least-privilege role, and denial tests that are harmless if they unexpectedly succeed. | 📄 [described](docs/method.md#4-denial-tests-must-be-harmless) |
 
-## Start here
+## The pieces, and how to use them
 
-- **For managers and CIOs:** a five-minute, non-technical read: [docs/for-it-leaders.md](docs/for-it-leaders.md) ([version française](docs/fr/pour-les-dirigeants-it.md)).
-- **See what you get:** a real [council report](examples/council-report.md) and the hook's real [refusals](examples/secret-guard-refusals.md).
 - **Install secret-guard:** `./install.sh` (add `--write-settings` to register the hook in `~/.claude/settings.json`; a backup is made).
-- **Questions?** The [FAQ](docs/faq.md) covers: why several LLMs, cost, use with other agents, false positives, limits, adapting it to your setup.
 - **Review plans with several models:** [council/README.md](council/README.md). Works with any OpenAI-compatible endpoint.
 - **Stop secret leaks in Claude Code:** [secret-guard/README.md](secret-guard/README.md). Two files to install, plus a settings snippet.
 - **Measure real leaks, not pattern scores:** [leak-check/README.md](leak-check/README.md). It found 7 real leaks the pattern hook had missed. Its inventory covers 53% of what gitleaks flags, measured and broken down.
