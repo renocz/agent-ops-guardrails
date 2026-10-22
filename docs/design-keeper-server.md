@@ -1,7 +1,7 @@
 # Design: covering the server (keeper v1.0, part 2), draft for review
 
 Status: draft 2, 20/10/2026 — the three open questions of draft 1 were decided by the owner directly on PR #18
-([comment](https://github.com/renocz/agent-ops-guardrails/pull/18#issuecomment-6299989493)) and are folded in below.
+(comment on PR #18 of the previous repository (not kept)) and are folded in below.
 The keeper so far assumes the laptop: a non-root agent, file permissions that protect it, a human on Telegram. On
 the server none of that holds. This note designs the gap, and states what is implemented in this PR.
 
@@ -101,7 +101,7 @@ That migration touches a running system with ~40 containers; it needs the owner'
 service units, and a maintenance window, none of which exist in this cloud session. §5 below designs how to stage
 it (observe before block, a reversible dry run in a throwaway container) so that when the owner does it, nothing
 here has to be re-invented. **Decided by the owner** (PR #18 review comment, 20/10/2026, verified on the PR itself —
-[comment](https://github.com/renocz/agent-ops-guardrails/pull/18#issuecomment-6299989493)): the Docker-proxy kit
+comment on PR #18 of the previous repository (not kept)): the Docker-proxy kit
 goes **into this repository**, in a **separate PR**, following the `snapshot-gate/`/`oncall/` model, not left
 outside the repo or folded into this one. Still open, because it is operational knowledge this design cannot
 invent: which host-level verbs the sudoers allowlist in that separate PR should actually name (which arr container,
@@ -238,7 +238,7 @@ simply: an expected-vs-seen count the morning script itself could report into th
 `standing-used`/`allowed`/`denied` event that day. This is a reporting addition, not a change to the fail-closed
 rule itself — the gate still denies by default, but silence stops being invisible. **Known limitation, not a
 question**: the owner decided (PR #18 review comment, 20/10/2026 —
-[comment](https://github.com/renocz/agent-ops-guardrails/pull/18#issuecomment-6299989493)) that this stays a todo,
+comment on PR #18 of the previous repository (not kept)) that this stays a todo,
 deliberately **not implemented** until there is a real systemd timer to signal from — building it against a guess
 at that signal would be worse than not building it. Revisit once §1 and §5 are done on the real host and a real
 timer exists to compare against.
@@ -398,7 +398,7 @@ this document's length):
 ## Owner decisions (resolved; were open questions in the first draft of this PR)
 
 Posted directly on the PR, verified via the GitHub API rather than relayed:
-[comment](https://github.com/renocz/agent-ops-guardrails/pull/18#issuecomment-6299989493) (`renocz`, OWNER,
+comment on PR #18 of the previous repository (not kept) (`renocz`, OWNER,
 20/10/2026, "validated by the owner in chat on 20/10/2026 at 19:21 UTC").
 
 1. **The Docker-proxy kit from §1 goes into this repository, as a separate PR**, following the `snapshot-gate/`/
