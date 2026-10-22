@@ -10,9 +10,10 @@ version destinée aux ingénieurs est [la FAQ](../faq.md).
 Donner à un agent IA un accès réel aux serveurs est risqué, mais pas principalement parce que l'agent serait
 malveillant. C'est parce qu'il peut se tromper avec une confiance totale, ou être manipulé pour exécuter une
 commande qu'il ne devrait pas, tout en détenant des droits d'administrateur. **agent-ops-guardrails** laisse
-l'agent lire et analyser librement, mais toute action qui *change* quelque chose doit d'abord être approuvée
-par un humain, sur son téléphone, pour une durée limitée — et l'agent ne peut pas s'accorder cette approbation
-lui-même.
+l'agent lire et analyser librement, mais toute action que le système reconnaît comme un *changement* doit
+d'abord être approuvée par un humain, sur son téléphone, pour une durée limitée — et l'agent ne peut pas
+s'accorder cette approbation lui-même. (« Reconnaît » compte : le tri des commandes repose sur des règles, pas sur
+une preuve ; c'est donc une couche de sécurité solide, pas la garantie que rien ne peut jamais passer.)
 
 ## Comment ça marche
 
@@ -22,12 +23,14 @@ deux autres debout.
 1. **La lecture est libre, le changement est bloqué par défaut.** Chaque commande que l'agent veut exécuter
    est contrôlée (par un **hook** — une vérification automatique qui s'exécute avant la commande, à chaque
    fois) puis classée en « lecture » ou « changement ». Les lectures passent toujours. Un changement a besoin
-   de l'étape 2.
+   de l'étape 2. Le tri est fait par des règles, pas par une preuve : une commande habilement déguisée en lecture
+   peut être mal jugée. Chaque cas trouvé est un défaut à corriger, et la raison pour laquelle le projet parle de
+   couche de sécurité et non de barrière absolue.
 2. **Un changement a besoin de l'approbation explicite d'un humain, sur son téléphone.** L'agent rédige un
    **plan** : ce qu'il veut faire, sur quoi, et pour combien de temps. Une carte avec ce plan — en termes
    clairs, les droits explicités — arrive sur le téléphone de l'humain. Il approuve ou refuse d'un geste. Un
    plan approuvé expire tout seul après une durée fixée, et un unique bouton ou commande « tout arrêter » met
-   fin à toutes les approbations immédiatement, depuis n'importe où.
+   fin à toutes les approbations immédiatement, depuis n'importe où (une commande déjà en cours continue de tourner).
 3. **Les secrets sont masqués — un filet de sécurité, pas une barrière.** Un hook refuse une commande qui
    pourrait afficher un secret, sauf si toute sa sortie passe par un filtre de masquage, et masque les motifs
    connus (clés, jetons, mots de passe) partout où l'agent affiche quelque chose. Il tourne dans le propre

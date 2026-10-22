@@ -3,6 +3,8 @@
 - [General](#general)
 - [council](#council)
 - [secret-guard](#secret-guard)
+- [go-gate](#go-gate)
+- [keeper](#keeper)
 - [Method and the other pillars](#method-and-the-other-pillars)
 
 ## General
@@ -20,7 +22,7 @@ No, it works with several vendors.
 - **go-gate and the keeper** are Claude Code hooks too (the keeper registers its hook in Claude Code's managed settings); I have not tested other agents with them either.
 
 ### Is it production-ready?
-It runs every day on my homelab, and it has tests and documented limits. It is still one person's project, so read the limits and adapt it to your setup.
+council and secret-guard run every day on my homelab, and the keeper has run in block mode on my laptop for nine days of everyday work (v1.0 covers that workstation setup). The server deployment of the keeper, the Docker proxy and go-gate on its own are experimental. Everything has tests and documented limits, and it is still one person's project, so read the limits and adapt it to your setup.
 
 ## council
 
@@ -180,10 +182,10 @@ Observe mode logs every call that would have been refused and blocks nothing; `/
 A plan that cannot be delivered is reported to the agent as not sent, and nothing is approved: the agent stays blocked on changes, while reads still work.
 
 ### What happens if the keeper daemon is down, or the hook times out?
-In block mode a change is refused and reads pass; in observe mode calls pass. The installer writes `"onFailure": "block"` on the hook entry because, measured on Claude Code 2.1.302, a PreToolUse hook that outlives its timeout otherwise lets the command run (it ran after about 67 s; with `onFailure: block` it was blocked).
+If the daemon is unreachable: in block mode a change is refused and reads pass; in observe mode calls pass. If the hook itself outlives its timeout, Claude Code decides, not the keeper, and a timed-out call is blocked, reads included, because of the `onFailure: block` setting below. The installer writes `"onFailure": "block"` on the hook entry because, measured on Claude Code 2.1.302, a PreToolUse hook that outlives its timeout otherwise lets the command run (it ran after about 67 s; with `onFailure: block` it was blocked).
 
 ### How do I stop everything at once?
-`/stop` on the keeper bot revokes every active and pending plan; `/stop <id>` revokes one. A process already started under an approved plan keeps running: the keeper gates tool calls, not what an approved process does afterwards.
+`/stop` on the keeper bot revokes every active and pending plan from that moment on; `/stop <id>` revokes one. It does not stop a process that is already running. A process already started under an approved plan keeps running: the keeper gates tool calls, not what an approved process does afterwards.
 
 ### What is in a plan, and how long does it last?
 An id, `targets` (paths, hosts or words the command must name), `actions` (`edit`, `git`, `deploy`, `api`, `browser`, `delete`, `script`, `doc`) and a time to live (60 minutes by default, 240 at most). A session can hold several plans at once (3 by default, 5 at most), and the number of proposals per hour is limited (3 by default, configurable in `config.json`).
