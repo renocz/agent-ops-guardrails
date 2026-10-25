@@ -1118,6 +1118,24 @@ class InstallerConfigMerge(unittest.TestCase):
 
 @unittest.skipUnless(shutil.which("bash") and os.path.exists("/usr/bin/python3") and
                      subprocess.run(["id", "nobody"], capture_output=True).returncode == 0, "needs bash, /usr/bin/python3, user nobody")
+@unittest.skipUnless(sys.platform.startswith("linux"), "the systemd unit is only written by the Linux branch of the installer")
+class InstallerLinuxUnit(unittest.TestCase):
+    """The systemd unit gives the service the primary group of its own user as a supplementary group. Found by the first real
+    `--apply` on Debian 12 (25/10/2026): `Group=keeperclients` replaces the process's primary group, /etc/keeper/config.json is
+    root:keeper 640, so without `SupplementaryGroups=keeper` keeperd died at start with PermissionError on its own config."""
+
+    def test_unit_keeps_the_service_users_own_group(self):
+        prefix = tempfile.mkdtemp(prefix="kunit", dir="/tmp")
+        self.addCleanup(shutil.rmtree, prefix, ignore_errors=True)
+        r = subprocess.run(["bash", os.path.join(HERE, "install-keeper.sh"), "--agent-user", "nobody", "--owner-id", "1",
+                            "--prefix", prefix], capture_output=True, text=True, timeout=60)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        with open(os.path.join(prefix, "etc", "systemd", "system", "keeper.service")) as f:
+            unit = f.read()
+        self.assertIn("Group=keeperclients", unit)
+        self.assertIn("SupplementaryGroups=keeper\n", unit)
+
+
 class InstallerConfigMergeMutation(InstallerConfigMerge):
     """Mutation check: run the exact tests above (inherited unchanged) against a sibling copy of install-keeper.sh
     that reinstates the original bug -- a full overwrite of config.json, ignoring any existing file (agent_uids

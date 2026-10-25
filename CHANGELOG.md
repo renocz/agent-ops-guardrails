@@ -2,6 +2,19 @@
 
 One version scheme: **a repository tag per release**. Components have no version of their own. Commit messages from 06/10/2026 that say "secret-guard v0.3/v0.4/v0.5" refer to the intermediate revisions listed under v0.6.
 
+## Unreleased
+
+- **`install-keeper.sh` (Linux): `keeper.service` could not start (25/10/2026).** The first real `--apply` on a Debian 12
+  privileged LXC (a disposable container, then the production host in observe mode) showed `keeperd` dying at start in a
+  restart loop with `PermissionError: /etc/keeper/config.json`. Cause: the unit sets `Group=keeperclients`, which replaces
+  the primary group of the `keeper` user in the service process, while the config is `root:keeper 640`. Fix: the unit now
+  has `SupplementaryGroups=keeper`. Measured: without it the service restarts forever (and, because the hook is
+  `onFailure: block`, an agent started after the install loses its change-capable tools); with it the service is `active`
+  and `keeper/check-keeper-server.sh` reports 13 PASS, 0 FAIL. New test: `InstallerLinuxUnit` (Linux only). Before this
+  fix, `docs/deploy-keeper-server.md` §2.1's "Expected result" (`systemctl status keeper` is `active (running)`) was not
+  true on Linux; anyone who applied the installer before this change can apply the fix by hand with a drop-in
+  (`SupplementaryGroups=keeper`) and `systemctl restart keeper`.
+
 ## v1.0 (22/10/2026)
 
 - **`install-keeper.sh`: `--agent-user` is repeatable, and a reinstall no longer silently drops a second agent
