@@ -9,7 +9,9 @@ permissions:
 
 jobs:
   unit:
-    runs-on: ubuntu-latest
+    # Pinned: ubuntu-latest resolved to Ubuntu 26.04 when this was noticed (25/10/2026), where actions/setup-python cannot find Python 3.9 (the 3.9 job failed
+    # before running any test and the 3.12 job was cancelled by fail-fast). 3.9 is the oldest Python this project supports.
+    runs-on: ubuntu-24.04
     strategy:
       matrix:
         python: ["3.9", "3.12"]
