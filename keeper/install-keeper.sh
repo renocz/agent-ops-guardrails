@@ -300,6 +300,9 @@ Wants=network-online.target
 [Service]
 User=$KUSER
 Group=$GROUP
+# Group= replaces the PRIMARY group of $KUSER in the process, and /etc/keeper/config.json is root:$KUSER 640: without this line
+# keeperd cannot read its own config (PermissionError, restart loop) -- found by the first real --apply on Debian 12, 25/10/2026.
+SupplementaryGroups=$KUSER
 ExecStart=$PY -I $LIB/keeperd.py /etc/keeper/config.json
 Restart=always
 RestartSec=5
