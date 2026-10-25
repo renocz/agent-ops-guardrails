@@ -536,5 +536,19 @@ class EndToEndOverRealSocket(unittest.TestCase):
         self.assertEqual(mode, 0o660)
 
 
+class InstallerUnitTemplate(unittest.TestCase):
+    """Static check of the systemd unit the installer writes (the unit is only written by `--apply`, never in `--prefix` mode, so CI cannot
+    install it). Both lines come from the first real install on Debian 12 + Docker 29.2.1 (25/10/2026): without SupplementaryGroups the daemon
+    could not read its own config (root:dockerproxy 640) because Group= replaces the primary group; without DOCKER_CONFIG inside the `env -i`
+    command the docker CLI printed a warning about ~/.docker/config.json (ProtectHome=true) into the output, and inspect was no longer valid JSON.
+    Behaviour measured in a disposable container: the 12 proxy checks and check-keeper-server.sh (25 PASS, 0 FAIL) pass only with both lines."""
+
+    def test_unit_keeps_the_service_users_group_and_a_docker_config_dir(self):
+        with open(os.path.join(HERE, "install-docker-proxy.sh")) as f:
+            src = f.read()
+        self.assertIn("SupplementaryGroups=dockerproxy\n", src)
+        self.assertIn("ExecStart=/usr/bin/env -i DOCKER_CONFIG=/run/docker-proxy /usr/bin/python3 -I", src)
+
+
 if __name__ == "__main__":
     unittest.main()
