@@ -4,6 +4,20 @@ One version scheme: **a repository tag per release**. Components have no version
 
 ## Unreleased
 
+- **`install-docker-proxy.sh`: two defects of the systemd unit, found by the first real install against Docker 29.2.1 on Debian 12 (25/10/2026).**
+  (1) Same cause as the keeper unit below: `Group=docker-proxy-clients` replaces the primary group of `dockerproxy`, while
+  `/etc/docker-proxy/config.json` is `root:dockerproxy 640`, so `docker-proxy.service` died at start with `PermissionError` (restart
+  loop, then "start request repeated too quickly"). Fix: `SupplementaryGroups=dockerproxy`. (2) `ProtectHome=true` hides the home of
+  `dockerproxy`, so the `docker` CLI printed `WARNING: Error loading config file ... /.docker/config.json: permission denied` into the
+  output and `inspect` was no longer valid JSON (the `check-keeper-server.sh` inspect check failed). Fix: `DOCKER_CONFIG=/run/docker-proxy`,
+  given INSIDE the `env -i` command (an `Environment=` line would be wiped by `env -i`). Measured in a disposable container (Docker 29.2.1,
+  one container with and one without a healthcheck): ps, logs, inspect, restart and stop on listed containers work; a restart of an unlisted
+  container, `rm`, `exec`, `run` and a wildcard name are refused; direct `docker` is refused for the agent user; `check-keeper-server.sh`
+  reports 25 PASS, 0 FAIL, 2 WARN (the Docker version differs from the 29.9.1 the `inspect` format was first verified against; a
+  `docker-proxy` helper of Docker Engine is on the PATH). The new test `InstallerUnitTemplate` is a STATIC check of the unit text (the unit
+  is only written by `--apply`, never in `--prefix` mode); the behaviour above was measured by hand. Anyone who installed before this change
+  can fix it with a systemd drop-in carrying the two lines and `systemctl restart docker-proxy`.
+
 - **`install-keeper.sh` (Linux): `keeper.service` could not start (25/10/2026).** The first real `--apply` on a Debian 12
   privileged LXC (a disposable container, then the production host in observe mode) showed `keeperd` dying at start in a
   restart loop with `PermissionError: /etc/keeper/config.json`. Cause: the unit sets `Group=keeperclients`, which replaces

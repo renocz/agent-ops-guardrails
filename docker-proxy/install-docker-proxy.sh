@@ -142,9 +142,14 @@ Requires=docker.service
 Type=simple
 User=dockerproxy
 Group=$GROUP
+# Group= replaces the PRIMARY group of dockerproxy in the process, and $CONFIG is root:dockerproxy 640: without this line the daemon
+# cannot read its own config (PermissionError, restart loop). Found by the first real install on Debian 12, 25/10/2026.
+SupplementaryGroups=dockerproxy
 RuntimeDirectory=docker-proxy
 RuntimeDirectoryMode=0750
-ExecStart=/usr/bin/env -i /usr/bin/python3 -I /opt/agent-guardrails/lib/docker_proxyd.py --config $CONFIG --socket $SOCKET
+# DOCKER_CONFIG is given inside the env -i command (an Environment= line would be wiped by env -i): with ProtectHome=true the docker CLI
+# cannot read ~/.docker/config.json and prints a warning that gets mixed into the output (a JSON inspect is then not valid JSON).
+ExecStart=/usr/bin/env -i DOCKER_CONFIG=/run/docker-proxy /usr/bin/python3 -I /opt/agent-guardrails/lib/docker_proxyd.py --config $CONFIG --socket $SOCKET
 Restart=on-failure
 NoNewPrivileges=true
 ProtectSystem=strict
