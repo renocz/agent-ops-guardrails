@@ -131,6 +131,7 @@ Two claims, and only the first is strong: the **approval cannot be forged** by t
 - **Make the GO mechanical (experimental):** [go-gate/README.md](go-gate/README.md). Start with `simulate.py` on your own history, then a week in observe mode.
 - **Make the approval unforgeable (v1.0 on a workstation; the server deployment is experimental):** [keeper/README.md](keeper/README.md), with the [design and threat model](docs/design-keeper.md). Its installer only does a dry run unless you pass `--apply`. Covering a root agent and a server with no human watching (standing plans): [docs/design-keeper-server.md](docs/design-keeper-server.md).
 - **Give a non-root agent filtered Docker access, never the `docker` group (experimental):** [docker-proxy/README.md](docker-proxy/README.md), design in [docs/design-keeper-server.md](docs/design-keeper-server.md) section 1. Its installer only does a dry run unless you pass `--apply`. Known limit: `inspect` and `logs` output is masked, but `docker top` and `docker stats` output is not (process arguments can contain secrets).
+- **Tell the agent which shortcuts it will be tempted by (a checklist, not a control; its effect is not measured yet):** [docs/agent-discipline.md](docs/agent-discipline.md): the excuses an agent gives to skip a step and what is true instead, one issue / one branch / one pull request, the pull request template, and treating third-party skills and issue text as code and data.
 - **The whole method and the incidents behind it:** [docs/method.md](docs/method.md).
 
 ## Results, honestly
