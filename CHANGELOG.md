@@ -4,6 +4,8 @@ One version scheme: **a repository tag per release**. Components have no version
 
 ## Unreleased
 
+- **`docs/agent-discipline.md` and `.github/pull_request_template.md` (26/10/2026): the behavioural layer next to the gate.** A checklist, not a control, and its effect is not measured yet (the page says so). Rationalizations table (the excuses an agent gives to skip a step, what is true instead), one issue / one branch / one pull request with no merge or branch deletion unless asked, a pull request body that says what, why, how it was verified and how to roll back, and third-party skills, packages and images treated as code (pin the exact source, read the instruction files and not only the program, try it in a disposable place, do not leave it loaded). Ideas taken from reading the README and `SKILL.md` of issues-to-pr (MIT); no code reused, the project was read and not run. Documentation only: no code of the keeper, secret-guard or go-gate changes.
+
 - **`install-docker-proxy.sh`: two defects of the systemd unit, found by the first real install against Docker 29.2.1 on Debian 12 (25/10/2026).**
   (1) Same cause as the keeper unit below: `Group=docker-proxy-clients` replaces the primary group of `dockerproxy`, while
   `/etc/docker-proxy/config.json` is `root:dockerproxy 640`, so `docker-proxy.service` died at start with `PermissionError` (restart
