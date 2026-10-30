@@ -64,7 +64,7 @@ this **fail-closed**: uncertainty defaults to "ask a human," never to "let it th
 **Honest limits, stated plainly:**
 
 - This is a **young project**: v1.0 covers one workstation setup, built and proven on one person's homelab. The
-  server deployment is documented and has a read-only checker, but has not been applied to a real host yet. It
+  server deployment is documented and has a read-only checker, but has been installed on one real host in observe mode only (nothing is blocked there yet). It
   is a proof of concept, not a packaged enterprise product.
 - **The agent must not run as an administrator.** The approval only holds if the agent's own account cannot edit
   the keeper's files, so the agent has to work under an ordinary user, not as root (the installer refuses root).

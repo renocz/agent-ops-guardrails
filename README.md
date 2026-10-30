@@ -9,7 +9,7 @@ In one minute:
 - Anything the system recognises as a change waits for a human yes: one tap on your phone, valid for a limited time.
 - The agent cannot give itself that yes: the approval lives in a separate service it cannot touch, and the agent must not run as root.
 
-v1.0 covers this approval step on one workstation; the server deployment is experimental. It catches an agent's mistakes and tricks, not a determined attacker, and the sorting of commands is a set of rules, not a proof. The [limits](#limits-stated-precisely) are written down, not hidden.
+v1.0 covers this approval step on one workstation, where it ran in block mode; on the author's own server it is installed in observe mode only, and the server deployment stays experimental. It catches an agent's mistakes and tricks, not a determined attacker, and the sorting of commands is a set of rules, not a proof. The [limits](#limits-stated-precisely) are written down, not hidden.
 
 I let an AI agent run my homelab: a hypervisor, about forty containers, backups and a VPN. The agent is Claude Code; the reviewers in the council come from four different vendors. It has broad access to all of it, and it is good at the work. It is also confidently wrong a few times a week, and early on it printed secrets into its own transcript.
 
@@ -42,7 +42,7 @@ flowchart TB
 
 ## The keeper, in plain words
 
-The strongest piece is the [**keeper**](keeper/) (v1.0 on a workstation; server deployment experimental). It answers one question: who may say yes, and why the agent cannot say it to itself.
+The strongest piece is the [**keeper**](keeper/) (v1.0 on a workstation in block mode; installed on a server in observe mode only, experimental). It answers one question: who may say yes, and why the agent cannot say it to itself.
 
 1. The agent asks to change something.
 2. A card with its plan arrives on your phone. You approve it with one tap.
@@ -96,7 +96,7 @@ What makes it hold:
 - the hook is root-owned and registered in managed settings;
 - it requires an agent whose own account is **not root** (otherwise the agent could edit the keeper itself): the installer refuses root.
 
-Track record: it ran on my laptop in observe mode for four days, then in block mode for nine days of everyday work, after an end-to-end dry run (checklist in [docs/block-mode-dry-run.md](docs/block-mode-dry-run.md)). On that machine, every change the classifier recognises as a change goes through an approval card. v1.0 is the keeper on one workstation: the nine days ran on macOS, while the automated tests and CI run on Linux, so the macOS installer path has no automated test. Its server deployment is documented and has a read-only checker, but it has not been applied to a real host, so it stays experimental.
+Track record: it ran on my laptop in observe mode for four days, then in block mode for nine days of everyday work, after an end-to-end dry run (checklist in [docs/block-mode-dry-run.md](docs/block-mode-dry-run.md)). On that machine, every change the classifier recognises as a change goes through an approval card. v1.0 is the keeper on one workstation: the nine days ran on macOS, while the automated tests and CI run on Linux, so the macOS installer path has no automated test. Its server deployment is documented and has a read-only checker; it is installed on one real host (the author's server) in observe mode only, with the approval loop verified end to end on 30/10/2026, so it stays experimental.
 
 ### Limits, stated precisely
 
@@ -117,7 +117,7 @@ Two claims, and only the first is strong: the **approval cannot be forged** by t
 | Prints a secret by accident (`docker inspect`, `crontab -l`, an error message carrying a URL with credentials) | [**secret-guard/**](secret-guard/): a hook refuses commands that may print secrets unless their whole output goes through a masking filter, and blocks direct reads of secret files. | ✅ code |
 | A secret ends up in a transcript anyway (no pattern list is complete) | [**leak-check/**](leak-check/): a root job looks for the *real* secret values (env, compose, app configs, URLs, private keys) in what the agent produced, on the server and, after a daily copy, on the laptop. Each run starts with a canary. A hit is a leak, not a guess. | ✅ code |
 | Acts without being asked, or beyond what was approved | [**go-gate/**](go-gate/): a hook that allows changes only inside a plan the human approved with a GO (scope + expiry). Reads stay free. Observe mode by default. | 🧪 code, experimental |
-| Forges, replays or removes that approval itself | [**keeper/**](keeper/): a daemon under its own user holds the approvals, and the human approves with a button on a separate bot. The hook is root-owned and fails closed. Requires an agent that is not root. | ✅ v1.0 on a workstation; 🧪 server deployment experimental |
+| Forges, replays or removes that approval itself | [**keeper/**](keeper/): a daemon under its own user holds the approvals, and the human approves with a button on a separate bot. The hook is root-owned and fails closed. Requires an agent that is not root. | ✅ v1.0 on a workstation; 🧪 server: installed, observe mode only |
 | Skips checks | **Change procedure**: analyse → plan → explicit GO → dry-run → execute → verify with evidence → document. | 📄 [described](docs/method.md#1-the-change-procedure) |
 | Breaks something during an upgrade | **Snapshot gate**: the agent *requests* a snapshot; the host takes it. The agent can never roll back or delete. | 📄 [described](docs/method.md#3-an-on-call-agent-that-cannot-undo) |
 | Has too much power when working alone | **On-call restrictions**: a least-privilege role, and denial tests that are harmless if they unexpectedly succeed. | 📄 [described](docs/method.md#4-denial-tests-must-be-harmless) |
@@ -129,7 +129,7 @@ Two claims, and only the first is strong: the **approval cannot be forged** by t
 - **Stop secret leaks in Claude Code:** [secret-guard/README.md](secret-guard/README.md). Two files to install, plus a settings snippet.
 - **Measure real leaks, not pattern scores:** [leak-check/README.md](leak-check/README.md). It found 7 real leaks the pattern hook had missed. Its inventory covers 53% of what gitleaks flags, measured and broken down.
 - **Make the GO mechanical (experimental):** [go-gate/README.md](go-gate/README.md). Start with `simulate.py` on your own history, then a week in observe mode.
-- **Make the approval unforgeable (v1.0 on a workstation; the server deployment is experimental):** [keeper/README.md](keeper/README.md), with the [design and threat model](docs/design-keeper.md). Its installer only does a dry run unless you pass `--apply`. Covering a root agent and a server with no human watching (standing plans): [docs/design-keeper-server.md](docs/design-keeper-server.md).
+- **Make the approval unforgeable (v1.0 on a workstation; on a server it is installed in observe mode only, experimental):** [keeper/README.md](keeper/README.md), with the [design and threat model](docs/design-keeper.md). Its installer only does a dry run unless you pass `--apply`. Covering a root agent and a server with no human watching (standing plans): [docs/design-keeper-server.md](docs/design-keeper-server.md).
 - **Give a non-root agent filtered Docker access, never the `docker` group (experimental):** [docker-proxy/README.md](docker-proxy/README.md), design in [docs/design-keeper-server.md](docs/design-keeper-server.md) section 1. Its installer only does a dry run unless you pass `--apply`. Known limit: `inspect` and `logs` output is masked, but `docker top` and `docker stats` output is not (process arguments can contain secrets).
 - **Tell the agent which shortcuts it will be tempted by (a checklist, not a control; its effect is not measured yet):** [docs/agent-discipline.md](docs/agent-discipline.md): the excuses an agent gives to skip a step and what is true instead, one issue / one branch / one pull request, the pull request template, and treating third-party skills and issue text as code and data.
 - **The whole method and the incidents behind it:** [docs/method.md](docs/method.md).

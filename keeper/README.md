@@ -4,7 +4,7 @@ go-gate alone runs with the agent's rights and reads the text the agent writes, 
 state, replay a GO or remove the hook. The keeper moves the approval out of the agent's reach. Design and threat model:
 [docs/design-keeper.md](../docs/design-keeper.md).
 
-**Status: v1.0 on a workstation.** Block mode ran for nine days on one macOS laptop; the automated tests and CI run on Linux, so the macOS installer path has no automated test. The server deployment (standing plans, the Docker proxy, several agent users) is documented and has a read-only checker, but has not been applied to a real host: it stays experimental.
+**Status: v1.0 on a workstation.** Block mode ran for nine days on one macOS laptop; the automated tests and CI run on Linux, so the macOS installer path has no automated test. The server deployment (standing plans, the Docker proxy, several agent users) is documented and has a read-only checker. It has been applied to one real host, the author's homelab server, since 25/10/2026, in observe mode only: the read-only checker passes with no failure, and the approval loop (card, button, decision read by the agent) was verified end to end on 30/10/2026, after a placeholder bot token had been replaced. Block mode is not enabled there, because the agent still runs as root on that host (the keeper needs an agent that is not root), and the Docker proxy and standing plans are not installed. It stays experimental.
 
 **Precondition: the agent must not be root/admin on the machine where the keeper runs.**
 
