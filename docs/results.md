@@ -72,7 +72,7 @@ How to read it:
 - A refusal is mostly the first call of a task that no approved plan covers yet: the agent is told, proposes a plan, and a card arrives. It is not a malfunction, and it is also friction that a person has to accept.
 - The most frequent shapes (`python3 …`, a GitHub API script, `Edit`, `cp`, `rm`) show where plans have to be broad, which is also where the classifier's limits matter most: `actions=script` is unbounded by design.
 - What real use found that the tests had not, all fixed in v1.0: a hook that outlives its timeout let the command run (measured on Claude Code 2.1.302: it ran after about 67 s; with `onFailure: block` it was blocked); `Write(...)` deny rules that Claude Code ignores; only one active plan per session; a reinstall that overwrote a hand-edited setting; a reinstall that dropped the second agent from `agent_uids`.
-- What it does not measure: no forged approval was attempted against it in real use, nothing was tested against a hostile agent, the block-mode period (nine days by 21/10) ran on macOS while CI is Linux, and the server deployment has not been applied to a real host.
+- What it does not measure: no forged approval was attempted against it in real use, nothing was tested against a hostile agent, the block-mode period (nine days by 21/10) ran on macOS while CI is Linux, and on the server, which has run in observe mode only since 25/10/2026, nothing was blocked and no block-mode period was measured.
 
 ## Limits
 
