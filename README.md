@@ -20,6 +20,7 @@ This repo collects the guardrails that grew around it. Each one exists because s
 - **I am a manager or a CIO** (five minutes, no code): [docs/for-it-leaders.md](docs/for-it-leaders.md) ([version française](docs/fr/pour-les-dirigeants-it.md)).
 - **I am an engineer:** the [FAQ](docs/faq.md) (why several LLMs, cost, use with other agents, the keeper, false positives, limits), then [keeper/README.md](keeper/README.md) to install the approval step (its installer only does a dry run unless you pass `--apply`).
 - **I want to see it first:** a real [council report](examples/council-report.md) and the hook's real [refusals](examples/secret-guard-refusals.md).
+- **I want a worked example of what an agent can safely do behind the approval step:** [risk-patch-loop](https://github.com/renocz/risk-patch-loop), a separate project that ranks container vulnerabilities by real exposure, proves a fix exists, and patches one service at a time. Its `--apply` step is the kind of action this project is meant to gate.
 
 ## The principle in one picture
 
