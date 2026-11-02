@@ -38,16 +38,10 @@ d'approbation, et le masquage ne l'arrête pas non plus. L'approbation est la co
    processus de l'agent : contrairement à l'étape d'approbation ci-dessus, qui est la couche forte, il attrape
    les maladresses d'un agent coopératif, pas les contournements d'un agent manipulé et déterminé.
 
-```mermaid
-flowchart LR
-    R["🤖 L'agent lit et analyse<br/>toujours autorisé"] --> P["📝 L'agent propose un plan<br/>quoi, sur quoi, pour combien de temps"]
-    P --> H["📱 Téléphone de l'humain<br/>carte du plan : approuver ou refuser"]
-    H -->|approuve| K["🔒 Keeper<br/>service séparé, utilisateur séparé"]
-    K --> S["🖥️ Serveur<br/>changement appliqué, plan qui expire seul"]
-    H -->|refuse, ou pas de réponse| X["⛔ Rien ne se passe"]
-    M["🔐 Secrets masqués"] -.-> R
-    M -.-> S
-```
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="../img/leaders-fr-dark.png">
+  <img alt="Schéma : l'agent lit librement et propose un plan ; une carte arrive sur votre téléphone ; si vous approuvez, le keeper, un service séparé sous un autre utilisateur, laisse le changement s'appliquer sur le serveur et le plan expire ; si vous refusez ou ne répondez pas, rien ne se passe ; les secrets sont masqués partout." src="../img/leaders-fr.png">
+</picture>
 
 **Pourquoi ça tient, même face à un agent manipulé.** Le composant qui détient les approbations — le projet
 l'appelle le **keeper** (le gardien) — est un service séparé, tournant sous un autre utilisateur, avec des

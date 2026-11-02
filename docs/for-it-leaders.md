@@ -35,16 +35,10 @@ it either. The approval step is the strong layer; the secret masking is a safety
    above, which is the strong layer — it catches a cooperative agent's accidents, not a determined, manipulated
    one working around it.
 
-```mermaid
-flowchart LR
-    R["🤖 Agent reads and analyses<br/>always allowed"] --> P["📝 Agent proposes a plan<br/>what, on what, for how long"]
-    P --> H["📱 Human's phone<br/>plan card: approve or reject"]
-    H -->|approve| K["🔒 Keeper<br/>separate service, separate user"]
-    K --> S["🖥️ Server<br/>change applied, plan expires on its own"]
-    H -->|reject, or no answer| X["⛔ Nothing happens"]
-    M["🔐 Secrets masked"] -.-> R
-    M -.-> S
-```
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="img/leaders-dark.png">
+  <img alt="Diagram: the agent reads freely and proposes a plan; a card goes to your phone; if you approve, the keeper, a separate service under another user, lets the change run on the server and the plan expires; if you reject or do not answer, nothing happens; secrets are masked throughout." src="img/leaders.png">
+</picture>
 
 **Why it holds even against a manipulated agent.** The component that holds the approvals — the project calls
 it the **keeper** — is a separate service, running as a different user, with files the agent's own account
