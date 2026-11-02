@@ -5,6 +5,11 @@ Status: draft 2, 20/10/2026 — the three open questions of draft 1 were decided
 The keeper so far assumes the laptop: a non-root agent, file permissions that protect it, a human on Telegram. On
 the server none of that holds. This note designs the gap, and states what is implemented in this PR.
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="img/keeper-server-dark.png">
+  <img alt="Diagram: three agents on the server, the interactive assistant and the unattended morning job under the user keeper-agent and the update timer under keeper-update, send their commands to a root-owned hook, which asks keeperd, a single daemon under another user, whether a plan is approved; keeperd sends a card to your phone, and root-defined standing plans cover the unattended job without a card." src="img/keeper-server.png">
+</picture>
+
 ## Why this is a separate design, not an extension of docs/design-keeper.md
 
 `docs/design-keeper.md`'s own threat model states the precondition in plain words: **the agent must not be

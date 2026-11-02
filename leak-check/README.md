@@ -47,6 +47,14 @@ The number to read is 53%, with that breakdown. Not 100%.
 
 ## How it works
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="../docs/img/leak-check-dark.png">
+  <img alt="Diagram: every day a laptop job packs transcripts, shell history and the go-gate log together with a random witness and sends them to the server; the server unpacks them in a root-only folder, runs a canary self-test, searches the real secret values in the decoded text, and alerts with names, never values; the witness must be found, otherwise the pipeline is reported broken." src="../docs/img/leak-check.png">
+</picture>
+
+<details>
+<summary>The same flow, as text</summary>
+
 ```
 laptop (daily job, contrib/run-laptop.sh)            server (root, daily timer, contrib/run-server.sh)
   fetch today's witness value  ◄──────────────────     witness: a random value, renewed daily
@@ -58,6 +66,8 @@ laptop (daily job, contrib/run-laptop.sh)            server (root, daily timer, 
                                                        delete the copy
   new leak / broken pipeline / no laptop pass for 26 h / missing sources → alert (secret NAME, never the value)
 ```
+
+</details>
 
 **Readers (where the secret values come from):**
 - `KEY=value`, `KEY: value` and `- KEY=value` lines (`.env`, `compose.yaml`).
