@@ -24,22 +24,12 @@ This repo collects the guardrails that grew around it. Each one exists because s
 
 ## The principle in one picture
 
-Each step answers one way an AI ops agent fails. None of them is enough alone. Blue = a human decides; green = a guardrail checks.
+Each step answers one way an AI ops agent fails. None of them is enough alone. Blue frame = a human decides; orange frame = a guardrail checks.
 
-```mermaid
-flowchart TB
-    H(["👤 <b>You ask</b>"]):::human --> A["🤖 <b>The agent investigates</b><br/>read-only, always allowed"]
-    A --> P["📝 <b>It writes a plan</b><br/>what · why · risk · dry-run · rollback"]
-    P --> C["🏛️ <b>Big decisions only:</b><br/>four AIs from four vendors<br/>review the plan (council).<br/>Routine changes skip this step."]:::guard
-    C --> G{"👤 <b>You say GO?</b><br/>one tap, for a limited time"}:::human
-    G -->|"no"| X["⛔ <b>Nothing happens</b>"]
-    G -->|"yes"| S["📸 <b>Snapshot first</b><br/>the host takes it,<br/>the agent cannot roll back"]:::guard
-    S --> E["⚙️ <b>The agent acts</b><br/>and proves it worked"]
-    E --> D["📚 <b>Change record written</b>"]
-    D ~~~ SG["🔐 <b>secret-guard, throughout:</b> a safety net on the<br/>commands the agent runs and the files it reads"]:::guard
-    classDef human stroke:#2f81f7,stroke-width:3px
-    classDef guard stroke:#3fb950,stroke-width:3px
-```
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/img/principle-dark.png">
+  <img alt="Diagram: you ask, the agent investigates read-only, writes a plan, a council of four AIs reviews big decisions only, you say GO or nothing happens, then a snapshot is taken, the agent acts and a change record is written; secret-guard watches throughout." src="docs/img/principle.png">
+</picture>
 
 ## The keeper, in plain words
 
@@ -51,15 +41,10 @@ The strongest piece is the [**keeper**](keeper/) (v1.0 on a workstation in block
 
 The agent cannot press that button itself: the button lives in a separate service, under another user, on a second Telegram bot only that service can read.
 
-```mermaid
-flowchart TB
-    A["🤖 <b>The agent wants to change something</b>"] --> K["🔒 <b>The keeper</b> (another user) checks:<br/>is there a plan you approved?"]:::guard
-    K -->|"no"| Y["📱 <b>A card arrives on your phone</b>"]:::human
-    Y -->|"you tap: approve"| K
-    K -->|"yes, and still valid"| R["✅ <b>It runs</b>, then the approval expires"]
-    classDef human stroke:#2f81f7,stroke-width:3px
-    classDef guard stroke:#3fb950,stroke-width:3px
-```
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/img/keeper-dark.png">
+  <img alt="Diagram: the agent's command goes to a root-owned hook, which asks the keeper, a separate service under another user, whether an approved plan exists; if not, the command is refused and a card with the plan goes to your phone; one tap approves, the command runs and the approval expires." src="docs/img/keeper.png">
+</picture>
 
 <details>
 <summary>The same thing, step by step (who talks to whom)</summary>
