@@ -8,6 +8,14 @@ The rule "always mask output that may contain configuration" was written down, a
 
 ## How it decides
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="../docs/img/secret-guard-dark.png">
+  <img alt="Diagram: every tool call of the agent goes through the secret-guard hook, which allows it unless it reads a secret file, runs a risky command whose output is not masked, or contains a literal secret; a refusal comes with the fix to apply." src="../docs/img/secret-guard.png">
+</picture>
+
+<details>
+<summary>The full decision tree</summary>
+
 ```mermaid
 flowchart TD
     T["Agent calls a tool"] --> K{"Which tool?"}
@@ -23,6 +31,8 @@ flowchart TD
     MK -->|"yes"| OK4["✅ allowed"]
     MK -->|"no"| X2["⛔ refused, with the fix to apply"]
 ```
+
+</details>
 
 On a refusal, the agent gets the reason and the fix (`2>&1 | mask`). In practice it re-runs the command correctly at once.
 
