@@ -26,6 +26,11 @@ anything you commit back to this repository.
 6. Verify with [`keeper/check-keeper-server.sh`](../keeper/check-keeper-server.sh), then move to the owner trial
    checklist in [docs/keeper-server-dry-run.md](keeper-server-dry-run.md).
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="img/keeper-server-dark.png">
+  <img alt="Diagram: three agents on the server, the interactive assistant and the unattended morning job under the user keeper-agent and the update timer under keeper-update, send their commands to a root-owned hook, which asks keeperd, a single daemon under another user, whether a plan is approved; keeperd sends a card to your phone, and root-defined standing plans cover the unattended job without a card." src="img/keeper-server.png">
+</picture>
+
 Every step says: the exact command, what you should see, and how to undo it. If a step's result doesn't match,
 stop and roll that step back before continuing — don't push forward hoping a later step fixes it.
 
