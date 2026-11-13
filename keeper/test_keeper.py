@@ -2471,6 +2471,62 @@ class StandingPlans(Base):
         r = k.check("s1", *bash(self.propose_cmd("id=p1 ; actions=edit") + " --wait 30"), actor="standing-morning")
         self.assertNotIn("wait", r)
 
+    def test_shared_plans_survive_a_new_session_id(self):
+        """shared_plans on: a plan approved in session s1 still applies in a relaunched session s2, same limits."""
+        k = keeperd.Keeper(dict(self.cfg, shared_plans=True), self.bot, clock=self.clock)
+        self.approve_on(k, "id=web ; targets=web ; actions=deploy")
+        self.assertEqual(k.check("s2", *bash("docker restart web"))["decision"], "allow")
+        self.assertEqual(k.check("s2", *bash("docker restart mail"))["decision"], "deny")   # still scoped
+        self.clock.t += 61 * 60
+        self.assertEqual(k.check("s3", *bash("docker restart web"))["decision"], "deny")    # expiry unchanged
+
+    def test_plans_stay_per_session_by_default(self):
+        """Default behaviour is untouched: another session does not see the plan."""
+        self.approve("id=web ; targets=web ; actions=deploy")
+        self.assertEqual(self.k.check("s2", *bash("docker restart web"))["decision"], "deny")
+
+    def _free_write_keeper(self):
+        base = tempfile.mkdtemp(prefix=".kt-fw", dir=os.path.dirname(os.path.abspath(__file__)))   # not /tmp: not scratch
+        self.addCleanup(shutil.rmtree, base, True)
+        docs = os.path.join(base, "docs")
+        os.makedirs(docs)
+        notes = os.path.join(base, "Notes.md")
+        open(notes, "w").close()
+        k = keeperd.Keeper(dict(self.cfg, free_write_paths=[docs, notes]), self.bot, clock=self.clock)
+        return k, base, docs, notes
+
+    def test_free_write_notes_and_docs_need_no_card(self):
+        k, base, docs, notes = self._free_write_keeper()
+        for p in (notes, os.path.join(docs, "a.md"), os.path.join(docs, "sub", "b.txt")):
+            self.assertEqual(k.check("s1", "Edit", {"file_path": p})["decision"], "allow", p)
+
+    def test_free_write_stays_narrow(self):
+        k, base, docs, notes = self._free_write_keeper()
+        script = os.path.join(docs, "run.sh")
+        open(script, "w").close()
+        other = os.path.join(base, "other.md")
+        os.symlink(os.path.join(os.path.expanduser("~"), ".claude", "settings.json"), os.path.join(docs, "evil.md"))
+        for p in (script, os.path.join(docs, "c.py"), other, os.path.join(docs, "evil.md"),
+                  os.path.expanduser("~/.claude/settings.json")):
+            self.assertEqual(k.check("s1", "Edit", {"file_path": p})["decision"], "deny", p)
+        # a shell write into the same folder still needs its plan
+        self.assertEqual(k.check("s1", *bash(f"echo x > {docs}/a.md"))["decision"], "deny")
+
+    def test_multi_object_refusal_names_the_missing_object(self):
+        """Step 2 (13/11): `docker stop mealie seerr` with only mealie listed used to say 'no path, filename or host
+        recognised'. It must name seerr and say each object has to be a target."""
+        self.approve("id=m ; targets=192.168.1.8, pct, mealie ; actions=deploy")
+        r = self.k.check("s1", *bash("ssh root@192.168.1.8 'pct exec 100 -- docker stop mealie seerr'"))
+        self.assertEqual(r["decision"], "deny")
+        self.assertIn("seerr", r["reason"])
+        self.assertIn("each one listed as a plan target", r["reason"])
+        self.assertNotIn("no path, filename or host recognised", r["reason"])
+
+    def test_free_write_is_off_by_default(self):
+        k, base, docs, notes = self._free_write_keeper()
+        k2 = keeperd.Keeper(self.cfg, self.bot, clock=self.clock)
+        self.assertEqual(k2.check("s1", "Edit", {"file_path": notes})["decision"], "deny")
+
     def allowed_on(self, k, tool, ti):
         return k.check("s1", tool, ti)["decision"] == "allow"
 

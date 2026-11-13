@@ -237,6 +237,38 @@ def is_scratch(path):
     return bool(re.search(SCRATCH, r)) or "/scratchpad/" in r or p.startswith("$TMPDIR")
 
 
+# Free-write notes and documentation (13/11/2026, council 1eef4d45adb0, step 3 of its order): files or folders the human
+# lists in the root-owned config (`free_write_paths`) can be written by the Edit/Write tools without a card. Empty by
+# default (nothing changes out of the box). Narrow on purpose: text formats only, judged on the REAL path (a symlink
+# cannot lead out of the listed place), never the gate's own state or the keeper's paths, never an executable file,
+# and only the Edit/Write tools -- a shell command that writes still needs its plan.
+FREE_WRITE_PATHS = []
+FREE_WRITE_EXT = (".md", ".txt")
+
+
+def is_free_write(path):
+    if not FREE_WRITE_PATHS:
+        return False
+    p = os.path.expanduser(path.strip("'\""))
+    if ".." in p:
+        p = os.path.normpath(p)
+    if is_protected(p) or is_keeper_protected(p):
+        return False
+    r = real(p)
+    if not r.lower().endswith(FREE_WRITE_EXT) or os.path.islink(p):
+        return False
+    try:
+        if os.path.exists(r) and (os.stat(r).st_mode & 0o111 or not os.path.isfile(r)):
+            return False
+    except OSError:
+        return False
+    for base in FREE_WRITE_PATHS:
+        b = real(base)
+        if r == b or r.startswith(b + os.sep):
+            return True
+    return False
+
+
 KNOWN_VARS = {}               # literal assignments of the command being classified (NAME=value), set by classify()
 # K6: repos where a git read verb is trusted (the agent cannot have planted a malicious repo-local config there).
 # Empty by default: out of the box every git read is opaque. The installer / config fills this in (--safe-git-repo).
@@ -1134,6 +1166,8 @@ def classify(tool, tool_input):
             return "change", "protected go-gate state, hooks or settings"
         if is_scratch(p) or MEMORY_DIR.match(os.path.expanduser(p)):
             return "read", "scratch or memory write"
+        if is_free_write(p):
+            return "read", "free-write notes or documentation"
         return "change", f"{tool} {p[-50:]}"
     if tool in READ_TOOLS:
         return "read", ""
@@ -1374,7 +1408,17 @@ def coverage_gap(plan, tool, tool_input, cat, text=None):
     for objs in multi_objects(text or ""):
         missing = [o for o in objs if not any(target_matches(t, [o]) for t in targets)]
         if missing:
-            return {"targets": candidate_targets(missing, targets)}
+            # 13/11/2026 (council 1eef4d45adb0, step 2): the objects themselves (container or service names) are what
+            # is missing, but they do not look like paths or hosts, so candidate_targets() returned nothing and the
+            # refusal read "no path, filename or host recognised" -- sending the human and the agent after the wrong
+            # thing. Name them (masked like any target word) and say why.
+            shown = []
+            for o in missing:
+                w = safe_words(o.strip("'\""), 80)
+                if w and w != "<…>" and w not in shown:
+                    shown.append(w)
+            return {"targets": shown[:8] or candidate_targets(missing, targets),
+                    "why": "a command with several objects needs each one listed as a plan target"}
     return None
 
 

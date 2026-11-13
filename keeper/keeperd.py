@@ -30,7 +30,8 @@ DEFAULTS = {"socket": "/var/run/keeper/keeper.sock", "state_dir": "/var/lib/keep
             "ttl_default_min": 60, "ttl_max_min": 240, "pending_max_age_min": 120, "max_proposals_per_hour": 3,
             "mode": "block", "agent_home": None, "client_group": None, "safe_git_repos": [], "lang": "en",
             "wait_max_sec": 50, "hook_timeout_sec": 60, "max_active_plans": 3,
-            "standing_plans": [], "unattended_actors": []}
+            "standing_plans": [], "unattended_actors": [], "shared_plans": False,
+            "free_write_paths": []}
 MAX_ACTIVE_PLANS_HARD_CAP = 5          # a config typo (or an attempt from a writable config) cannot go past this
 # Standing plans (design: docs/design-keeper-server.md §2): a closed, exact-literal allowlist for an agent nobody is
 # watching (a systemd timer, e.g.), defined ONLY in the root-owned config file -- never created, approved or widened
@@ -647,6 +648,9 @@ class Keeper:
         self.unattended_actors = frozenset(str(a) for a in (cfg.get("unattended_actors") or []))
         self.gate = load_gate(cfg.get("agent_home"))
         self.gate.SAFE_GIT_REPOS[:] = cfg.get("safe_git_repos") or []      # K6: trusted repos for git read verbs
+        # Free-write notes and documentation: only paths the root-owned config lists; Edit/Write tools only.
+        if hasattr(self.gate, "FREE_WRITE_PATHS"):
+            self.gate.FREE_WRITE_PATHS[:] = [str(x) for x in (cfg.get("free_write_paths") or [])]
         self.lock = threading.Lock()
         self._lock_holder = None                                           # a short label, set only while held (best effort)
         os.makedirs(cfg["state_dir"], mode=0o700, exist_ok=True)
@@ -680,6 +684,11 @@ class Keeper:
             os.umask(old)
 
     def session(self, sid):
+        # shared_plans (13/11/2026, off by default): every session of the agent uses ONE plan bucket, so a relaunched
+        # session (new id) still sees the plans the human already approved. Same targets, actions and expiry: no right
+        # is widened -- sessions were never a security boundary (same user), they only kept plans apart.
+        if self.cfg.get("shared_plans"):
+            sid = "shared"
         return self.state["sessions"].setdefault(str(sid or "no-session"), {})
 
     # ----- agent side ------------------------------------------------------------------------------------------
