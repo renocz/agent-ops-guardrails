@@ -102,12 +102,35 @@ def deny(why):
     sys.exit(0)
 
 
+def flatten_text(x, depth=0):
+    """Every string inside a tool response, one per line, with NO json escaping: json.dumps would turn the real
+    newlines and quotes of the Tab Context block into \\n and \\" and the parser would never match."""
+    if depth > 6:
+        return ""
+    if isinstance(x, str):
+        return x
+    if isinstance(x, dict):
+        return "\n".join(flatten_text(v, depth + 1) for v in x.values())
+    if isinstance(x, (list, tuple)):
+        return "\n".join(flatten_text(v, depth + 1) for v in x)
+    return ""
+
+
 def hook():
     try:
         data = json.load(sys.stdin)
     except ValueError:
         print("keeper: unreadable hook input; refusing to be safe.", file=sys.stderr)
         sys.exit(2)
+    if data.get("hook_event_name") == "PostToolUse":
+        # 18/11/2026: only Chrome tool results carry a Tab Context; keeperd keeps the tabId -> host map in memory.
+        if "claude-in-chrome__" in str(data.get("tool_name", "")):
+            try:
+                ask({"op": "observe", "session": data.get("session_id"), "tool": data.get("tool_name"),
+                     "response": flatten_text(data.get("tool_response"))[:20000]})
+            except (OSError, ValueError):
+                pass
+        sys.exit(0)
     if data.get("hook_event_name") != "PreToolUse":
         sys.exit(0)
     tool, ti = data.get("tool_name", ""), data.get("tool_input") or {}

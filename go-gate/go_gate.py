@@ -1362,6 +1362,44 @@ def touches_git_exec_surface(blob):
     return False
 
 
+# 18/11/2026 (council, card 197): a Chrome change (click, typing, form_input...) is matched on the host of the tab as
+# the extension itself reported it (Tab Context, recorded by the PostToolUse hook), never on the agent's own text
+# (action_summary). Unknown or ambiguous tab -> not covered. browser_batch stays refused: its sub-actions are opaque.
+TAB_ORIGINS = {}                      # tabId (str) -> normalized host; filled by keeperd before each check
+CHROME_CHANGE = re.compile(r"claude-in-chrome__(computer|form_input|javascript_tool|file_upload|upload_image)$")
+CHROME_BATCH = re.compile(r"claude-in-chrome__browser_batch$")
+
+
+def norm_host(h):
+    h = (h or "").strip().lower().rstrip(".")
+    return re.sub(r":\d+$", "", h)
+
+
+def parse_tab_context(text):
+    """{tabId: host} from a Tab Context block. A tabId that appears on more than one line (a page title containing a
+    newline can fake one) is dropped, so a hostile title can never set another tab's origin."""
+    seen, out = {}, {}
+    for m in re.finditer(r'(?m)^\s*(?:\u2022\s*)?tabId (\d+): .*\("(https?://[^"\s]+)"\)\s*$', text or ""):
+        seen[m.group(1)] = seen.get(m.group(1), 0) + 1
+        out[m.group(1)] = norm_host(urllib.parse.urlsplit(m.group(2)).hostname or "")
+    return {k: v for k, v in out.items() if seen[k] == 1 and v}
+
+
+def chrome_gap(tool, tool_input, targets):
+    """None when the tab's verified host is a plan target, else a gap dict."""
+    if CHROME_BATCH.search(tool):
+        return {"targets": [], "why": "browser_batch is never covered; send the actions one by one"}
+    tab = str((tool_input or {}).get("tabId", ""))
+    host = TAB_ORIGINS.get(tab)
+    if not host:
+        return {"targets": [], "why": "the tab's real address is not known yet; navigate or take a screenshot first"}
+    if not targets or any(norm_host(t) == host or host.endswith("." + norm_host(t)) for t in targets
+                          if not DIR_PREFIX.match(t)):
+        return None
+    return {"targets": [host], "why": "the tab is on a host the plan does not list"}
+
+
+
 def coverage_gap(plan, tool, tool_input, cat, text=None):
     """Why `plan` does not cover this action, as a dict, or None once it does. `covers()` below is this function's
     yes/no face, kept as one piece of logic so the allow/deny decision and the deny message can never disagree.
@@ -1379,6 +1417,8 @@ def coverage_gap(plan, tool, tool_input, cat, text=None):
         if touches_git_exec_surface(blob0 or ""):
             return {"category": "script", "why": "writes a repo's git-exec surface"}
     targets = plan.get("targets") or []
+    if tool.startswith("mcp__") and (CHROME_CHANGE.search(tool) or CHROME_BATCH.search(tool)):
+        return chrome_gap(tool, tool_input, targets)
     if not targets:
         return None
     blob = text if text is not None else json.dumps(tool_input, ensure_ascii=False)

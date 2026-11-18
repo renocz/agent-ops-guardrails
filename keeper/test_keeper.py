@@ -2531,5 +2531,9 @@ class StandingPlans(Base):
         return k.check("s1", tool, ti)["decision"] == "allow"
 
 
+# The CI runs this file only; the Chrome tab-origin tests live in their own file and are collected from here.
+from test_chrome_origin import ChromeOrigin, ClientFlatten  # noqa: E402,F401
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=1)
