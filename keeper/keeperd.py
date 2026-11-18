@@ -805,8 +805,18 @@ class Keeper:
             # anything else (negative, decimal, non-numeric) is not recognized, same fallback as any other option
         return name, opts
 
+    def observe(self, sid, tool, response):
+        """PostToolUse of a Chrome tool: remember which host each tab really is on (in memory only, per session)."""
+        if not hasattr(self, "tab_origins"):
+            self.tab_origins = {}
+        found = self.gate.parse_tab_context(response)
+        self.tab_origins.setdefault(str(sid), {}).update(found)
+        self.log({"event": "observe", "session": sid, "tool": tool, "tabs": len(found)})
+
     def check(self, sid, tool, tool_input, cwd=None, actor=None):
         self.gate.CWD = cwd                                            # the dir the agent ran the tool in (K6)
+        self.gate.TAB_ORIGINS.clear()
+        self.gate.TAB_ORIGINS.update(getattr(self, "tab_origins", {}).get(str(sid), {}))
         kc = self.keeper_command(tool_input.get("command", "")) if tool == "Bash" else None
         if kc and kc[0] == "keeper-status":
             return {"decision": "deny", "reason": "keeper status (nothing was run): " + json.dumps(self.status(sid))}
@@ -1412,6 +1422,10 @@ def serve(keeper, cfg, ready=None):
                 with keeper.lock_scope("status"):
                     state = keeper.plan_status(h)
                 return self.reply({"state": state})
+            if req.get("op") == "observe":
+                with keeper.lock_scope("observe"):
+                    keeper.observe(req.get("session"), str(req.get("tool", "")), str(req.get("response", ""))[:20000])
+                return self.reply({"ok": True})
             if req.get("op") != "check" or not isinstance(req.get("input") or {}, dict):
                 return self.reply({"error": "unknown op"})
             # Lock audit (13/10, chasing the reported lag): check() runs the go-gate classifier, which is slower

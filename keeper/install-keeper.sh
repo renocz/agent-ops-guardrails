@@ -349,6 +349,11 @@ for h in mine:
 if not mine:
     pre.insert(0, {"matcher": "*", "hooks": [{"type": "command", "command": cmd, "timeout": int(hook_timeout),
                                                "onFailure": "block"}]})
+# 18/11/2026: the keeper learns which host each Chrome tab is really on from the extension's own tool results, through
+# a PostToolUse hook limited to the Chrome tools (keeper_client.py ignores any other event and any other tool).
+post = cur["hooks"].setdefault("PostToolUse", [])
+if not any(h.get("command") == cmd for e in post for h in e.get("hooks", [])):
+    post.append({"matcher": "mcp__claude-in-chrome__.*", "hooks": [{"type": "command", "command": cmd, "timeout": 10}]})
 d = cur.setdefault("permissions", {}).setdefault("deny", [])
 d[:] = [x for x in d if x not in legacy]       # drop the useless Write(...) duplicates an earlier install wrote
 d += [x for x in deny if x not in d]
