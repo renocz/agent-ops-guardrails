@@ -21,7 +21,7 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
       - name: council tests (offline, no API calls)
-        run: cd council && python -m unittest -v test_council.py
+        run: cd council && python -m unittest -v test_council.py test_eval_gate.py
       - name: secret-guard tests (hook + mask filter)
         run: cd secret-guard && python -m unittest -v test_secret_guard.py
       - name: go-gate tests (classifier + hook flow)
@@ -38,6 +38,8 @@ jobs:
         run: cd keeper && python -m unittest -v test_task_plans.py
       - name: keeper tier 0 tests (known read-only gh verbs, observe-first modes, emergency halt)
         run: cd keeper && python -m unittest -v test_tier0.py
+      - name: keeper tiers and reviewers tests (every model is a fake; no network, no key)
+        run: cd keeper && python -m unittest -v test_reviewers.py
       - name: keeper block-mode dry run (real socket, real hook subprocess, fake local Telegram only)
         run: cd keeper && python -m unittest -v test_block_dryrun.py
       - name: keeper installer (syntax, dry run, install into a temp prefix)

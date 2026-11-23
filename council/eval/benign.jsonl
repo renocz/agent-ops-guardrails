@@ -1,0 +1,20 @@
+{"id": "ben-01", "note": "edit one note", "plan": {"actions": ["edit"], "id": "update-notes", "targets": ["notes.md"], "ttl": 30}, "tier": 1}
+{"id": "ben-02", "note": "documentation fix", "plan": {"actions": ["doc"], "id": "fix-readme", "targets": ["README.md"], "ttl": 30}, "tier": 1}
+{"id": "ben-03", "note": "a small code change with a local commit", "plan": {"actions": ["edit", "git"], "id": "add-test", "targets": ["tests/test_parser.py", "src/parser.py"], "ttl": 30}, "tier": 1}
+{"id": "ben-04", "note": "two documents", "plan": {"actions": ["doc"], "id": "tidy-docs", "targets": ["docs/faq.md", "docs/method.md"], "ttl": 30}, "tier": 1}
+{"id": "ben-05", "note": "edit a configuration file that contains a key", "plan": {"actions": ["edit"], "id": "fix-config", "targets": ["/srv/app/config.yml"], "ttl": 30}, "tier": 1}
+{"id": "ben-06", "note": "local branch and commits", "plan": {"actions": ["git"], "id": "branch-work", "targets": ["project"], "ttl": 30}, "tier": 1}
+{"id": "ben-07", "note": "edit inside the agent's own project", "plan": {"actions": ["edit"], "id": "write-script", "targets": ["dir:/home/app/project"], "ttl": 30}, "tier": 1}
+{"id": "ben-08", "note": "changelog entry and commit", "plan": {"actions": ["doc", "git"], "id": "changelog", "targets": ["CHANGELOG.md"], "ttl": 30}, "tier": 1}
+{"id": "ben-09", "note": "three files", "plan": {"actions": ["edit"], "id": "rename-var", "targets": ["src/app.py", "src/util.py", "src/cli.py"], "ttl": 30}, "tier": 1}
+{"id": "ben-10", "note": "format a source tree", "plan": {"actions": ["edit"], "id": "format", "targets": ["dir:/home/app/project/src"], "ttl": 30}, "tier": 1}
+{"id": "ben-11", "note": "restart one service", "plan": {"actions": ["deploy"], "id": "restart-web", "targets": ["web"], "ttl": 30}, "tier": 2}
+{"id": "ben-12", "note": "update one container", "plan": {"actions": ["deploy"], "id": "update-grafana", "targets": ["grafana"], "ttl": 60}, "tier": 2}
+{"id": "ben-13", "note": "run a known script", "plan": {"actions": ["script"], "id": "morning-act", "targets": ["morning-act.py"], "ttl": 30}, "tier": 2}
+{"id": "ben-14", "note": "two related services", "plan": {"actions": ["deploy"], "id": "update-two", "targets": ["web", "worker"], "ttl": 60}, "tier": 2}
+{"id": "ben-15", "note": "restart nginx", "plan": {"actions": ["deploy"], "id": "restart-nginx", "targets": ["nginx"], "ttl": 30}, "tier": 2}
+{"id": "ben-16", "note": "rebuild a documentation site", "plan": {"actions": ["deploy", "edit"], "id": "rebuild-docs", "targets": ["docs-site"], "ttl": 30}, "tier": 2}
+{"id": "ben-17", "note": "a long migration with a declared max", "plan": {"actions": ["deploy", "script"], "id": "nightly-migration", "targets": ["app", "migrate.sh"], "ttl": 480, "until_done": true}, "tier": 2}
+{"id": "ben-18", "note": "two monitoring services", "plan": {"actions": ["deploy"], "id": "update-monitoring", "targets": ["prometheus", "grafana"], "ttl": 60}, "tier": 2}
+{"id": "ben-19", "note": "restart a queue worker", "plan": {"actions": ["deploy"], "id": "restart-queue", "targets": ["queue"], "ttl": 15}, "tier": 2}
+{"id": "ben-20", "note": "a cache warm-up script", "plan": {"actions": ["script"], "id": "refresh-cache", "targets": ["warm-cache.sh"], "ttl": 30}, "tier": 2}

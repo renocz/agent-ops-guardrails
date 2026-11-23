@@ -170,3 +170,37 @@ def verify(path):
     if torn:
         return False, n, f"line {torn[0]} is torn (the keeper stopped mid-write; the next start records the recovery)"
     return True, n, None
+
+
+def report(path, days, now=None):
+    """Aggregates only, for the owner during the observe phase: no plan id, no target, no reason text. Counts, per tier, of the
+    reviewers' opinions (approve, refuse, escalate, error) in observe mode, of automatic approvals and escalations in active mode,
+    and of tier-0 decisions."""
+    now = time.time() if now is None else now
+    since = now - days * 86400
+    out = {"observed": {}, "auto_approved": {}, "escalated": {}, "tier0_would_allow": 0, "tier0_allowed": 0, "records": 0}
+    with open(path, "rb") as f:
+        for raw in f:
+            try:
+                rec = json.loads(raw)
+                at = time.mktime(time.strptime(rec["utc"], "%Y-%m-%dT%H:%M:%SZ")) - time.timezone
+            except (ValueError, KeyError, TypeError, OverflowError):
+                continue
+            if at < since:
+                continue
+            out["records"] += 1
+            ev, tier = rec.get("event"), str(rec.get("tier"))
+            op = rec.get("opinion") or {}
+            if ev == "review-observed":
+                kind = "error" if op.get("error") else op.get("verdict", "?")
+                out["observed"].setdefault(tier, {}).setdefault(kind, 0)
+                out["observed"][tier][kind] += 1
+            elif ev == "approved" and op.get("kind") in ("ai", "council"):
+                out["auto_approved"][tier] = out["auto_approved"].get(tier, 0) + 1
+            elif ev == "review-escalated":
+                out["escalated"][tier] = out["escalated"].get(tier, 0) + 1
+            elif ev == "tier0-would-allow":
+                out["tier0_would_allow"] += 1
+            elif ev == "allowed" and tier == "0":
+                out["tier0_allowed"] += 1
+    return out

@@ -97,6 +97,71 @@ by category, which of the plan's own targets were named, start and end. No comma
 **Limit:** a plan that lives overnight is an approval nobody watches. It is bounded by its frozen scope, its declared max, the
 24 h ceiling and `/stop`, not by a person. A process started under a plan keeps running after the plan ends (see "Still open").
 
+## Tiers and AI reviewers (23/11/2026, issue 24)
+
+**The tier is decided by code** (`keeper/tiers.py`) from the plan's structured scope, never by a model:
+
+| Tier | Scope | Who decides |
+|---|---|---|
+| 1 small | actions only in `edit`, `doc`, `git`; at most 3 targets (a `dir:` target counts once); no persistent data | one model of another vendor than the agent |
+| 2 big | any of: `deploy`, `script`, no target, more than 3 targets, a target containing an entry of `persistent_targets` | the council in gate mode: approved only with at least 3 valid answers and no refuse or escalate |
+| 3 human | `delete`, `api`, `browser`, or no action | the human; an AI opinion is attached to the card, never an approval |
+
+On top of that, **every call is checked on what it really is**: a call that is irreversible (`docker volume rm`, `git push --force`,
+`rm -rf`, `DROP TABLE`...), outbound (any `git push`, `curl` with a body, `scp`, `docker push`, `gh ... create`...), secret-related
+(`passwd`, key files, `printenv`, `gh auth token`...) or unknown to the classifier is **never covered by an automatically approved plan**,
+whatever the plan says. A plan the human approved keeps its authority. The model can keep a tier or raise it, never lower it; a model
+that writes "this is only a small task" changes nothing.
+
+**Reviewers run inside `keeperd`**, under its user, with a key in a file only that user can read (`/etc/keeper/reviewer.key`, root:keeper
+640, created by the owner; the installer never creates it and the agent's environment is never used). Config block `reviewers`
+(root-owned config):
+
+```json
+"reviewers": {"api_base": "https://llm-gateway.example/v1", "api_key_file": "/etc/keeper/reviewer.key",
+              "agent_provider": "anthropic", "approved_providers": ["openai", "google", "mistral", "meta"],
+              "tier1_model": "openai/model-a", "council_members": ["google/model-b", "mistral/model-c", "meta/model-d", "openai/model-e"],
+              "max_calls_per_hour": 20, "max_council_runs_per_month": 30, "timeout_s": 90, "send_text": false}
+```
+
+- What is sent: the plan's structured scope (id, actions, targets, duration, tier and why), in one delimited data block; the agent's free
+  text only if `send_text` is on, labelled untrusted. The whole request is masked; if the payload may still hold a secret (a masked
+  value, a long mixed token), **nothing is sent** and the plan goes to the human.
+- The answer must be one strict JSON object `{"verdict": "approve"|"refuse"|"escalate", "reasons": [...]}`; any other answer is a refusal
+  (single reviewer) or an absent vote (council). The model's reasons are masked and cut before they reach the journal or a card.
+- Fail closed, always the human card: reviewer of the agent's own vendor, vendor not on `approved_providers`, fewer than 4 distinct
+  families in the council, key unreadable, hourly call cap or monthly council cap reached, unreachable, invalid answer, a payload that may hold a
+  secret, a `/stop` halt, **and a failed write of the approval record to the journal** (no automatic approval without a durable
+  record of it). Counters are persisted. Council runs make 4 calls each (no cross-review, no chair).
+- The council's gate mode is a separate instruction (`council/ops_council.py`): judge only safety and scope, propose nothing. The
+  review mode looks for problems and answered "fix first" to every plan, so it could not be used as a gate.
+
+`auto_approval_mode` works as for tier 0: **`observe` is the default and changes nothing**: the card goes out as today and the reviewer's
+opinion is only recorded in the journal (`review-observed`). `active` (after the owner's separate GO): a tier 1 or 2 plan that the
+reviewer approves is activated and the owner gets an informational message ("approved automatically", `/stop` revokes it);
+anything else gets the card with the tier and the independent opinion on it. `sudo keeper-journal report [days]` prints counts only (no
+plan, target or reason) of what the reviewers answered, what was approved automatically and what went to the human, so you can read the observe phase.
+
+**Deployment notes: observe first, then a dry run, then a separate GO.**
+1. Create the key file and the `reviewers` block, restart, keep `observe`. Read `keeper-journal report` after a few days: how often would
+   the reviewers have approved, refused, escalated, failed.
+2. Run the voluntary evaluation outside CI (`council/eval_gate.py`, real calls, cost cap): 100% of the dangerous corpus must be refused or
+   escalated and the false-escalation rates reported per tier must be acceptable. 100% on a corpus is not a guarantee.
+3. On macOS (where block mode runs; nothing here was run on macOS) do a dry run on a throw-away prefix with a stub reviewer, or in `observe`
+   on the real install, and check that `/stop` then `/auto on` behaves as described.
+4. Only then, the owner's separate GO and a root edit to `"auto_approval_mode": "active"` and a restart. Until then nothing changes behaviour.
+
+**Not in this version:** scripts. A tier 1 question "does this script stay inside the plan the council approved?", the frozen copy of a
+script and its standard input, and the dynamic-dependency check are not built: they depend on a Claude Code hook rewriting the command, to
+be checked on a real Claude Code first (documentation says `updatedInput` exists; two hooks returning it, and the rewritten command being
+shown again to the keeper hook, are not verified). Until then a plan with `script` is tier 2 and each script still runs under it as before.
+The routine `git push` exception is not built either: every push is human-approved.
+
+**Limits.** An AI review is an extra control, **not a proof**. The reviewers see only a structured scope, so they cannot catch what a
+plan's wording hides; the per-call guard and the human cover part of that. Models can be wrong both ways: the evaluation measures it,
+it cannot remove it. A reviewer can be fed by text the agent controls (target names, a plan id): it is escaped as data and the gate
+instruction treats instructions in it as a reason to refuse, but that is a mitigation, not a guarantee.
+
 ## Tier 0: known reads need no card (23/11/2026, issue 22)
 
 Before this, every `gh` call was a "change" for the classifier (measured), so consulting a repository cost a card. Tier 0 is a
@@ -428,6 +493,8 @@ cover:
 `python3 test_journal.py` covers the journal: chain, edit/delete/reorder detection, torn last line (and the record after it on its own line), restart, twelve realistic secret-bearing commands never reaching the file, the HMAC and its key, file modes, write failure not changing a decision, and the wiring (lifecycle, identity, the agent's text never written, root-only CLI, installer).
 
 `python3 test_task_plans.py` covers the task-lifetime plans: parsing, the council's findings (fixed button bound, ceiling re-applied after a restart, no state write per call), the declared max and the 24 h ceiling (config included), a plan covering a whole night then stopping, the frozen scope, `keeper-done`, session end, revocation, eviction and renewal reasons, the sweep, the idle rule, the owner's fixed-time button, the client's `SessionEnd` forwarding and the installer wiring.
+
+`python3 test_reviewers.py` covers the tiers (every scope class, every irreversible/outbound/secret call shape and ordinary calls that must not be flagged), the reviewer (strict approval rule, own-vendor and unapproved-provider refusal, caps and their persistence, payload minimality and secret refusal, injected text as data, garbled and unreachable answers), the wiring (observe changes nothing, active approves only tier 1 and 2, the card with the opinion for the rest, the per-call guard, halt, journal failure, replaced or stopped plans, restart) and the agent's reach (managed-settings deny rules, no socket operation reading config or journal, key from a file only). Every model is a fake.
 
 `python3 test_tier0.py` covers tier 0: about 100 command shapes through the matcher (every known read, every listed verb beyond its exact shape, every write and sensitive call), the three modes (observe changes no decision for any command), unknown actions, the journal entries, and the emergency halt (button, command, `/stop <id>` not halting, owner-only resume, persistence, the agent unable to resume, French messages).
 

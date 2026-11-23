@@ -179,7 +179,7 @@ fi
 mkd "$BASE" 755 "root:$ROOTGRP"
 mkd "$LIB" 755 "root:$ROOTGRP"
 mkd "$BIN" 755 "root:$ROOTGRP"
-for f in "$HERE/keeperd.py" "$HERE/journal.py" "$HERE/tier0.py" "$HERE/keeper_client.py" "$REPO/go-gate/go_gate.py" "$REPO/secret-guard/secret_guard.py"; do
+for f in "$HERE/keeperd.py" "$HERE/journal.py" "$HERE/tier0.py" "$HERE/tiers.py" "$HERE/reviewer.py" "$REPO/council/ops_council.py" "$HERE/keeper_client.py" "$REPO/go-gate/go_gate.py" "$REPO/secret-guard/secret_guard.py"; do
   put "$LIB/$(basename "$f")" 644 "root:$ROOTGRP" "$f"
 done
 printf '#!/bin/sh\nexec /usr/bin/env -i %s -I %s/keeper_client.py propose "$@"\n' "$PY" "$LIB" > "$TMP/keeper-propose"
