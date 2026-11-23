@@ -282,6 +282,45 @@ class OwnerChoice(TaskPlans):
         self.assertEqual(self.active(), [])
 
 
+class CouncilFindings(TaskPlans):
+    """Defects found by the council's review of this PR (23/11/2026)."""
+
+    def test_the_fixed_button_is_never_longer_than_the_declared_max(self):
+        self.plan("id=short; targets=web; actions=deploy; ttl=done,max=30min")
+        p = self.k.state["sessions"]["s1"]["pending"]
+        self.assertTrue(self.k.decide(OWNER, CHAT, f"approvefixed:{p['hash'][:12]}:{p['nonce']}").startswith("approved for 30 min"))
+        self.assertEqual(self.active()[0]["plan"]["ttl"], 30)
+
+    def test_a_restart_with_a_lower_ceiling_cuts_the_stored_expiry(self):
+        self.approve(DONE)
+        self.assertEqual(self.active()[0]["expires"], self.active()[0]["approved_at"] + 1440 * 60)
+        k2 = keeperd.Keeper(dict(self.cfg, until_done_ceiling_min=600), self.bot, clock=self.clock)   # same state dir
+        self.assertEqual(k2.session("s1")["active"][0]["expires"], self.active()[0]["approved_at"] + 600 * 60)
+        self.advance(11 * H)
+        self.assertEqual(k2.check("s1", *bash("docker restart web"))["decision"], "deny")
+
+    def test_a_restart_never_extends_and_never_touches_fixed_plans(self):
+        self.approve(DONE)
+        self.approve("id=fixed; targets=api; actions=edit; ttl=60")
+        before = {a["plan"]["id"]: a["expires"] for a in self.active()}
+        k2 = keeperd.Keeper(dict(self.cfg), self.bot, clock=self.clock)
+        self.assertEqual({a["plan"]["id"]: a["expires"] for a in k2.session("s1")["active"]}, before)
+
+    def test_covered_calls_do_not_rewrite_the_state_file_each_time(self):
+        self.approve(DONE)
+        saves = []
+        real = self.k.save
+        self.k.save = lambda: (saves.append(1), real())[1]
+        for _ in range(5):
+            self.assertTrue(self.covers("docker restart web"))
+        self.assertEqual(saves, [])                                   # no write per allowed call
+        self.k.sweep()
+        self.assertEqual(len(saves), 1)                               # the counters go out with the sweep
+        self.assertEqual(json.load(open(self.k.state_path))["sessions"]["s1"]["active"][0]["usage"]["calls"], 5)
+        self.k.sweep()
+        self.assertEqual(len(saves), 1)                               # and only when something changed
+
+
 class ClientSide(TaskPlans):
     def test_the_hook_forwards_a_session_end_and_never_fails_the_session(self):
         sent = []

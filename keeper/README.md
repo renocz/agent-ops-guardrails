@@ -84,7 +84,11 @@ The scope stays frozen: targets and actions never change while the plan lives, a
 id changes nothing until you approve it. A fixed `ttl=N` behaves as before (60 min by default, 240 at most). On the card
 of a `ttl=done` plan a second button, **Approve, fixed 60 min**, grants the same scope for the default fixed time instead.
 `/stop` and `/stop <id>` revoke as before. A running daemon ends expired plans every 30 s, so the end is recorded when it
-happens.
+happens. The fixed-time button never grants more than the agent declared (`max=30min` gives 30, not 60). After a restart the
+stored expiry of a `ttl=done` plan is cut to approval time + the current ceiling, so lowering the ceiling in the config
+takes effect on plans already running (a clock set backwards is not detected: wall-clock time, like every other expiry here).
+Plan usage counters are written to the state file by the sweep and at each plan end, not on every covered call: a crash loses at
+most 30 s of counters, never a decision.
 
 What each plan really covered goes to the journal when it ends (`plan-ended`): the reason (`done`, `session-end`,
 `declared-max`, `ceiling`, `idle`, `ttl-expired`, `revoked`, `stopped`, `evicted`, `renewed`), the number of calls, the calls
@@ -390,7 +394,7 @@ cover:
 
 `python3 test_journal.py` covers the journal: chain, edit/delete/reorder detection, torn last line (and the record after it on its own line), restart, twelve realistic secret-bearing commands never reaching the file, the HMAC and its key, file modes, write failure not changing a decision, and the wiring (lifecycle, identity, the agent's text never written, root-only CLI, installer).
 
-`python3 test_task_plans.py` covers the task-lifetime plans: parsing, the declared max and the 24 h ceiling (config included), a plan covering a whole night then stopping, the frozen scope, `keeper-done`, session end, revocation, eviction and renewal reasons, the sweep, the idle rule, the owner's fixed-time button, the client's `SessionEnd` forwarding and the installer wiring.
+`python3 test_task_plans.py` covers the task-lifetime plans: parsing, the council's findings (fixed button bound, ceiling re-applied after a restart, no state write per call), the declared max and the 24 h ceiling (config included), a plan covering a whole night then stopping, the frozen scope, `keeper-done`, session end, revocation, eviction and renewal reasons, the sweep, the idle rule, the owner's fixed-time button, the client's `SessionEnd` forwarding and the installer wiring.
 
 `python3 test_block_dryrun.py` adds the same `--wait` scenarios end to end, through the real hook subprocess: the
 Bash tool call stays blocked on the open socket while the card is still pending, and returns once the owner's

@@ -701,9 +701,19 @@ class Keeper:
             self.state = migrate_state(json.load(open(self.state_path)))
         except (OSError, ValueError):
             self.state = {"sessions": {}, "used_nonces": [], "proposals": []}
+        self._reclamp_until_done()
         self.state.setdefault("plan_status", {})               # hash12 -> {state, at}; see _record_plan_status
         self.state.setdefault("standing_disabled", [])          # ids stopped at runtime; see _revoke_all
         self.state.setdefault("standing_usage", {})             # id -> {count, last_used}; see _touch_standing
+
+    def _reclamp_until_done(self):
+        """A restart (or a lowered ceiling in the config) must not leave a `ttl=done` plan alive past the ceiling the daemon
+        enforces now: the stored absolute expiry is cut to approval time + the current ceiling. A clock set backwards is not
+        detected (wall-clock time, same limit as every other expiry here)."""
+        for s in self.state["sessions"].values():
+            for a in s.get("active") or []:
+                if a.get("until_done"):
+                    a["expires"] = min(a["expires"], a.get("approved_at", 0) + self.until_done_ceiling * 60)
 
     def save(self):
         tmp = self.state_path + ".tmp"
@@ -906,6 +916,9 @@ class Keeper:
         makes no call, so the end is recorded when it happens and not at the next call."""
         for sid, s in list(self.state["sessions"].items()):
             self._purge(sid, s)
+        if getattr(self, "_usage_dirty", False):           # at most 30 s of usage counters are lost in a crash
+            self._usage_dirty = False
+            self.save()
 
     def done(self, sid, plan_id):
         """`keeper-done [--id X]`: the agent says its task is finished. It can only END plans (never widen): with an id,
@@ -1078,7 +1091,7 @@ class Keeper:
             self.jr("allowed", plans=[match["plan"].get("id")], result="allowed",
                     action={"kind": "call", "tool": tool, "category": cat, "shape": command_shape(tool, st, cat),
                             "cmd": st})
-        self.save()                                        # the plans' usage counters
+        self._usage_dirty = True                           # counters are written by the sweep and at each plan end, not per call
         self.log({"event": "allowed", "session": sid, "tool": tool, "plans": used})
         return {"decision": "allow", "reason": ""}
 
@@ -1357,7 +1370,8 @@ class Keeper:
                 if action == "approvefixed" and p["plan"].get("until_done"):
                     # the owner chose a fixed time instead of "until done": same scope, the default fixed duration
                     plan = {k: v for k, v in p["plan"].items() if k != "until_done"}
-                    plan["ttl"] = max(1, min(int(self.cfg["ttl_default_min"]), int(self.cfg["ttl_max_min"])))
+                    # never longer than the agent itself declared (a `max=30min` plan must not become 60 minutes)
+                    plan["ttl"] = max(1, min(int(self.cfg["ttl_default_min"]), int(self.cfg["ttl_max_min"]), int(p["plan"]["ttl"])))
                     p = dict(p, plan=plan)
                 if self.now() - p["proposed_at"] > self.cfg["pending_max_age_min"] * 60:
                     self._record_plan_status(h, "expired")
