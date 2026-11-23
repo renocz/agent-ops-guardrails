@@ -10,17 +10,18 @@ detected by `verify()`. Known limits (also in the README): the chain does not de
 does not stop whoever is the keeper user or root. `chattr +a` (Linux) or `chflags sappnd` (macOS), set by root, hardens
 the file against the keeper user; it is not applied by the code and not tested in CI.
 
-Never contains a secret: the literal command is masked by the caller's masker, and a literal that still looks like a
-secret afterwards is dropped and only its sha256 is kept.
+Never contains a command's text. A masker cannot be exhaustive (measured 23/11/2026: 8 of 12 realistic commands kept their
+secret through the keeper's own masker: `mysql -p...`, `curl -u user:pw`, `DB_PASS=...`, `sshpass -p`, `htpasswd -b`,
+`openssl -k`, `--from-literal=pw=...`, `docker run -e`), so the journal keeps the shape (first word, subcommand, category),
+the length, and an HMAC-SHA256 of the command under a key that only lives in the keeper's directory (a plain hash of a
+short secret can be brute-forced; the HMAC cannot without the key). The HMAC still shows that two decisions concerned the
+same command.
 
 Standard library only. Python 3.9+.
 """
-import hashlib, json, os, re, socket, threading, time
+import hashlib, hmac, json, os, socket, threading, time
 
 GENESIS = "0" * 64
-CMD_MAX = 300
-# A long token mixing letters and digits that survived masking: not worth the risk, keep the hash only.
-_LEFTOVER = re.compile(r"(?<![A-Za-z0-9+/_=-])(?=[A-Za-z0-9+/_=-]*[A-Za-z])(?=[A-Za-z0-9+/_=-]*\d)[A-Za-z0-9+/_=-]{24,}")
 TAIL_READ = 256 * 1024
 
 
@@ -28,19 +29,11 @@ def _sha(data):
     return hashlib.sha256(data if isinstance(data, bytes) else data.encode("utf-8")).hexdigest()
 
 
-def literal_for_journal(cmd, mask):
-    """(masked literal or None, redacted flag). The literal is kept only if nothing secret-shaped remains in it."""
-    if cmd is None:
-        return None, False
-    masked = mask(str(cmd))[:CMD_MAX]
-    if masked != mask(masked) or _LEFTOVER.search(masked):
-        return None, True
-    return masked, False
-
-
 class Journal:
-    def __init__(self, path, mask, host=None, clock=time.time):
-        self.path, self.mask, self.clock = path, mask, clock
+    def __init__(self, path, host=None, clock=time.time):
+        self.path, self.clock = path, clock
+        self.key = None
+        self.need_newline = False
         self.host = host or socket.gethostname()
         self.lock = threading.Lock()
         self.ok = False                       # True only once the file is writable and the chain head is known
@@ -56,10 +49,32 @@ class Journal:
                 self.fd = os.open(self.path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
             finally:
                 os.umask(old)
+            self._load_key()
             self._read_head()
             self.ok = True
         except OSError:
             self.fd, self.ok = None, False
+
+    def _load_key(self):
+        """The HMAC key of the command fingerprints: 32 random bytes, 600, created once, never logged. Without a usable key
+        the fingerprint is simply left out (never replaced by a plain hash)."""
+        kp = os.path.join(os.path.dirname(self.path), "journal.key")
+        try:
+            fd = os.open(kp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            try:
+                os.write(fd, os.urandom(32))
+            finally:
+                os.close(fd)
+        except FileExistsError:
+            pass
+        with open(kp, "rb") as f:
+            key = f.read()
+        self.key = key if len(key) >= 32 else None
+
+    def fingerprint(self, cmd):
+        if cmd is None or self.key is None:
+            return None
+        return hmac.new(self.key, str(cmd).encode("utf-8", "replace"), hashlib.sha256).hexdigest()
 
     def _read_head(self):
         size = os.path.getsize(self.path)
@@ -68,6 +83,7 @@ class Journal:
         with open(self.path, "rb") as f:
             f.seek(max(0, size - TAIL_READ))
             data = f.read()
+        self.need_newline = not data.endswith(b"\n")          # a crash mid-write: the next record must start on its own line
         lines = [x for x in data.split(b"\n") if x.strip()]
         if not lines:
             return
@@ -101,12 +117,9 @@ class Journal:
                 now = self.clock()
                 act = dict(action or {})
                 cmd = act.pop("cmd", None)
-                lit, redacted = literal_for_journal(cmd, self.mask)
-                if cmd is not None:
-                    act["cmd_sha256"] = _sha(str(cmd))
-                    act["cmd"] = lit
-                    if redacted:
-                        act["cmd_redacted"] = True
+                if cmd is not None:                       # the text itself is never written, only its HMAC and length
+                    act["cmd_hmac"] = self.fingerprint(cmd)
+                    act["cmd_len"] = len(str(cmd))
                 rec = {"seq": self.seq + 1, "prev": self.prev, "event": event,
                        "at": time.strftime("%Y-%m-%dT%H:%M:%S%z", time.localtime(now)),
                        "utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now)), "host": self.host,
@@ -115,12 +128,12 @@ class Journal:
                 if self.recovered_from:
                     rec["recovered_torn_line"] = self.recovered_from
                 line = json.dumps(rec, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
-                os.write(self.fd, (line + "\n").encode("ascii"))
+                os.write(self.fd, (("\n" if self.need_newline else "") + line + "\n").encode("ascii"))
                 os.fsync(self.fd)
             except (OSError, ValueError, TypeError):
                 self.ok = False
                 return False
-            self.seq, self.prev, self.recovered_from, self.ok = rec["seq"], _sha(line), None, True
+            self.seq, self.prev, self.recovered_from, self.ok, self.need_newline = rec["seq"], _sha(line), None, True, False
             return True
 
 

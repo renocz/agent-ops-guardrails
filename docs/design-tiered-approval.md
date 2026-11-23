@@ -141,13 +141,14 @@ opaque scripts the decision is the model's** (plus the static rules above), not 
 ## 6. The journal (PR 1, before any reviewer)
 
 `journal.jsonl`, separate from `log.jsonl`, in the keeper's state dir (700). Fields: sequence, local time and UTC, host,
-identity (session, actor tag, socket peer uid), action (category, shape, sha256 of the command, masked literal limited
-to 300 chars, kept only here), covering plan, tier, opinion (`none`/`ai`/`council`, verdict, reasons, models, tokens),
+identity (session, actor tag, socket peer uid), action (category, shape, length and an HMAC-SHA256 of the command under a key kept in the keeper's
+directory; **never the command text**: measured on 12 realistic commands, the keeper's own masker let 8 secrets through), covering plan, tier, opinion (`none`/`ai`/`council`, verdict, reasons, models, tokens),
 result. Appended with `O_APPEND`; each line carries the sha256 of the previous line, so a cut or edit is detectable
-(`keeper-journal verify`, root only). Never contains a secret: masked, and an entry that still matches a secret pattern is
-stored as its hash only. Optional hardening at install: `chattr +a` (Linux) or `chflags sappnd` (macOS), root only. The
+(`keeper-journal verify`, root only). What a reviewer saw (the masked, minimal payload) is the evidence for an AI opinion and is stored with the opinion in PR 4,
+not with every call. Optional hardening at install: `chattr +a` (Linux) or `chflags sappnd` (macOS), root only. The
 agent can neither read nor write it, nor the config nor the keys (same directories as today, tested). **A reviewer refuses to start if the journal is
-not initialised**; a failed write to the journal means the automatic approval is refused.
+not initialised**; an automatic approval is returned only after the append of **that very record** returned success (fsync'd); `journal.ok`
+alone is not enough, and a failed append means the human card.
 
 ## 7. Activation
 

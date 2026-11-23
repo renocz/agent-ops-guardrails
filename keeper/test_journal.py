@@ -19,7 +19,7 @@ class JournalFile(unittest.TestCase):
     def setUp(self):
         self.dir = tempfile.mkdtemp(prefix="kj", dir="/tmp")
         self.path = os.path.join(self.dir, "state", "journal.jsonl")
-        self.j = journal.Journal(self.path, keeperd.mask_text, host="testhost")
+        self.j = journal.Journal(self.path, host="testhost")
 
     def tearDown(self):
         shutil.rmtree(self.dir, ignore_errors=True)
@@ -68,7 +68,7 @@ class JournalFile(unittest.TestCase):
     def test_restart_continues_the_same_chain(self):
         self.j.append("allowed", result="a")
         self.j.append("allowed", result="b")
-        j2 = journal.Journal(self.path, keeperd.mask_text, host="testhost")
+        j2 = journal.Journal(self.path, host="testhost")
         self.assertTrue(j2.append("allowed", result="c"))
         self.assertEqual(journal.verify(self.path), (True, 3, None))
 
@@ -79,12 +79,13 @@ class JournalFile(unittest.TestCase):
         ok, _n, why = journal.verify(self.path)
         self.assertFalse(ok)                                         # as it stands, it is reported
         self.assertIn("torn", why)
-        with open(self.path, "a") as f:
-            f.write("\n")
-        j2 = journal.Journal(self.path, keeperd.mask_text, host="testhost")
+        j2 = journal.Journal(self.path, host="testhost")                # no newline was written by the crash
         self.assertTrue(j2.append("keeper-start", result="restart"))
-        self.assertEqual(journal.verify(self.path), (True, 2, None))
-        self.assertIn("recovered_torn_line", json.loads(open(self.path).read().splitlines()[-1]))
+        self.assertTrue(j2.append("allowed", result="after"))
+        self.assertEqual(journal.verify(self.path), (True, 3, None))
+        rows = open(self.path).read().splitlines()
+        self.assertIn("recovered_torn_line", json.loads(rows[-2]))      # the new record is on its own line, not glued to the torn one
+        self.assertNotIn("recovered_torn_line", json.loads(rows[-1]))
 
     def test_a_torn_line_that_is_not_acknowledged_fails(self):
         self.j.append("allowed", result="a")
@@ -100,44 +101,56 @@ class JournalFile(unittest.TestCase):
         import fcntl
         self.assertTrue(fcntl.fcntl(self.j.fd, fcntl.F_GETFL) & os.O_APPEND)
 
-    def test_a_secret_in_the_command_is_not_stored(self):
-        self.j.append("allowed", action={"kind": "call", "cmd": f"curl -H 'Authorization: Bearer {FAKE_TOKEN}' https://x.example/a"})
-        self.assertNotIn(FAKE_TOKEN, open(self.path).read())
-        self.assertNotIn(FAKE_TOKEN[4:], open(self.path).read())
+    REALISTIC = [
+        "mysql -u root -phunter2x -e 'select 1'", "curl -u admin:s3cretPw https://x.example/api",
+        "psql postgres://app:Pa55w0rd@db/app -c 'select 1'", "docker run -e DB_PASS=abc123 img",
+        "export TOKEN=abc123def", "sshpass -p 'open sesame' ssh host uptime", "htpasswd -b /etc/htpasswd bob hunter2",
+        "echo secret123 | docker login -u u --password-stdin", "curl -H 'X-Api-Key: k3y' https://x.example",
+        "openssl enc -k mypass -in a", "kubectl create secret generic s --from-literal=pw=letmein",
+        f"curl -H 'Authorization: Bearer {FAKE_TOKEN}' https://x.example/a"]
+    SECRETS = ["hunter2x", "s3cretPw", "Pa55w0rd", "abc123", "abc123def", "open sesame", "hunter2", "secret123", "k3y",
+               "mypass", "letmein", FAKE_TOKEN, FAKE_TOKEN[4:]]
 
-    def test_the_masker_alone_removes_a_short_password_option(self):
-        # too short for the leftover guard, so only the masker can catch it
-        self.j.append("allowed", action={"kind": "call", "cmd": "mysql --password=hunter2x -e 'select 1'"})
-        self.assertNotIn("hunter2x", open(self.path).read())
+    def test_no_command_text_ever_reaches_the_file(self):
+        # the keeper's masker alone misses 8 of these (measured), so the journal does not keep the text at all
+        for c in self.REALISTIC:
+            self.j.append("allowed", action={"kind": "call", "shape": "x", "cmd": c})
+        raw = open(self.path).read()
+        for secret in self.SECRETS:
+            self.assertNotIn(secret, raw, secret)
+        for rec in self.lines():
+            self.assertNotIn("cmd", rec["action"])
+            self.assertEqual(len(rec["action"]["cmd_hmac"]), 64)
+        self.assertEqual(self.lines()[0]["action"]["cmd_len"], len(self.REALISTIC[0]))
 
-    def test_the_file_is_private_even_with_a_permissive_umask(self):
-        old = os.umask(0)
-        try:
-            j = journal.Journal(os.path.join(self.dir, "open", "journal.jsonl"), keeperd.mask_text)
-        finally:
-            os.umask(old)
-        j.append("allowed", result="a")
-        self.assertEqual(stat.S_IMODE(os.stat(j.path).st_mode), 0o600)
+    def test_the_fingerprint_is_an_hmac_not_a_plain_hash(self):
+        import hashlib
+        self.j.append("allowed", action={"cmd": "mysql -phunter2x"})
+        h = self.lines()[-1]["action"]["cmd_hmac"]
+        self.assertNotEqual(h, hashlib.sha256(b"mysql -phunter2x").hexdigest())     # no offline dictionary attack on it
+        self.assertEqual(self.j.fingerprint("mysql -phunter2x"), h)                 # stable: shows "same command twice"
+        other = journal.Journal(os.path.join(self.dir, "other", "journal.jsonl"), host="h")
+        self.assertNotEqual(other.fingerprint("mysql -phunter2x"), h)               # key-dependent
 
-    def test_a_literal_that_still_looks_secret_is_kept_as_a_hash_only(self):
-        odd = "run Zk3dQ9vL2mX8pR4tY7wB1nC6hJ0sA5uE"
-        j = journal.Journal(os.path.join(self.dir, "weak", "journal.jsonl"), lambda t: t)   # a masker that misses it
-        j.append("allowed", action={"kind": "call", "cmd": odd})
-        self.path = j.path
-        rec = self.lines()[-1]
-        self.assertIsNone(rec["action"]["cmd"])
-        self.assertTrue(rec["action"]["cmd_redacted"])
-        self.assertEqual(len(rec["action"]["cmd_sha256"]), 64)
-        self.assertNotIn("Zk3dQ9vL2mX8pR4tY7wB1nC6hJ0sA5uE", open(self.path).read())
+    def test_the_key_is_private_never_in_the_journal_and_survives_restart(self):
+        self.j.append("allowed", action={"cmd": "ls"})
+        kp = os.path.join(os.path.dirname(self.path), "journal.key")
+        self.assertEqual(stat.S_IMODE(os.stat(kp).st_mode), 0o600)
+        key = open(kp, "rb").read()
+        self.assertGreaterEqual(len(key), 32)
+        self.assertNotIn(key.hex(), open(self.path).read())
+        self.assertEqual(journal.Journal(self.path, host="h").fingerprint("ls"), self.j.fingerprint("ls"))
 
-    def test_the_literal_is_cut_at_300_characters(self):
-        self.j.append("allowed", action={"cmd": "echo " + "a " * 400})
-        self.assertLessEqual(len(self.lines()[-1]["action"]["cmd"]), 300)
+    def test_without_a_usable_key_there_is_no_fingerprint_rather_than_a_plain_hash(self):
+        open(os.path.join(os.path.dirname(self.path), "journal.key"), "wb").write(b"short")
+        j = journal.Journal(self.path, host="h")
+        j.append("allowed", action={"cmd": "ls"})
+        self.assertIsNone(self.lines()[-1]["action"]["cmd_hmac"])
 
     def test_a_failed_write_never_raises_and_flips_ok(self):
         blocker = os.path.join(self.dir, "afile")
         open(blocker, "w").write("x")
-        j = journal.Journal(os.path.join(blocker, "sub", "journal.jsonl"), keeperd.mask_text)
+        j = journal.Journal(os.path.join(blocker, "sub", "journal.jsonl"))
         self.assertFalse(j.ok)
         self.assertFalse(j.append("allowed", result="a"))            # no exception
         os.close(self.j.fd)                                          # a write on a closed descriptor
@@ -173,7 +186,9 @@ class KeeperWiring(Base):
         self.assertEqual(allowed["identity"], {"session": "s1", "actor": "tester", "peer_uid": 4242})
         self.assertEqual(allowed["plans"], ["web"])
         self.assertEqual(allowed["action"]["category"], "deploy")
-        self.assertEqual(allowed["action"]["cmd"], "docker restart web")
+        self.assertNotIn("cmd", allowed["action"])                 # the command text is never journaled
+        self.assertEqual(allowed["action"]["cmd_len"], len("docker restart web"))
+        self.assertEqual(len(allowed["action"]["cmd_hmac"]), 64)
         self.assertEqual(allowed["result"], "allowed")
         self.assertEqual(allowed["tier"], "none")
         self.assertEqual(denied["result"], "denied")
@@ -205,6 +220,13 @@ class KeeperWiring(Base):
         self.assertEqual(self.k.check("s1", *bash("docker restart web"))["decision"], "allow")
         self.assertEqual(self.k.check("s1", *bash("docker restart db"))["decision"], "deny")
         self.assertFalse(self.k.journal.ok)
+
+    def test_a_journal_failure_is_reported_once_in_the_event_log(self):
+        self.approve("id=web; targets=web; actions=deploy; ttl=30")
+        os.close(self.k.journal.fd)
+        for _ in range(3):
+            self.k.check("s1", *bash("docker restart web"))
+        self.assertEqual(self.log_events().count("journal-write-failed"), 1)
 
     def test_reads_are_not_journaled_in_this_version(self):
         n = len(self.entries())

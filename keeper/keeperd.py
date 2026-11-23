@@ -667,7 +667,8 @@ class Keeper:
         self.log_path = os.path.join(cfg["state_dir"], "log.jsonl")
         self.journal_mod = load_journal_module()
         self.journal_path = os.path.join(cfg["state_dir"], "journal.jsonl")
-        self.journal = self.journal_mod.Journal(self.journal_path, mask_text, clock=self.now)
+        self.journal = self.journal_mod.Journal(self.journal_path, clock=self.now)
+        self._journal_failing = False
         self.journal.append("keeper-start", identity={"actor": "keeperd"},
                             result=f"mode={cfg['mode']}; max_active_plans={self.max_active_plans}")
         try:
@@ -702,7 +703,11 @@ class Keeper:
         `journal.ok`. The identity is the one of the call being checked unless the caller gives its own (a decision
         by the owner on Telegram has no session or socket peer)."""
         ident = identity if identity is not None else dict(getattr(self, "_ident", None) or {})
-        return self.journal.append(event, identity=ident, action=action, plans=plans, result=result)
+        ok = self.journal.append(event, identity=ident, action=action, plans=plans, result=result)
+        if not ok and not self._journal_failing:                    # say so once per failure streak, in the other log
+            self.log({"event": "journal-write-failed"})
+        self._journal_failing = not ok
+        return ok
 
     def session(self, sid):
         # shared_plans (13/11/2026, off by default): every session of the agent uses ONE plan bucket, so a relaunched
