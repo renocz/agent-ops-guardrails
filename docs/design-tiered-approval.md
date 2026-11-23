@@ -167,6 +167,14 @@ the last PR). Until then behaviour is unchanged.
   with `updatedInput`, any real provider.
 - macOS: block mode runs there; **no automated test runs on macOS**. Each PR states what stays unverified there.
 
+## 8b. Status of the build (23/11/2026)
+
+Built: journal (PR 20), per-task plans (PR 21), tier 0 (PR 23), tiers 1 to 3 by code, the per-call guard, the single reviewer, the
+council gate, observe mode, the caps, the evaluation script (PR 4). **Not built**: scripts (the frozen copy, the per-script question, the
+dynamic-dependency check, the programs list): they wait for the spike on a real Claude Code; the routine `git push` exception (every push is
+human-approved); SSH study. Deviation from section 4, on purpose: the reviewers receive the structured scope only (the agent's text is opt-in),
+because without scripts there is nothing else to judge and free text is the injection channel.
+
 ## 9. Delivery
 
 Issues and PRs, stacked, in this order: 1 journal (+ CI for the 3 skipped test files), 2 per-task plans (issue 18),

@@ -65,5 +65,14 @@ python3 ops_council.py --title "auth service update" < proposal.md
 
 It writes a Markdown report to `reports_dir` and prints a JSON line (`verdict`, `votes`, `synthesis`, ...) for the agent to act on. A run makes 9 model calls and costs roughly $0.10–0.25 with frontier models for a short plan. Sending whole documents (tens of KB) costs noticeably more, and on 22/10/2026 a series of such runs exhausted the budget of a small key: set a budget with some room, and keep proposals short.
 
+### Gate mode (used by the keeper's tiered approval)
+
+The review above looks for problems; used as a gate it would send almost every big task to the human (it answered "fix first" to every
+plan it ever reviewed, good ones included). **Gate mode** is a separate instruction: judge only safety and scope, answer one strict JSON
+object (`approve`, `refuse` or `escalate` with short reasons), propose no improvement, treat the data block as untrusted. 4 calls (no
+cross-review, no chair). Approved only with at least 3 valid answers and no refuse or escalate; an unreachable or garbled member is absent.
+`council/eval_gate.py` measures it outside CI (real calls, cost cap, adversarial and benign corpora in `council/eval/`, false escalations per tier).
+See [keeper/README.md](../keeper/README.md#tiers-and-ai-reviewers-23112026-issue-24).
+
 Tests run offline: `python3 -m unittest -v test_council.py`.
 

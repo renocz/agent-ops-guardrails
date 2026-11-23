@@ -32,7 +32,7 @@ DEFAULTS = {"socket": "/var/run/keeper/keeper.sock", "state_dir": "/var/lib/keep
             "wait_max_sec": 50, "hook_timeout_sec": 60, "max_active_plans": 3,
             "standing_plans": [], "unattended_actors": [], "shared_plans": False,
             "free_write_paths": [], "until_done_ceiling_min": 1440, "until_done_idle_min": 0,
-            "auto_approval_mode": "observe"}
+            "auto_approval_mode": "observe", "reviewers": {}, "persistent_targets": []}
 UNTIL_DONE_HARD_CAP_MIN = 1440          # a `ttl=done` plan never outlives 24 h, whatever the config file says
 MAX_ACTIVE_PLANS_HARD_CAP = 5          # a config typo (or an attempt from a writable config) cannot go past this
 # Standing plans (design: docs/design-keeper-server.md §2): a closed, exact-literal allowlist for an agent nobody is
@@ -122,6 +122,9 @@ MESSAGES = {
         "card_context": "Requested after a refusal: the active plan does not cover {gap}.",
         "card_stop_note": "Stop ends the plan; it does not stop a process already started.",
         "card_explain": "The agent's explanation:",
+        "card_tier": "Tier: {tier} ({why})",
+        "card_opinion": "Independent opinion ({kind}): {verdict}: {why}",
+        "ans_auto_approved": "Plan {id} approved automatically (tier {tier}, {kind}) for {ttl} min. /stop revokes it.",
         "btn_approve": "✅ Approve",
         "btn_reject": "❌ Reject",
         "btn_stop": "⏹ Stop everything",
@@ -213,6 +216,9 @@ MESSAGES = {
         "card_context": "Demandé après un refus : le plan actif ne couvre pas {gap}.",
         "card_stop_note": "Arrêter met fin au plan ; cela n'interrompt pas un processus déjà lancé.",
         "card_explain": "Explication de l'agent :",
+        "card_tier": "Niveau : {tier} ({why})",
+        "card_opinion": "Avis indépendant ({kind}) : {verdict} : {why}",
+        "ans_auto_approved": "Plan {id} approuvé automatiquement (niveau {tier}, {kind}) pour {ttl} min. /stop le révoque.",
         "btn_approve": "✅ Approuver",
         "btn_reject": "❌ Refuser",
         "btn_stop": "⏹ Tout arrêter",
@@ -349,6 +355,12 @@ def render_plan_card(lang, p):
                       t(lang, "card_duration_done" if plan.get("until_done") else "card_duration", ttl=plan["ttl"]),
                       t(lang, "card_fingerprint", fp=h)]) + "\n"
     head += warn
+    if p.get("show_tier"):
+        head += t(lang, "card_tier", tier=p.get("tier", "?"), why="; ".join(p.get("tier_reasons") or [])[:200]) + "\n"
+    op = p.get("opinion")
+    if op:
+        head += t(lang, "card_opinion", kind=op.get("kind") or "-", verdict=op.get("verdict") or "-",
+                  why=" | ".join(str(r) for r in (op.get("reasons") or []))[:400] or "-") + "\n"
     if p.get("context"):                                 # this proposal follows a refusal (item 2): say what of it
         head += t(lang, "card_context", gap=p["context"]) + "\n"
     head += t(lang, "card_stop_note") + "\n———\n" + t(lang, "card_explain") + "\n"
@@ -362,6 +374,22 @@ def render_plan_card(lang, p):
 
 
 FIXED_ALTERNATIVE_MIN = [60]       # what the card's "fixed time" button grants; set from ttl_default_min at Keeper start
+
+
+def _load_by_path(name, candidates):
+    """Load a sibling module by path (the daemon runs under `python3 -I`, which does not add its own directory to sys.path)."""
+    for path in candidates:
+        if os.path.exists(path):
+            spec = importlib.util.spec_from_file_location(name, path)
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            return mod
+    raise FileNotFoundError(name)
+
+
+def load_council_module():
+    return _load_by_path("keeper_council", [os.path.join(HERE, "ops_council.py"),
+                                            os.path.join(HERE, "..", "council", "ops_council.py")])
 
 
 def load_tier0_module():
@@ -724,6 +752,7 @@ class Keeper:
         # edit of the config after the owner's separate GO). Anything else counts as `off`. Only the root-owned config sets it.
         mode = cfg.get("auto_approval_mode")
         self.auto_mode = mode if mode in AUTO_MODES else "off"
+        self.tiers = _load_by_path("keeper_tiers", [os.path.join(HERE, "tiers.py")])
         self.journal_mod = load_journal_module()
         self.journal_path = os.path.join(cfg["state_dir"], "journal.jsonl")
         self.journal = self.journal_mod.Journal(self.journal_path, clock=self.now)
@@ -735,6 +764,9 @@ class Keeper:
         except (OSError, ValueError):
             self.state = {"sessions": {}, "used_nonces": [], "proposals": []}
         self._reclamp_until_done()
+        self.state.setdefault("reviewer_usage", {})              # reviewer call times and council runs per month (the caps)
+        self.reviewer = _load_by_path("keeper_reviewer", [os.path.join(HERE, "reviewer.py")]).Reviewer(
+            cfg, load_council_module(), mask_text, self.state["reviewer_usage"], self.save, clock=self.now)
         self.state.setdefault("auto_halt", False)               # set by /stop (everything); cleared only by the owner's /auto on
         self.state.setdefault("plan_status", {})               # hash12 -> {state, at}; see _record_plan_status
         self.state.setdefault("standing_disabled", [])          # ids stopped at runtime; see _revoke_all
@@ -768,12 +800,13 @@ class Keeper:
         finally:
             os.umask(old)
 
-    def jr(self, event, plans=None, action=None, result=None, identity=None, tier="none"):
+    def jr(self, event, plans=None, action=None, result=None, identity=None, tier="none", opinion=None):
         """One journal record (keeper/journal.py). Never raises, never changes a decision: a failed write only flips
         `journal.ok`. The identity is the one of the call being checked unless the caller gives its own (a decision
         by the owner on Telegram has no session or socket peer)."""
         ident = identity if identity is not None else dict(getattr(self, "_ident", None) or {})
-        ok = self.journal.append(event, identity=ident, action=action, plans=plans, result=result, tier=tier)
+        ok = self.journal.append(event, identity=ident, action=action, plans=plans, result=result, tier=tier,
+                                 opinion=opinion)
         if not ok and not self._journal_failing:                    # say so once per failure streak, in the other log
             self.log({"event": "journal-write-failed"})
         self._journal_failing = not ok
@@ -810,8 +843,11 @@ class Keeper:
         # Requirement 6 (multi-plans): the card must say, BEFORE approval, what approving this plan will do to the plans
         # already active in this session. Purely advisory -- decide() recomputes the real outcome at approval time.
         preview = self._preview_outcome(self.session(sid).get("active") or [], plan)
+        tier, tier_why = self.tiers.plan_tier(plan, self.cfg)
         pending = {"plan": plan, "text": (text or "")[:3000], "hash": phash, "nonce": nonce, "proposed_at": now,
-                   "preview": preview}
+                   "preview": preview, "tier": tier, "tier_reasons": tier_why}
+        if self.auto_mode == "active":
+            pending["show_tier"] = True                  # the card shows the tier and the opinion only once automatic approval is on
         s = self.session(sid)
         last = s.pop("last_gap", None)        # this proposal may follow a refusal; say what of it, once
         # ...but only if the refusal is recent: a refusal from an hour ago has nothing to do with this plan, and
@@ -823,7 +859,7 @@ class Keeper:
         self.state["proposals"] = recent + [now]
         self.save()
         self.log({"event": "proposed", "session": sid, "plan": plan.get("id"), "hash": phash[:12]})
-        self.jr("proposed", plans=[plan.get("id")], result="pending",
+        self.jr("proposed", plans=[plan.get("id")], result="pending", tier=str(tier),
                 action={"kind": "plan", "hash": phash[:12], "actions": list(plan.get("actions") or []),
                         "targets": [mask_text(t)[:80] for t in (plan.get("targets") or [])][:20], "ttl": ttl,
                         "until_done": bool(plan.get("until_done"))})
@@ -836,6 +872,15 @@ class Keeper:
             self.log({"event": "standing-propose-suppressed", "session": sid, "actor": str(actor),
                        "plan": plan.get("id"), "hash": phash[:12]})
             out["unattended"] = True
+        elif self.reviewer.configured() and self.auto_mode in ("observe", "active"):
+            if self.auto_mode == "active" and not self.state.get("auto_halt"):
+                # The card waits for the opinion: an approved tier 1 or 2 plan never needs one; anything else gets the card
+                # with the opinion attached. `run_review` sends it, from a thread, outside the lock.
+                out["_review"] = (sid, phash, True)
+                out["reviewing"] = True
+            else:
+                out["_notify"] = (sid, pending)           # observe: the card goes out as today, the opinion is only recorded
+                out["_review"] = (sid, phash, False)
         else:
             out["_notify"] = (sid, pending)                   # sent by the caller, outside the lock
         return out
@@ -888,10 +933,13 @@ class Keeper:
     def _local(self, ts):
         return time.strftime("%Y-%m-%dT%H:%M:%S%z", time.localtime(ts))
 
-    def _new_entry(self, p):
+    def _new_entry(self, p, auto=False):
         ttl, ud = p["plan"]["ttl"], bool(p["plan"].get("until_done"))
         e = {"plan": p["plan"], "hash": p["hash"], "approved_at": self.now(), "expires": self.now() + ttl * 60,
              "usage": {"calls": 0, "categories": {}, "targets": [], "last": None}}
+        if auto:
+            e["auto"] = True                              # approved by a reviewer: never covers an irreversible/outbound/secret call
+            e["auto_tier"] = p.get("tier")
         if ud:
             e["until_done"] = True
             e["limit_kind"] = "ceiling" if ttl >= self.until_done_ceiling else "declared-max"
@@ -1051,7 +1099,12 @@ class Keeper:
             else:
                 why = (f"keeper: plan sent to the human for approval (fingerprint {out['hash']}). Nothing was run. Wait for "
                        "their decision, then retry the actions." if out["ok"] else f"keeper: proposal refused: {out['reason']}")
+                if out.get("reviewing"):
+                    why = (f"keeper: plan submitted for automatic review (fingerprint {out['hash']}). Nothing was run. If it is "
+                           "not approved automatically it goes to the human. Wait for the decision, then retry the actions.")
             res = {"decision": "deny", "reason": why}
+            if out.get("_review"):
+                res["_review"] = out["_review"]
             if out.get("_notify"):
                 res["_notify"] = out["_notify"]
             if out["ok"] and "wait" in opts and not out.get("unattended"):
@@ -1106,7 +1159,13 @@ class Keeper:
                 self.jr("tier0-would-allow", result=("halted by /stop: " if halted else "observe mode: ") + known,
                         action=act, tier="0")
             match, gaps = None, []
+            call_t, call_why = self.tiers.call_tier(tool, st, cat, d)      # what this very call is, whatever the plan says
             for a_ in active:                       # one plan must cover the item ENTIRELY; the gaps explain why none did
+                if a_.get("auto") and call_t == 3:
+                    # An automatically approved plan never covers a call that is irreversible, outbound, secret-related or
+                    # unknown to the classifier: the final tier is the maximum of the declared scope and the real command.
+                    gaps.append((a_, {"category": cat, "why": f"needs the human, not an automatic approval: {call_why}"}))
+                    continue
                 g_ = self.gate.coverage_gap(a_["plan"], tool, tool_input, cat, st)
                 if g_ is None:
                     match = a_
@@ -1381,7 +1440,7 @@ class Keeper:
                 action={"kind": "plan"})
         return had
 
-    def _activate(self, s, p, sid=None):
+    def _activate(self, s, p, sid=None, auto=False):
         """Add p's plan to session `s`'s active list (requirements 3 and 4). A plan whose id matches one already
         active renews it in place (same slot, fresh hash/expiry) rather than adding a second entry. Otherwise it
         is appended; past the cap, the OLDEST active plan (by approval time, ties broken towards the one approved
@@ -1395,9 +1454,9 @@ class Keeper:
             for i, a in enumerate(active):
                 if a["plan"].get("id") == new_id:
                     self._end_plan(sid, a, "renewed")
-                    active[i] = self._new_entry(p)
+                    active[i] = self._new_entry(p, auto)
                     return None
-        active.append(self._new_entry(p))
+        active.append(self._new_entry(p, auto))
         if len(active) > self.max_active_plans:
             oldest = min(range(len(active) - 1), key=lambda i: (active[i]["approved_at"], i))
             gone = active.pop(oldest)
@@ -1468,6 +1527,80 @@ class Keeper:
                 return self.msg("ans_approved_done" if p["plan"].get("until_done") else "ans_approved", ttl=p["plan"]["ttl"])
         self.log({"event": "decision-unknown-plan-ignored"})
         return self.msg("ans_unknown")
+
+
+    # ----- reviewers (docs/design-tiered-approval.md, section 4) ------------------------------------------------
+    def start_review(self, sid, phash, active):
+        threading.Thread(target=self.run_review, args=(sid, phash, active), daemon=True).start()
+
+    def _opinion(self, res):
+        return {"kind": res.get("kind"), "verdict": res.get("verdict"), "reasons": res.get("reasons"),
+                "models": res.get("models"), "tokens": res.get("tokens"), "sent": res.get("sent"), "error": res.get("error")}
+
+    def run_review(self, sid, phash, active):
+        """Ask the reviewer about the pending plan `phash`, from a thread (the network call never holds the lock).
+        observe (`active` False): only record the opinion; the card already went out and nothing else changes.
+        active: an approved tier 1 or 2 plan is activated, after the journal confirmed the record; anything else (refuse,
+        escalate, error, a tier 3 plan, a halt, a failed journal write) gets the card, with the opinion attached."""
+        with self.lock_scope("review-prep"):
+            p = (self.state["sessions"].get(str(sid or "no-session")) or {}).get("pending")
+            if not p or p["hash"] != phash:                       # replaced or dropped before the question was even asked
+                self.jr("review-dropped", plans=[], result="the plan was no longer pending, nothing was sent",
+                        identity={"actor": "keeperd", "session": sid})
+                return
+            plan, tier, why, text = p["plan"], p["tier"], p["tier_reasons"], p.get("text")
+        res = self.reviewer.review(tier, plan, why, text)
+        op = self._opinion(res)
+        plan_id = plan.get("id")
+        notify = None
+        with self.lock_scope("review-done"):
+            s = self.session(sid)
+            p = s.get("pending")
+            if not p or p["hash"] != phash:                       # decided, replaced or stopped meanwhile: nothing to do
+                self.jr("review-dropped", plans=[plan_id], tier=str(tier), opinion=op, result="the plan was no longer pending",
+                        identity={"actor": "keeperd", "session": sid})
+                return
+            self.log({"event": "review", "session": sid, "plan": plan_id, "verdict": res.get("verdict"), "tier": tier})
+            ident = {"actor": "reviewer-" + str(res.get("kind")), "session": sid}
+            if not active:
+                self.jr("review-observed", plans=[plan_id], tier=str(tier), opinion=op, identity=ident,
+                        result=f"observe mode: would have {res.get('verdict')}"
+                               + (" (approve)" if self.reviewer.approves(tier, res) else ""))
+                return
+            halted = bool(self.state.get("auto_halt")) or self.auto_mode != "active"
+            if self.reviewer.approves(tier, res) and not halted:
+                recorded = self.jr("approved", plans=[plan_id], tier=str(tier), opinion=op, identity=ident,
+                                   result=f"approved automatically (tier {tier}, {res.get('kind')})",
+                                   action={"kind": "plan", "hash": phash[:12], "actions": list(plan.get("actions") or []),
+                                           "targets": [mask_text(t)[:80] for t in (plan.get("targets") or [])][:20],
+                                           "ttl": plan["ttl"], "until_done": bool(plan.get("until_done"))})
+                if recorded:                                       # no automatic approval without a durable record of it
+                    s.pop("pending", None)
+                    evicted = self._activate(s, p, sid=sid, auto=True)
+                    self._record_plan_status(phash[:12], "approved")
+                    self.save()
+                    self.log({"event": "approved", "session": sid, "plan": plan_id, "hash": phash[:12], "evicted": evicted,
+                              "auto": True})
+                    self.notice = self.msg("ans_auto_approved", id=plan_id or "-", tier=tier,
+                                           ttl=plan["ttl"], kind=res.get("kind"))
+                    notify = ("notice", self.notice)
+                else:
+                    res = dict(res, verdict="escalate", reasons=["the journal could not record the approval"] + res["reasons"])
+                    op = self._opinion(res)
+            else:
+                self.jr("review-escalated", plans=[plan_id], tier=str(tier), opinion=op, identity=ident,
+                        result="sent to the human: " + ("halted" if halted else str(res.get("verdict"))))
+            if notify is None:
+                p["opinion"] = op
+                self.save()
+                notify = ("card", (sid, p))
+        try:                                                       # network, outside the lock
+            if notify[0] == "notice":
+                self.notify.send(notify[1])
+            else:
+                self.notify.send_plan(*notify[1])
+        except Exception as e:
+            self.log({"event": "telegram-error", "error": type(e).__name__})
 
 
 # ---------------------------------------------------------------------------------------------------------------
@@ -1733,6 +1866,9 @@ def serve(keeper, cfg, ready=None):
                 out = keeper.check(req.get("session"), str(req.get("tool", "")), req.get("input") or {},
                                    req.get("cwd"), actor if isinstance(actor, str) else None, peer_uid=uid)
             note = out.pop("_notify", None)
+            rv = out.pop("_review", None)
+            if rv:
+                keeper.start_review(*rv)
             # Dry run (11/10): send_plan() used to run AFTER the reply, so the agent was told "sent to the human"
             # even when Telegram was down and nothing reached them. Attempted first; the reason is rewritten only
             # on failure, so a working send still says exactly what it said before.
@@ -1823,8 +1959,24 @@ def journal_verify_cli(args):
     if os.geteuid() != 0:
         print("keeper-journal: run it as root (sudo keeper-journal verify)", file=sys.stderr)
         return 2
+    if args and args[0] == "report" and len(args) <= 2 and (len(args) == 1 or re.fullmatch(r"\d{1,2}", args[1])):
+        days = min(max(int(args[1]) if len(args) == 2 else 7, 1), 90)
+        try:
+            r = load_journal_module().report(os.path.join(load_config()["state_dir"], "journal.jsonl"), days)
+        except OSError as e:
+            print(f"keeper-journal: cannot read the journal ({type(e).__name__})", file=sys.stderr)
+            return 1
+        print(f"journal report, last {days} day(s): {r['records']} records (counts only; no plan, target or reason is printed)")
+        for tier in sorted(r["observed"]):
+            print(f"  observed, tier {tier}: " + ", ".join(f"{k} {n}" for k, n in sorted(r["observed"][tier].items())))
+        for tier in sorted(r["auto_approved"]):
+            print(f"  approved automatically, tier {tier}: {r['auto_approved'][tier]}")
+        for tier in sorted(r["escalated"]):
+            print(f"  sent to the human after review, tier {tier}: {r['escalated'][tier]}")
+        print(f"  tier 0: would allow {r['tier0_would_allow']}, allowed {r['tier0_allowed']}")
+        return 0
     if args != ["verify"]:
-        print("usage: keeper-journal verify", file=sys.stderr)
+        print("usage: keeper-journal verify | report [days]", file=sys.stderr)
         return 2
     cfg = load_config()
     ok, n, why = load_journal_module().verify(os.path.join(cfg["state_dir"], "journal.jsonl"))

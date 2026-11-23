@@ -94,6 +94,8 @@ They catch the mistakes of a *cooperative* agent: a careless command, a plan it 
 Two claims, and only the first is strong: the **approval cannot be forged** by the agent (separate user, button on a bot it cannot read, root-owned hook); but **what counts as a change is decided by a heuristic classifier**, not a proof. A review on 08/10 found a class of "read" commands that actually execute or write through an option or a config file, now fixed and tested (K1-K9 in the [design's Known limits](docs/design-keeper.md#known-limits-be-precise-about-what-is-proven)). Do not read "unforgeable approval" as "the agent cannot act without approval": the gate is as good as the classifier, and `actions=script` is unbounded by design.
 
 
+AI review: a reviewer approving a plan is an extra control, **not a proof**. It sees a structured scope, it can be wrong both ways, and it is off by default (`observe` records its opinion and changes nothing; `active` needs the owner's separate GO). Irreversible, outbound and secret-related calls, and a few classes of plan, always go to the human; no automatic approval is returned without a durable journal record. See [keeper/README.md](keeper/README.md#tiers-and-ai-reviewers-23112026-issue-24).
+
 Evidence of decisions: the keeper keeps an append-only, hash-chained [journal](keeper/README.md#the-journal-evidence-of-every-decision-23112026). It shows who decided what, under which plan, and detects an edited or reordered line. It does not detect truncation of the tail and does not stop the keeper user or root; it is evidence for the owner, not a proof against an attacker with those rights. Reading it back is a root-only check (`keeper-journal verify`).
 
 </details>
