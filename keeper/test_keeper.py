@@ -1942,7 +1942,7 @@ class TelegramCommands(Base):
         self.assertEqual([m for m, _p in self.calls], ["setMyCommands"])
         method, payload = self.calls[0]
         self.assertEqual(payload["scope"], {"type": "chat", "chat_id": CHAT})
-        self.assertEqual([c["command"] for c in payload["commands"]], ["stop", "status", "plans", "summary", "help"])
+        self.assertEqual([c["command"] for c in payload["commands"]], ["stop", "status", "plans", "summary", "auto", "help"])
         for c in payload["commands"]:
             self.assertTrue(3 <= len(c["description"]) <= 256, c)
 

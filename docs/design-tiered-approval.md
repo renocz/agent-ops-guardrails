@@ -153,8 +153,8 @@ alone is not enough, and a failed append means the human card.
 
 ## 7. Activation
 
-`auto_approval.mode` in the root config: `off` (default), `observe` (reviewers answer, journal records, nothing changes),
-`active` (per tier). Going to `active` needs a separate GO from the owner after a dry run on macOS (deployment notes in
+`auto_approval_mode` in the root config: `observe` (default: tier 0 and later the reviewers answer or are evaluated, the journal
+records, nothing changes), `active` (tier 0 now, tiers 1 and 2 with the reviewers), `off` (also any other value). Going to `active` needs a separate GO from the owner after a dry run on macOS (deployment notes in
 the last PR). Until then behaviour is unchanged.
 
 ## 8. What is tested where

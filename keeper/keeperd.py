@@ -31,7 +31,8 @@ DEFAULTS = {"socket": "/var/run/keeper/keeper.sock", "state_dir": "/var/lib/keep
             "mode": "block", "agent_home": None, "client_group": None, "safe_git_repos": [], "lang": "en",
             "wait_max_sec": 50, "hook_timeout_sec": 60, "max_active_plans": 3,
             "standing_plans": [], "unattended_actors": [], "shared_plans": False,
-            "free_write_paths": [], "until_done_ceiling_min": 1440, "until_done_idle_min": 0}
+            "free_write_paths": [], "until_done_ceiling_min": 1440, "until_done_idle_min": 0,
+            "auto_approval_mode": "observe"}
 UNTIL_DONE_HARD_CAP_MIN = 1440          # a `ttl=done` plan never outlives 24 h, whatever the config file says
 MAX_ACTIVE_PLANS_HARD_CAP = 5          # a config typo (or an attempt from a writable config) cannot go past this
 # Standing plans (design: docs/design-keeper-server.md §2): a closed, exact-literal allowlist for an agent nobody is
@@ -176,6 +177,14 @@ MESSAGES = {
         "help_plans": "/plans [n] — last n plan events (default 5, max 20)",
         "help_summary": "/summary [days] — log summary of would-deny/denied/allowed (alias /resume)",
         "help_help": "/help — this list",
+        "help_auto": "/auto — automatic approval: mode and whether /stop halted it; /auto on resumes it after a /stop",
+        "cmd_desc_auto": "automatic approval: status, or resume after /stop",
+        "ans_auto_status": "automatic approval: mode {mode}, {state}",
+        "auto_halted": "HALTED by /stop (send /auto on to resume)",
+        "auto_running": "not halted",
+        "ans_auto_resumed": "automatic approval resumed",
+        "ans_auto_not_halted": "automatic approval was not halted",
+        "status_auto_halted": "Automatic approval is halted by /stop. Send /auto on to resume it.",
         "cmd_desc_stop": "revoke every active and pending plan",
         "cmd_desc_status": "mode, active/pending plans, proposals left this hour",
         "cmd_desc_plans": "last plan events (proposed/approved/rejected/expired/revoked)",
@@ -259,6 +268,14 @@ MESSAGES = {
         "help_plans": "/plans [n] — les n derniers événements de plan (5 par défaut, 20 au maximum)",
         "help_summary": "/summary [jours] — résumé du journal des refus/autorisations (alias /resume)",
         "help_help": "/help — cette liste",
+        "help_auto": "/auto — approbation automatique : mode et état d'arrêt par /stop ; /auto on la reprend après un /stop",
+        "cmd_desc_auto": "approbation automatique : état, ou reprise après /stop",
+        "ans_auto_status": "approbation automatique : mode {mode}, {state}",
+        "auto_halted": "ARRÊTÉE par /stop (envoyez /auto on pour la reprendre)",
+        "auto_running": "non arrêtée",
+        "ans_auto_resumed": "approbation automatique reprise",
+        "ans_auto_not_halted": "l'approbation automatique n'était pas arrêtée",
+        "status_auto_halted": "L'approbation automatique est arrêtée par /stop. Envoyez /auto on pour la reprendre.",
         "cmd_desc_stop": "révoquer tout plan actif et en attente",
         "cmd_desc_status": "mode, plans actifs/en attente, propositions restantes cette heure",
         "cmd_desc_plans": "derniers événements de plan (proposé/approuvé/refusé/expiré/révoqué)",
@@ -345,6 +362,17 @@ def render_plan_card(lang, p):
 
 
 FIXED_ALTERNATIVE_MIN = [60]       # what the card's "fixed time" button grants; set from ttl_default_min at Keeper start
+
+
+def load_tier0_module():
+    """keeper/tier0.py, next to this file, loaded by path like the journal and the classifier (`python3 -I`)."""
+    spec = importlib.util.spec_from_file_location("keeper_tier0", os.path.join(HERE, "tier0.py"))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+AUTO_MODES = ("off", "observe", "active")
 
 
 def load_journal_module():
@@ -691,6 +719,11 @@ class Keeper:
             self.until_done_idle = max(0, int(cfg.get("until_done_idle_min") or 0))
         except (TypeError, ValueError):
             self.until_done_idle = 0
+        self.tier0 = load_tier0_module()
+        # Automatic approval: `off`, `observe` (default: record what tier 0 WOULD allow, change nothing) or `active` (root
+        # edit of the config after the owner's separate GO). Anything else counts as `off`. Only the root-owned config sets it.
+        mode = cfg.get("auto_approval_mode")
+        self.auto_mode = mode if mode in AUTO_MODES else "off"
         self.journal_mod = load_journal_module()
         self.journal_path = os.path.join(cfg["state_dir"], "journal.jsonl")
         self.journal = self.journal_mod.Journal(self.journal_path, clock=self.now)
@@ -702,6 +735,7 @@ class Keeper:
         except (OSError, ValueError):
             self.state = {"sessions": {}, "used_nonces": [], "proposals": []}
         self._reclamp_until_done()
+        self.state.setdefault("auto_halt", False)               # set by /stop (everything); cleared only by the owner's /auto on
         self.state.setdefault("plan_status", {})               # hash12 -> {state, at}; see _record_plan_status
         self.state.setdefault("standing_disabled", [])          # ids stopped at runtime; see _revoke_all
         self.state.setdefault("standing_usage", {})             # id -> {count, last_used}; see _touch_standing
@@ -734,12 +768,12 @@ class Keeper:
         finally:
             os.umask(old)
 
-    def jr(self, event, plans=None, action=None, result=None, identity=None):
+    def jr(self, event, plans=None, action=None, result=None, identity=None, tier="none"):
         """One journal record (keeper/journal.py). Never raises, never changes a decision: a failed write only flips
         `journal.ok`. The identity is the one of the call being checked unless the caller gives its own (a decision
         by the owner on Telegram has no session or socket peer)."""
         ident = identity if identity is not None else dict(getattr(self, "_ident", None) or {})
-        ok = self.journal.append(event, identity=ident, action=action, plans=plans, result=result)
+        ok = self.journal.append(event, identity=ident, action=action, plans=plans, result=result, tier=tier)
         if not ok and not self._journal_failing:                    # say so once per failure streak, in the other log
             self.log({"event": "journal-write-failed"})
         self._journal_failing = not ok
@@ -1058,6 +1092,19 @@ class Keeper:
         used = []
         for k, d, st in items:
             cat = self.gate.category(tool, tool_input, k, d)
+            known = self.tier0.match(st) if (tool == "Bash" and st and cat != "protected" and self.auto_mode != "off") else None
+            if known:
+                halted = bool(self.state.get("auto_halt"))
+                act = {"kind": "call", "tool": tool, "category": cat, "shape": command_shape(tool, st, cat), "cmd": st,
+                       "tier0": known}
+                if self.auto_mode == "active" and not halted:
+                    # Tier 0: a known read-only verb, in its exact shape. No card, no plan, no model.
+                    self.log({"event": "tier0-allowed", "session": sid, "verb": known})
+                    self.jr("allowed", result=f"allowed (tier 0: {known})", action=act, tier="0")
+                    continue
+                # observe (or halted): behaviour is unchanged, but the journal says what tier 0 would have done
+                self.jr("tier0-would-allow", result=("halted by /stop: " if halted else "observe mode: ") + known,
+                        action=act, tier="0")
             match, gaps = None, []
             for a_ in active:                       # one plan must cover the item ENTIRELY; the gaps explain why none did
                 g_ = self.gate.coverage_gap(a_["plan"], tool, tool_input, cat, st)
@@ -1152,7 +1199,7 @@ class Keeper:
     # (/stop) or READ state (/status, /plans, /help); approve/reject/mode stay button- or config-only, never a word
     # typed in a chat the agent cannot see but could in principle guess at. Checked after the single is_owner() gate
     # below, so every one of them is owner-and-configured-chat-only like /summary already was.
-    COMMANDS = ("stop", "status", "plans", "summary", "help")        # order shown in Telegram's "/" menu
+    COMMANDS = ("stop", "status", "plans", "summary", "auto", "help")        # order shown in Telegram's "/" menu
 
     def command(self, from_id, chat_id, text):
         """A text message sent to the bot. Only a known command from the owner is acted on; any other text (or a
@@ -1178,6 +1225,19 @@ class Keeper:
             if plan_id:
                 return [self.msg("ans_stopped_one", id=plan_id) if had else self.msg("ans_nothing_active_one", id=plan_id)]
             return [self.msg("ans_stopped") if had else self.msg("ans_nothing_active")]
+        m = re.fullmatch(r"/auto(?:@\w+)?(?:\s+(on))?", text, re.I)
+        if m:
+            with self.lock_scope("auto"):
+                halted = bool(self.state.get("auto_halt"))
+                if m.group(1) and halted:
+                    self.state["auto_halt"] = False
+                    self.save()
+                    self.log({"event": "auto-resumed"})
+                    self.jr("auto-resumed", result="resumed by the owner", identity={"actor": "owner-telegram"})
+                    return [self.msg("ans_auto_resumed")]
+            if m.group(1):
+                return [self.msg("ans_auto_not_halted")]
+            return [self.msg("ans_auto_status", mode=self.auto_mode, state=self.msg("auto_halted") if halted else self.msg("auto_running"))]
         if re.fullmatch(r"/status(?:@\w+)?", text, re.I):
             return self.status_report()
         m = re.fullmatch(r"/plans(?:@\w+)?(?:\s+(\d{1,2}))?", text, re.I)
@@ -1228,6 +1288,8 @@ class Keeper:
                      else self.msg("status_no_pending"))
         recent = len([t for t in self.state["proposals"] if t > self.now() - 3600])
         lines.append(self.msg("status_hourly", n=recent, limit=self.cfg["max_proposals_per_hour"]))
+        if self.state.get("auto_halt") and self.auto_mode != "off":
+            lines.append(self.msg("status_auto_halted"))
         standing = [str(self.msg("status_standing_line", id=p["id"], n=len(p["commands"]), days=p["expires_in_days"]))
                     for p in self._standing_view()]
         lines += standing if standing else [self.msg("status_no_standing")]
@@ -1310,6 +1372,9 @@ class Keeper:
                 disabled.append(plan_id)
                 had = True
         self.save()
+        if plan_id is None:                    # the emergency stop also halts automatic approval until the owner resumes it
+            self.state["auto_halt"] = True
+            self.save()
         self.log({"event": "revoked-all" if plan_id is None else "revoked-one", "plan": plan_id})
         self.jr("revoked-all" if plan_id is None else "revoked-one", plans=[plan_id] if plan_id else [],
                 result="revoked" if had else "nothing was active", identity={"actor": "owner-telegram"},
