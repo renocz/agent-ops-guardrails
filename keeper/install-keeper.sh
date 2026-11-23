@@ -179,7 +179,7 @@ fi
 mkd "$BASE" 755 "root:$ROOTGRP"
 mkd "$LIB" 755 "root:$ROOTGRP"
 mkd "$BIN" 755 "root:$ROOTGRP"
-for f in "$HERE/keeperd.py" "$HERE/keeper_client.py" "$REPO/go-gate/go_gate.py" "$REPO/secret-guard/secret_guard.py"; do
+for f in "$HERE/keeperd.py" "$HERE/journal.py" "$HERE/keeper_client.py" "$REPO/go-gate/go_gate.py" "$REPO/secret-guard/secret_guard.py"; do
   put "$LIB/$(basename "$f")" 644 "root:$ROOTGRP" "$f"
 done
 printf '#!/bin/sh\nexec /usr/bin/env -i %s -I %s/keeper_client.py propose "$@"\n' "$PY" "$LIB" > "$TMP/keeper-propose"
@@ -192,6 +192,9 @@ put "$BIN/keeper-status" 755 "root:$ROOTGRP" "$TMP/keeper-status"
 # (the script also refuses anyone who is not root, and the log itself belongs to $KUSER).
 printf '#!/bin/sh\nexec /usr/bin/env -i %s -I %s/keeperd.py --summary "$@"\n' "$PY" "$LIB" > "$TMP/keeper-summary"
 put "$BIN/keeper-summary" 700 "root:$ROOTGRP" "$TMP/keeper-summary"
+# Same for the journal check: root only, prints a count or a line number, never a record.
+printf '#!/bin/sh\nexec /usr/bin/env -i %s -I %s/keeperd.py --journal "$@"\n' "$PY" "$LIB" > "$TMP/keeper-journal"
+put "$BIN/keeper-journal" 700 "root:$ROOTGRP" "$TMP/keeper-journal"
 
 echo "-- 3. config, state and socket directory"
 # A reinstall MERGES into an existing config.json (owner review, 20/10): only the keys this installer run is

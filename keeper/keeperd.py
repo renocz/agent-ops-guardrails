@@ -331,6 +331,15 @@ def render_plan_card(lang, p):
     return (head + p["text"])[:4000], kb
 
 
+def load_journal_module():
+    """keeper/journal.py, next to this file (the daemon runs under `python3 -I`, which does not add its own directory to
+    sys.path, so it is loaded by path like the classifier)."""
+    spec = importlib.util.spec_from_file_location("keeper_journal", os.path.join(HERE, "journal.py"))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
 def load_gate(agent_home=None):
     """The go-gate classifier, from the root-owned copy next to this file. Its protected and scratch paths are the
     agent's (~ = the agent's home), not keeperd's own."""
@@ -656,6 +665,12 @@ class Keeper:
         os.makedirs(cfg["state_dir"], mode=0o700, exist_ok=True)
         self.state_path = os.path.join(cfg["state_dir"], "state.json")
         self.log_path = os.path.join(cfg["state_dir"], "log.jsonl")
+        self.journal_mod = load_journal_module()
+        self.journal_path = os.path.join(cfg["state_dir"], "journal.jsonl")
+        self.journal = self.journal_mod.Journal(self.journal_path, clock=self.now)
+        self._journal_failing = False
+        self.journal.append("keeper-start", identity={"actor": "keeperd"},
+                            result=f"mode={cfg['mode']}; max_active_plans={self.max_active_plans}")
         try:
             self.state = migrate_state(json.load(open(self.state_path)))
         except (OSError, ValueError):
@@ -682,6 +697,17 @@ class Keeper:
                 f.write(json.dumps(rec) + "\n")
         finally:
             os.umask(old)
+
+    def jr(self, event, plans=None, action=None, result=None, identity=None):
+        """One journal record (keeper/journal.py). Never raises, never changes a decision: a failed write only flips
+        `journal.ok`. The identity is the one of the call being checked unless the caller gives its own (a decision
+        by the owner on Telegram has no session or socket peer)."""
+        ident = identity if identity is not None else dict(getattr(self, "_ident", None) or {})
+        ok = self.journal.append(event, identity=ident, action=action, plans=plans, result=result)
+        if not ok and not self._journal_failing:                    # say so once per failure streak, in the other log
+            self.log({"event": "journal-write-failed"})
+        self._journal_failing = not ok
+        return ok
 
     def session(self, sid):
         # shared_plans (13/11/2026, off by default): every session of the agent uses ONE plan bucket, so a relaunched
@@ -722,6 +748,9 @@ class Keeper:
         self.state["proposals"] = recent + [now]
         self.save()
         self.log({"event": "proposed", "session": sid, "plan": plan.get("id"), "hash": phash[:12]})
+        self.jr("proposed", plans=[plan.get("id")], result="pending",
+                action={"kind": "plan", "hash": phash[:12], "actions": list(plan.get("actions") or []),
+                        "targets": [mask_text(t)[:80] for t in (plan.get("targets") or [])][:20], "ttl": ttl})
         out = {"ok": True, "hash": phash[:12], "message": "sent to the human for approval"}
         # Standing-plan design, §2: an unattended actor's proposal is still recorded (so /plans and /summary show
         # it the next time the owner looks), but must never push a Telegram card -- nobody is there to tap it, and
@@ -813,7 +842,8 @@ class Keeper:
         self.tab_origins.setdefault(str(sid), {}).update(found)
         self.log({"event": "observe", "session": sid, "tool": tool, "tabs": len(found)})
 
-    def check(self, sid, tool, tool_input, cwd=None, actor=None):
+    def check(self, sid, tool, tool_input, cwd=None, actor=None, peer_uid=None):
+        self._ident = {"session": str(sid) if sid is not None else None, "actor": actor, "peer_uid": peer_uid}
         self.gate.CWD = cwd                                            # the dir the agent ran the tool in (K6)
         self.gate.TAB_ORIGINS.clear()
         self.gate.TAB_ORIGINS.update(getattr(self, "tab_origins", {}).get(str(sid), {}))
@@ -849,6 +879,8 @@ class Keeper:
             if std_id:
                 self._touch_standing(std_id)
                 self.log({"event": "standing-used", "session": sid, "standing": std_id})
+                self.jr("standing-used", plans=[std_id], result="allowed",
+                        action={"kind": "standing", "tool": tool, "cmd": (tool_input.get("command") or "").strip()})
                 return {"decision": "allow", "reason": ""}
         try:
             kind, detail = self.gate.classify(tool, tool_input)
@@ -883,6 +915,10 @@ class Keeper:
                 ids = [a_["plan"].get("id") or "-" for a_ in active]
                 self.log({"event": "denied" if self.cfg["mode"] == "block" else "would-deny", "session": sid,
                           "tool": tool, "category": cat, "shape": command_shape(tool, st, cat), "plans": ids})
+                self.jr("denied" if self.cfg["mode"] == "block" else "would-deny", plans=ids,
+                        result="denied" if self.cfg["mode"] == "block" else "allowed (observe mode)",
+                        action={"kind": "call", "tool": tool, "category": cat, "shape": command_shape(tool, st, cat),
+                                "cmd": st})
                 if self.cfg["mode"] != "block":
                     return {"decision": "allow", "reason": ""}
                 if active:
@@ -897,6 +933,9 @@ class Keeper:
                            "keeper-propose; the human approves it on the keeper bot.")
                 return {"decision": "deny", "reason": why}
             used.append(match["plan"].get("id"))
+            self.jr("allowed", plans=[match["plan"].get("id")], result="allowed",
+                    action={"kind": "call", "tool": tool, "category": cat, "shape": command_shape(tool, st, cat),
+                            "cmd": st})
         self.log({"event": "allowed", "session": sid, "tool": tool, "plans": used})
         return {"decision": "allow", "reason": ""}
 
@@ -1110,6 +1149,9 @@ class Keeper:
                 had = True
         self.save()
         self.log({"event": "revoked-all" if plan_id is None else "revoked-one", "plan": plan_id})
+        self.jr("revoked-all" if plan_id is None else "revoked-one", plans=[plan_id] if plan_id else [],
+                result="revoked" if had else "nothing was active", identity={"actor": "owner-telegram"},
+                action={"kind": "plan"})
         return had
 
     def _activate(self, s, p):
@@ -1159,23 +1201,34 @@ class Keeper:
                     self._record_plan_status(h, "rejected")
                     self.save()
                     self.log({"event": "rejected", "session": sid, "plan": p["plan"].get("id")})
+                    self.jr("rejected", plans=[p["plan"].get("id")], result="rejected", identity={"actor": "owner-telegram", "session": sid},
+                            action={"kind": "plan", "hash": h})
                     return self.msg("ans_rejected")
                 if self.now() - p["proposed_at"] > self.cfg["pending_max_age_min"] * 60:
                     self._record_plan_status(h, "expired")
                     self.save()
                     self.log({"event": "approval-of-expired-plan-ignored", "session": sid, "plan": p["plan"].get("id")})
+                    self.jr("approval-of-expired-plan-ignored", plans=[p["plan"].get("id")], result="ignored",
+                            identity={"actor": "owner-telegram", "session": sid}, action={"kind": "plan", "hash": h})
                     return self.msg("ans_expired")
                 evicted = self._activate(s, p)
                 self._record_plan_status(h, "approved")
                 self.save()
                 self.log({"event": "approved", "session": sid, "plan": p["plan"].get("id"), "hash": h,
                           "evicted": evicted})
+                self.jr("approved", plans=[p["plan"].get("id")], result=f"active for {p['plan']['ttl']} min",
+                        identity={"actor": "owner-telegram", "session": sid},
+                        action={"kind": "plan", "hash": h, "actions": list(p["plan"].get("actions") or []),
+                                "targets": [mask_text(t)[:80] for t in (p["plan"].get("targets") or [])][:20],
+                                "ttl": p["plan"]["ttl"]})
                 if evicted:
                     # A visible lifecycle event of its own (requirement 3: never silently), under the dropped
                     # plan's own id, so /plans shows it as "revoked" without having to parse the approval's
                     # "evicted" field.
                     self.log({"event": "plan-evicted", "session": sid, "plan": evicted,
                               "replaced_by": p["plan"].get("id")})
+                    self.jr("plan-evicted", plans=[evicted], result=f"replaced by {p['plan'].get('id')}",
+                            identity={"actor": "keeperd", "session": sid}, action={"kind": "plan"})
                     return self.msg("ans_approved_evicted", ttl=p["plan"]["ttl"], evicted=evicted)
                 return self.msg("ans_approved", ttl=p["plan"]["ttl"])
         self.log({"event": "decision-unknown-plan-ignored"})
@@ -1439,7 +1492,7 @@ def serve(keeper, cfg, ready=None):
             actor = req.get("actor")                            # an optional, root-set tag (see keeper_client.py)
             with keeper.lock_scope("check"):
                 out = keeper.check(req.get("session"), str(req.get("tool", "")), req.get("input") or {},
-                                   req.get("cwd"), actor if isinstance(actor, str) else None)
+                                   req.get("cwd"), actor if isinstance(actor, str) else None, peer_uid=uid)
             note = out.pop("_notify", None)
             # Dry run (11/10): send_plan() used to run AFTER the reply, so the agent was told "sent to the human"
             # even when Telegram was down and nothing reached them. Attempted first; the reason is rewritten only
@@ -1509,7 +1562,25 @@ def summary_cli(args):
     return 0
 
 
+def journal_verify_cli(args):
+    """`keeper-journal verify`, run by root: re-reads the whole journal and checks its chain. Root only, like the summary:
+    the journal is private to the keeper user and its content must never be in front of the agent (it prints a count and,
+    on failure, a line number, never a record)."""
+    if os.geteuid() != 0:
+        print("keeper-journal: run it as root (sudo keeper-journal verify)", file=sys.stderr)
+        return 2
+    if args != ["verify"]:
+        print("usage: keeper-journal verify", file=sys.stderr)
+        return 2
+    cfg = load_config()
+    ok, n, why = load_journal_module().verify(os.path.join(cfg["state_dir"], "journal.jsonl"))
+    print(f"journal OK: {n} records, chain intact" if ok else f"journal BROKEN after {n} valid records: {why}")
+    return 0 if ok else 1
+
+
 def main():
+    if sys.argv[1:2] == ["--journal"]:
+        sys.exit(journal_verify_cli(sys.argv[2:]))
     if sys.argv[1:2] == ["--summary"]:
         sys.exit(summary_cli(sys.argv[2:]))
     cfg = load_config(sys.argv[1] if len(sys.argv) > 1 else None)

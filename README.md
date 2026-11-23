@@ -93,6 +93,9 @@ They catch the mistakes of a *cooperative* agent: a careless command, a plan it 
 
 Two claims, and only the first is strong: the **approval cannot be forged** by the agent (separate user, button on a bot it cannot read, root-owned hook); but **what counts as a change is decided by a heuristic classifier**, not a proof. A review on 08/10 found a class of "read" commands that actually execute or write through an option or a config file, now fixed and tested (K1-K9 in the [design's Known limits](docs/design-keeper.md#known-limits-be-precise-about-what-is-proven)). Do not read "unforgeable approval" as "the agent cannot act without approval": the gate is as good as the classifier, and `actions=script` is unbounded by design.
 
+
+Evidence of decisions: the keeper keeps an append-only, hash-chained [journal](keeper/README.md#the-journal-evidence-of-every-decision-23112026). It shows who decided what, under which plan, and detects an edited or reordered line. It does not detect truncation of the tail and does not stop the keeper user or root; it is evidence for the owner, not a proof against an attacker with those rights. Reading it back is a root-only check (`keeper-journal verify`).
+
 </details>
 
 ## What each piece guards against
