@@ -405,6 +405,19 @@ class Scope(unittest.TestCase):
         self.assertEqual(g.parse_scope("Scope: id=upd-réseau ; actions=edit")["id"], "upd-rseau")   # ASCII ids
         self.assertIsNone(g.parse_scope("Scope: id=x ; actions=everything"))       # unknown category only
 
+    def test_ttl_done_with_an_optional_max(self):
+        p = g.parse_scope("Scope: id=n ; targets=web ; actions=deploy ; ttl=done,max=18h")
+        self.assertEqual((p["until_done"], p["max_min"], p["ttl"]), (True, 1080, None))
+        p = g.parse_scope("Scope: id=n ; actions=deploy ; ttl=done ; max=90min")
+        self.assertEqual((p["until_done"], p["max_min"]), (True, 90))
+        p = g.parse_scope("Scope: id=n ; actions=deploy ; ttl=done")
+        self.assertEqual((p["until_done"], p.get("max_min")), (True, None))
+        p = g.parse_scope("Scope: id=n ; actions=deploy ; ttl=30 ; max=5h")           # max alone means nothing
+        self.assertNotIn("until_done", p)
+        self.assertNotIn("max_min", p)
+        self.assertEqual(p["ttl"], 30)
+        self.assertNotIn("until_done", g.parse_scope("Scope: id=n ; actions=deploy ; ttl=2h"))   # unchanged
+
     def test_covers(self):
         plan = {"targets": ["web"], "actions": ["deploy"]}
         self.assertTrue(g.covers(plan, "Bash", {"command": "docker compose up -d web"}, "deploy"))

@@ -1311,10 +1311,22 @@ def parse_scope(text):
         elif k in ("actions",):
             plan["actions"] += [a.lower() for a in vals]
         elif k in ("ttl", "durée", "duree"):
+            if re.match(r"(?i)(done|jusqu)", v):                  # `ttl=done[,max=18h]`: lives until the task is done
+                plan["until_done"] = True
+                m = re.search(r"(?i)\bmax\s*=\s*(\d+)\s*(h|min|m)?", v)
+                if m:
+                    plan["max_min"] = int(m.group(1)) * (60 if m.group(2) == "h" else 1)
+                continue
             m = re.match(r"(\d+)\s*(h|min|m)?", v)
             if m:
                 plan["ttl"] = int(m.group(1)) * (60 if m.group(2) == "h" else 1)
+        elif k == "max":                                         # `ttl=done ; max=18h`
+            m = re.match(r"(\d+)\s*(h|min|m)?", v)
+            if m:
+                plan["max_min"] = int(m.group(1)) * (60 if m.group(2) == "h" else 1)
     plan["actions"] = [a for a in plan["actions"] if a in CATEGORIES]
+    if not plan.get("until_done"):
+        plan.pop("max_min", None)                                # a `max` only means something with ttl=done
     return plan if plan["actions"] else None
 
 

@@ -131,6 +131,14 @@ def hook():
             except (OSError, ValueError):
                 pass
         sys.exit(0)
+    if data.get("hook_event_name") == "SessionEnd":
+        # Issue 18: the agent's session ended, so the plans that live "until done" end with it. Best effort: a crash
+        # sends nothing, and the plan's declared max or the hard ceiling ends it instead.
+        try:
+            ask({"op": "session-end", "session": data.get("session_id")})
+        except (OSError, ValueError):
+            pass
+        sys.exit(0)
     if data.get("hook_event_name") != "PreToolUse":
         sys.exit(0)
     tool, ti = data.get("tool_name", ""), data.get("tool_input") or {}
@@ -168,11 +176,11 @@ def hook():
     deny(out.get("reason") or "keeper: refused")
 
 
-NOT_INSTALLED = ("keeper-propose / keeper-status are handled by the keeper hook, which answers them before they run. "
+NOT_INSTALLED = ("keeper-propose / keeper-status / keeper-done are handled by the keeper hook, which answers them before they run. "
                  "If you see this, the keeper hook is not active.")
 
 if __name__ == "__main__":
-    if sys.argv[1:2] in (["propose"], ["status"]):
+    if sys.argv[1:2] in (["propose"], ["status"], ["done"]):
         print(NOT_INSTALLED, file=sys.stderr)
         sys.exit(1)
     hook()

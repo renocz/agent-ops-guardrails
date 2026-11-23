@@ -184,10 +184,12 @@ for f in "$HERE/keeperd.py" "$HERE/journal.py" "$HERE/keeper_client.py" "$REPO/g
 done
 printf '#!/bin/sh\nexec /usr/bin/env -i %s -I %s/keeper_client.py propose "$@"\n' "$PY" "$LIB" > "$TMP/keeper-propose"
 printf '#!/bin/sh\nexec /usr/bin/env -i %s -I %s/keeper_client.py status\n' "$PY" "$LIB" > "$TMP/keeper-status"
+printf '#!/bin/sh\nexec /usr/bin/env -i %s -I %s/keeper_client.py done "$@"\n' "$PY" "$LIB" > "$TMP/keeper-done"
 printf '%s\n' "$GATE_MODE" > "$TMP/mode"      # observe: the hook lets changes through if keeperd is down
 put "$LIB/mode" 644 "root:$ROOTGRP" "$TMP/mode"
 put "$BIN/keeper-propose" 755 "root:$ROOTGRP" "$TMP/keeper-propose"
 put "$BIN/keeper-status" 755 "root:$ROOTGRP" "$TMP/keeper-status"
+put "$BIN/keeper-done" 755 "root:$ROOTGRP" "$TMP/keeper-done"
 # For the human, as root: the log summary, printed locally. Mode 700, never setuid: the agent must not be able to run it
 # (the script also refuses anyone who is not root, and the log itself belongs to $KUSER).
 printf '#!/bin/sh\nexec /usr/bin/env -i %s -I %s/keeperd.py --summary "$@"\n' "$PY" "$LIB" > "$TMP/keeper-summary"
@@ -357,6 +359,10 @@ if not mine:
 post = cur["hooks"].setdefault("PostToolUse", [])
 if not any(h.get("command") == cmd for e in post for h in e.get("hooks", [])):
     post.append({"matcher": "mcp__claude-in-chrome__.*", "hooks": [{"type": "command", "command": cmd, "timeout": 10}]})
+# Issue 18: the end of a session ends the plans that live "until done" (keeper_client.py answers only this one event).
+end = cur["hooks"].setdefault("SessionEnd", [])
+if not any(h.get("command") == cmd for e in end for h in e.get("hooks", [])):
+    end.append({"hooks": [{"type": "command", "command": cmd, "timeout": 10}]})
 d = cur.setdefault("permissions", {}).setdefault("deny", [])
 d[:] = [x for x in d if x not in legacy]       # drop the useless Write(...) duplicates an earlier install wrote
 d += [x for x in deny if x not in d]

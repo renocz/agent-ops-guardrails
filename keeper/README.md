@@ -65,6 +65,38 @@ state, replay a GO or remove the hook. The keeper moves the approval out of the 
   `/opt/agent-guardrails/lib/` (root, 644) and runs as `/usr/bin/env -i /usr/bin/python3 -I`.
 - If keeperd is down, in block mode the hook lets reads through and refuses changes (in observe mode everything passes).
 
+## Plans that last as long as the task (issue 18, 23/11/2026)
+
+A fixed `ttl` guesses the duration in advance. A plan can instead say `ttl=done` (optionally `ttl=done,max=18h`, or
+`ttl=done ; max=18h`): it then lives until the **first** of:
+
+- `keeper-done [--id <plan>]` run by the agent: with an id, that plan ends; without, the session's `ttl=done` plans end.
+  It can only end plans, never widen one;
+- the end of the agent's session (Claude Code's `SessionEnd` hook, registered by the installer; `ttl=done` plans only; ignored
+  with `shared_plans`, where one session ending proves nothing about the others). **Assumed from the Claude Code
+  documentation, not run:** a crash or a killed session sends nothing, and the next two rules end the plan;
+- the declared `max`, shown on the card ("until the task is done, at most 1080 min");
+- the hard ceiling `until_done_ceiling_min` (default and maximum 1440 = 24 h, clamped by the daemon whatever the config says);
+- optionally `until_done_idle_min` minutes without a call covered by the plan (default 0 = off: a task started in the evening
+  and checked the next morning has hours without a call).
+
+The scope stays frozen: targets and actions never change while the plan lives, and proposing a wider plan with the same
+id changes nothing until you approve it. A fixed `ttl=N` behaves as before (60 min by default, 240 at most). On the card
+of a `ttl=done` plan a second button, **Approve, fixed 60 min**, grants the same scope for the default fixed time instead.
+`/stop` and `/stop <id>` revoke as before. A running daemon ends expired plans every 30 s, so the end is recorded when it
+happens. The fixed-time button never grants more than the agent declared (`max=30min` gives 30, not 60). After a restart the
+stored expiry of a `ttl=done` plan is cut to approval time + the current ceiling, so lowering the ceiling in the config
+takes effect on plans already running (a clock set backwards is not detected: wall-clock time, like every other expiry here).
+Plan usage counters are written to the state file by the sweep and at each plan end, not on every covered call: a crash loses at
+most 30 s of counters, never a decision.
+
+What each plan really covered goes to the journal when it ends (`plan-ended`): the reason (`done`, `session-end`,
+`declared-max`, `ceiling`, `idle`, `ttl-expired`, `revoked`, `stopped`, `evicted`, `renewed`), the number of calls, the calls
+by category, which of the plan's own targets were named, start and end. No command text.
+
+**Limit:** a plan that lives overnight is an approval nobody watches. It is bounded by its frozen scope, its declared max, the
+24 h ceiling and `/stop`, not by a person. A process started under a plan keeps running after the plan ends (see "Still open").
+
 ## Several plans active at once
 
 A session can hold more than one approved plan at the same time (20/10): approving a small, narrow plan while a
@@ -361,6 +393,8 @@ cover:
   the reinstall-keeps-the-other test fail.
 
 `python3 test_journal.py` covers the journal: chain, edit/delete/reorder detection, torn last line (and the record after it on its own line), restart, twelve realistic secret-bearing commands never reaching the file, the HMAC and its key, file modes, write failure not changing a decision, and the wiring (lifecycle, identity, the agent's text never written, root-only CLI, installer).
+
+`python3 test_task_plans.py` covers the task-lifetime plans: parsing, the council's findings (fixed button bound, ceiling re-applied after a restart, no state write per call), the declared max and the 24 h ceiling (config included), a plan covering a whole night then stopping, the frozen scope, `keeper-done`, session end, revocation, eviction and renewal reasons, the sweep, the idle rule, the owner's fixed-time button, the client's `SessionEnd` forwarding and the installer wiring.
 
 `python3 test_block_dryrun.py` adds the same `--wait` scenarios end to end, through the real hook subprocess: the
 Bash tool call stays blocked on the open socket while the card is still pending, and returns once the owner's
