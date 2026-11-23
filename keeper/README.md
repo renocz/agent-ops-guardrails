@@ -149,6 +149,26 @@ the keeper hook first, adds the deny rules, shows the diff and keeps a `.bak-kee
 it started with; it will not pick up the keeper hook (or an updated one) until restarted. A session you start after
 the install is fine.
 
+## The journal: evidence of every decision (23/11/2026)
+
+`log.jsonl` is an event counter for `/summary`. The **journal** (`/var/lib/keeper/journal.jsonl`) is the evidence behind
+the tiered approval described in [docs/design-tiered-approval.md](../docs/design-tiered-approval.md): one JSON line per
+decision with time (local and UTC), host, identity (session, actor tag, socket peer uid), action (category, shape,
+sha256 of the command, the literal command masked and cut at 300 characters), the covering plan, the tier (`none` until
+tiers exist), the opinion (`none` until reviewers exist) and the result.
+
+- The agent can neither read nor write it: it lives in the keeper's 700 directory, the file is 600 and opened append-only.
+- Each line holds the sha256 of the previous one. `sudo keeper-journal verify` (root only) re-reads the file and reports
+  an intact chain, or the first broken line number; it never prints a record. Do not run it inside an agent session.
+- No secret: the literal is masked with the keeper's own patterns, and a literal that still looks secret is kept as its
+  hash only. The agent's free text (a plan's `--text`) is never written.
+- A failed write never changes a decision (it would be a new way to lock the owner out); it flips an internal flag that
+  the reviewers of the next steps will require before they run.
+- **Limits.** A chain detects edits, reordering and deletions in the middle, **not** truncation of the tail, and it does
+  not stop the keeper user or root. Optional hardening, as root, not done by the installer and not tested in CI:
+  `chattr +a /var/lib/keeper/journal.jsonl` on Linux, `chflags sappnd /var/lib/keeper/journal.jsonl` on macOS (the daemon
+  must have created the file first, and the file can then no longer be rotated). Reads are not journaled in this version.
+
 ## Commands on the keeper bot
 
 Send these to the keeper bot from your own chat; only you (`owner_id`, in the configured chat) are answered — a command
@@ -337,6 +357,8 @@ cover:
   or keep without writing anything. Mutation-checked: a sibling script that skips the merge entirely (own class)
   or that replaces the union with a plain overwrite (same class as the general config-merge mutation) each make
   the reinstall-keeps-the-other test fail.
+
+`python3 test_journal.py` covers the journal: chain, edit/delete/reorder detection, torn last line, restart, masking, a secret-shaped leftover, file mode, write failure not changing a decision, and the wiring (lifecycle, identity, the agent's text never written, root-only CLI, installer).
 
 `python3 test_block_dryrun.py` adds the same `--wait` scenarios end to end, through the real hook subprocess: the
 Bash tool call stays blocked on the open socket while the card is still pending, and returns once the owner's
