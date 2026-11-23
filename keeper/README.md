@@ -97,6 +97,39 @@ by category, which of the plan's own targets were named, start and end. No comma
 **Limit:** a plan that lives overnight is an approval nobody watches. It is bounded by its frozen scope, its declared max, the
 24 h ceiling and `/stop`, not by a person. A process started under a plan keeps running after the plan ends (see "Still open").
 
+## Tier 0: known reads need no card (23/11/2026, issue 22)
+
+Before this, every `gh` call was a "change" for the classifier (measured), so consulting a repository cost a card. Tier 0 is a
+**closed table** of read-only GitHub CLI verbs (`keeper/tier0.py`): `gh repo|issue|pr|run|release|workflow|label|search` read verbs
+and `gh api` limited to GET on `repos`, `orgs`, `users`, `search`, `licenses`, `rate_limit`. It is decided by plain code, never by
+a model, and matched on the **exact shape** of one command: only the flags listed for that verb, never `--web`, no redirection,
+substitution, pipe into a shell, second command, environment prefix, path or wrapper before `gh`, no `graphql`, no body flag
+(`-f`, `-F`, `--input`), no `-X` other than GET, no absolute URL. A listed verb with anything beyond its shape goes back to the
+normal plan flow, unchanged. An action the classifier does not know is never tier 0 and still needs approval. `git log/show/diff`
+in a declared safe repository already pass as reads through the classifier and are not duplicated here.
+
+`auto_approval_mode` (root-owned config; the agent has no path to it):
+
+- `observe` (**default**): nothing changes. For every command that tier 0 *would* have allowed, the journal records
+  `tier0-would-allow` with tier `0`. Run it for a while and read the result before going further.
+- `active`: those commands are allowed without a plan, and the journal records them with tier `0`. Switch on only after the owner's
+  separate GO, following the dry run below.
+- `off`, or any other value: tier 0 is ignored entirely.
+
+**Emergency halt.** `/stop` (everything, or the button) also halts automatic approval, persisted across restarts: tier 0 then behaves
+as in `observe` until the owner sends `/auto on` (only the owner, only that form; `/auto` alone just reports the state, and
+`/stop <id>` for one plan does not halt anything). The agent has no way to resume it.
+
+**Before `active`.** (1) Leave `observe` on for a few days and read the `tier0-would-allow` records. (2) On macOS, the platform where block
+mode runs, do a dry run first: set `active` on a throw-away install (`--prefix`) or with the test `gh` below, check that a
+`gh issue list` passes, that `gh issue create` and `gh api -X POST ...` still need a plan, and that `/stop` then `/auto on` behaves as above.
+The automated tests run on Linux only; nothing here was run on macOS. (3) Then the owner gives a distinct GO and a root edit sets
+`"auto_approval_mode": "active"` followed by a restart.
+
+**Limit.** `gh` can run a program through its own configuration (`pager`, `editor`, `browser` keys, the `GH_PAGER` variable). A malicious
+pre-existing `gh` configuration is not detected here; keep that file out of the agent's reach. A read can still show the agent data it
+should not see if the token behind `gh` has more rights than the agent needs: give `gh` a read-only token.
+
 ## Several plans active at once
 
 A session can hold more than one approved plan at the same time (20/10): approving a small, narrow plan while a
@@ -395,6 +428,8 @@ cover:
 `python3 test_journal.py` covers the journal: chain, edit/delete/reorder detection, torn last line (and the record after it on its own line), restart, twelve realistic secret-bearing commands never reaching the file, the HMAC and its key, file modes, write failure not changing a decision, and the wiring (lifecycle, identity, the agent's text never written, root-only CLI, installer).
 
 `python3 test_task_plans.py` covers the task-lifetime plans: parsing, the council's findings (fixed button bound, ceiling re-applied after a restart, no state write per call), the declared max and the 24 h ceiling (config included), a plan covering a whole night then stopping, the frozen scope, `keeper-done`, session end, revocation, eviction and renewal reasons, the sweep, the idle rule, the owner's fixed-time button, the client's `SessionEnd` forwarding and the installer wiring.
+
+`python3 test_tier0.py` covers tier 0: about 100 command shapes through the matcher (every known read, every listed verb beyond its exact shape, every write and sensitive call), the three modes (observe changes no decision for any command), unknown actions, the journal entries, and the emergency halt (button, command, `/stop <id>` not halting, owner-only resume, persistence, the agent unable to resume, French messages).
 
 `python3 test_block_dryrun.py` adds the same `--wait` scenarios end to end, through the real hook subprocess: the
 Bash tool call stays blocked on the open socket while the card is still pending, and returns once the owner's
