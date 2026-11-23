@@ -66,10 +66,14 @@ Definitions.
 
 ## 3. Plans that last as long as the task (issue 18)
 
-- `ttl=done` in the scope: the plan lives until the first of: `keeper-done <id>` from the agent, end of session,
-  idle timeout (no call covered by this plan for `until_done_idle_min`, default 120), or the hard ceiling
-  (`until_done_ceiling_min`, default 480, clamped to 1440 whatever the file says). A fixed `ttl=N` keeps today's
-  behaviour (default 60, max 240). The card offers both (the owner picks per plan).
+- `ttl=done,max=<duration>` in the scope: the plan lives until the first of: `keeper-done <id>` from the agent, end of
+  session, the declared `max` (shown on the card, so the owner sees "until done, at most 18 h"), or the hard ceiling
+  (`until_done_ceiling_min`, default 1440 = 24 h, clamped to 1440 whatever the file says). A missing `max` means the
+  ceiling. There is **no idle timeout** by default (`until_done_idle_min` = 0): a task started in the evening and checked
+  the next morning has 10 h or more without a call, and an idle rule would end it. The cost is a plan that stays active
+  overnight unattended; it is bounded by the frozen scope, the declared `max`, the ceiling, a tier-1 review of every
+  script added meanwhile, `/stop`, and the per-plan journal. A fixed `ttl=N` keeps today's behaviour (default 60,
+  max 240). The card offers both (the owner picks per plan).
 - Scope frozen at approval: targets, actions, exclusions (new optional `excludes=`) never change while the plan lives.
   Renewing with the same id is a new approval.
 - Manual revocation (`/stop <id>`) and global emergency stop (`/stop`) exist. `/stop` also sets a persisted
