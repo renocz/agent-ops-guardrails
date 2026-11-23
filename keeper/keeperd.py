@@ -31,7 +31,8 @@ DEFAULTS = {"socket": "/var/run/keeper/keeper.sock", "state_dir": "/var/lib/keep
             "mode": "block", "agent_home": None, "client_group": None, "safe_git_repos": [], "lang": "en",
             "wait_max_sec": 50, "hook_timeout_sec": 60, "max_active_plans": 3,
             "standing_plans": [], "unattended_actors": [], "shared_plans": False,
-            "free_write_paths": []}
+            "free_write_paths": [], "until_done_ceiling_min": 1440, "until_done_idle_min": 0}
+UNTIL_DONE_HARD_CAP_MIN = 1440          # a `ttl=done` plan never outlives 24 h, whatever the config file says
 MAX_ACTIVE_PLANS_HARD_CAP = 5          # a config typo (or an attempt from a writable config) cannot go past this
 # Standing plans (design: docs/design-keeper-server.md §2): a closed, exact-literal allowlist for an agent nobody is
 # watching (a systemd timer, e.g.), defined ONLY in the root-owned config file -- never created, approved or widened
@@ -105,6 +106,10 @@ MESSAGES = {
         "card_any": "ANY",
         "card_actions": "Actions: {actions}",
         "card_duration": "Duration: {ttl} min",
+        "card_duration_done": "Duration: until the task is done, at most {ttl} min",
+        "btn_approve_fixed": "✅ Approve, fixed {n} min",
+        "ans_approved_done": "approved until the task is done (at most {ttl} min)",
+        "ans_approved_done_evicted": "approved until the task is done (at most {ttl} min); the oldest active plan, {evicted}, was dropped: the limit was reached",
         "card_fingerprint": "Fingerprint: {fp}",
         "card_adds_to": "Adds to the active plans: {ids}",
         "card_replaces": "Renews (same id): {id}",
@@ -184,6 +189,10 @@ MESSAGES = {
         "card_any": "TOUTES",
         "card_actions": "Actions : {actions}",
         "card_duration": "Durée : {ttl} min",
+        "card_duration_done": "Durée : jusqu'à la fin de la tâche, {ttl} min au plus",
+        "btn_approve_fixed": "✅ Approuver, durée fixe {n} min",
+        "ans_approved_done": "approuvé jusqu'à la fin de la tâche ({ttl} min au plus)",
+        "ans_approved_done_evicted": "approuvé jusqu'à la fin de la tâche ({ttl} min au plus) ; le plan actif le plus ancien, {evicted}, a été abandonné : la limite était atteinte",
         "card_fingerprint": "Empreinte : {fp}",
         "card_adds_to": "S'ajoute aux plans actifs : {ids}",
         "card_replaces": "Renouvelle (même identifiant) : {id}",
@@ -320,7 +329,8 @@ def render_plan_card(lang, p):
     head = "\n".join([t(lang, "card_head"), t(lang, "card_plan", id=plan.get("id") or "-"),
                       t(lang, "card_targets", targets=", ".join(plan["targets"]) or t(lang, "card_any")),
                       t(lang, "card_actions", actions=", ".join(plan["actions"])),
-                      t(lang, "card_duration", ttl=plan["ttl"]), t(lang, "card_fingerprint", fp=h)]) + "\n"
+                      t(lang, "card_duration_done" if plan.get("until_done") else "card_duration", ttl=plan["ttl"]),
+                      t(lang, "card_fingerprint", fp=h)]) + "\n"
     head += warn
     if p.get("context"):                                 # this proposal follows a refusal (item 2): say what of it
         head += t(lang, "card_context", gap=p["context"]) + "\n"
@@ -328,7 +338,13 @@ def render_plan_card(lang, p):
     kb = {"inline_keyboard": [[{"text": t(lang, "btn_approve"), "callback_data": f"approve:{h}:{p['nonce']}"},
                                {"text": t(lang, "btn_reject"), "callback_data": f"reject:{h}:{p['nonce']}"}],
                               [{"text": t(lang, "btn_stop"), "callback_data": "stop:all"}]]}
+    if plan.get("until_done"):                           # issue 18: the owner picks "until done" or a fixed time per plan
+        kb["inline_keyboard"].insert(1, [{"text": t(lang, "btn_approve_fixed", n=FIXED_ALTERNATIVE_MIN[0]),
+                                          "callback_data": f"approvefixed:{h}:{p['nonce']}"}])
     return (head + p["text"])[:4000], kb
+
+
+FIXED_ALTERNATIVE_MIN = [60]       # what the card's "fixed time" button grants; set from ttl_default_min at Keeper start
 
 
 def load_journal_module():
@@ -665,6 +681,16 @@ class Keeper:
         os.makedirs(cfg["state_dir"], mode=0o700, exist_ok=True)
         self.state_path = os.path.join(cfg["state_dir"], "state.json")
         self.log_path = os.path.join(cfg["state_dir"], "log.jsonl")
+        FIXED_ALTERNATIVE_MIN[0] = max(1, min(int(cfg["ttl_default_min"]), int(cfg["ttl_max_min"])))
+        try:
+            ceiling = int(cfg.get("until_done_ceiling_min") or UNTIL_DONE_HARD_CAP_MIN)
+        except (TypeError, ValueError):
+            ceiling = UNTIL_DONE_HARD_CAP_MIN
+        self.until_done_ceiling = max(1, min(ceiling, UNTIL_DONE_HARD_CAP_MIN))   # clamped here, every time, not just at install
+        try:
+            self.until_done_idle = max(0, int(cfg.get("until_done_idle_min") or 0))
+        except (TypeError, ValueError):
+            self.until_done_idle = 0
         self.journal_mod = load_journal_module()
         self.journal_path = os.path.join(cfg["state_dir"], "journal.jsonl")
         self.journal = self.journal_mod.Journal(self.journal_path, mask_text, clock=self.now)
@@ -722,7 +748,12 @@ class Keeper:
         if len(recent) >= self.cfg["max_proposals_per_hour"]:
             self.log({"event": "proposal-refused-flood", "session": sid})
             return {"ok": False, "reason": f"more than {self.cfg['max_proposals_per_hour']} proposals in an hour"}
-        ttl = min(plan.get("ttl") or self.cfg["ttl_default_min"], self.cfg["ttl_max_min"])
+        if plan.get("until_done"):
+            # Issue 18: lives as long as the task, bounded by the declared max and, whatever it says, by the hard ceiling.
+            ttl = min(plan.pop("max_min", None) or self.until_done_ceiling, self.until_done_ceiling)
+        else:
+            ttl = min(plan.get("ttl") or self.cfg["ttl_default_min"], self.cfg["ttl_max_min"])
+            plan.pop("until_done", None)
         plan["ttl"] = ttl
         body = json.dumps({"text": text, "scope": plan}, sort_keys=True)
         phash = hashlib.sha256(body.encode()).hexdigest()
@@ -745,7 +776,8 @@ class Keeper:
         self.log({"event": "proposed", "session": sid, "plan": plan.get("id"), "hash": phash[:12]})
         self.jr("proposed", plans=[plan.get("id")], result="pending",
                 action={"kind": "plan", "hash": phash[:12], "actions": list(plan.get("actions") or []),
-                        "targets": [mask_text(t)[:80] for t in (plan.get("targets") or [])][:20], "ttl": ttl})
+                        "targets": [mask_text(t)[:80] for t in (plan.get("targets") or [])][:20], "ttl": ttl,
+                        "until_done": bool(plan.get("until_done"))})
         out = {"ok": True, "hash": phash[:12], "message": "sent to the human for approval"}
         # Standing-plan design, §2: an unattended actor's proposal is still recorded (so /plans and /summary show
         # it the next time the owner looks), but must never push a Telegram card -- nobody is there to tap it, and
@@ -803,6 +835,112 @@ class Keeper:
         return [{"id": sid, "commands": p["commands"], "expires_in_days": max(0, int((p["expires_at"] - now) / 86400))}
                 for sid, p in sorted(self.standing.items()) if sid not in disabled and p["expires_at"] > now]
 
+    # ----- plan lifecycle (issue 18): usage, end reasons, `keeper-done`, session end, sweep ---------------------------
+    def _local(self, ts):
+        return time.strftime("%Y-%m-%dT%H:%M:%S%z", time.localtime(ts))
+
+    def _new_entry(self, p):
+        ttl, ud = p["plan"]["ttl"], bool(p["plan"].get("until_done"))
+        e = {"plan": p["plan"], "hash": p["hash"], "approved_at": self.now(), "expires": self.now() + ttl * 60,
+             "usage": {"calls": 0, "categories": {}, "targets": [], "last": None}}
+        if ud:
+            e["until_done"] = True
+            e["limit_kind"] = "ceiling" if ttl >= self.until_done_ceiling else "declared-max"
+        return e
+
+    def _touch_usage(self, a, cat, stage, tool_input):
+        """What a plan really covered: number of calls, by category, and which of its own targets were named."""
+        u = a.setdefault("usage", {"calls": 0, "categories": {}, "targets": [], "last": None})
+        u["calls"] = u.get("calls", 0) + 1
+        u.setdefault("categories", {})[cat] = u["categories"].get(cat, 0) + 1
+        u["last"] = self.now()
+        blob = (stage or "") + " " + str(tool_input.get("file_path") or tool_input.get("notebook_path") or "")
+        seen = u.setdefault("targets", [])
+        for tg in a["plan"].get("targets") or []:
+            name = re.sub(r"(?i)^dir:", "", str(tg))
+            if name and len(seen) < 20 and mask_text(name)[:80] not in seen \
+                    and re.search(r"(?<![\w./-])" + re.escape(name) + r"(?![\w-])", blob):
+                seen.append(mask_text(name)[:80])
+
+    def _end_plan(self, sid, a, reason, identity=None):
+        """A plan stops covering anything: say why, and what it actually covered (journal + log)."""
+        u, plan = a.get("usage") or {}, a["plan"]
+        summary = {"kind": "plan-summary", "calls": u.get("calls", 0), "categories": dict(u.get("categories") or {}),
+                   "targets_touched": list(u.get("targets") or []), "started": self._local(a.get("approved_at", 0)),
+                   "ended": self._local(self.now()), "until_done": bool(plan.get("until_done"))}
+        self.log({"event": "plan-ended", "session": sid, "plan": plan.get("id"), "reason": reason})
+        self.jr("plan-ended", plans=[plan.get("id")], result=reason,
+                identity=identity or {"actor": "keeperd", "session": sid}, action=summary)
+
+    def _expiry_reason(self, a):
+        now = self.now()
+        if a["expires"] < now:
+            return a.get("limit_kind") or "ttl-expired"
+        if self.until_done_idle and a.get("until_done"):
+            last = (a.get("usage") or {}).get("last") or a.get("approved_at") or now
+            if now - last > self.until_done_idle * 60:
+                return "idle"
+        return None
+
+    def _purge(self, sid, s):
+        """The still-valid active plans of session `s`; each plan that just stopped is ended with its reason."""
+        keep = []
+        for a in s.get("active") or []:
+            why = self._expiry_reason(a)
+            if why:
+                self._end_plan(sid, a, why)
+            else:
+                keep.append(a)
+        if len(keep) != len(s.get("active") or []):
+            s["active"] = keep
+            self.save()
+        return keep
+
+    def sweep(self):
+        """Called periodically by the daemon (and by the tests): ends the plans whose time is up even if the agent
+        makes no call, so the end is recorded when it happens and not at the next call."""
+        for sid, s in list(self.state["sessions"].items()):
+            self._purge(sid, s)
+
+    def done(self, sid, plan_id):
+        """`keeper-done [--id X]`: the agent says its task is finished. It can only END plans (never widen): with an id,
+        that plan; without, the `ttl=done` plans of this session. Returns the ids ended."""
+        s = self.session(sid)
+        ended, keep = [], []
+        for a in s.get("active") or []:
+            hit = (a["plan"].get("id") == plan_id) if plan_id else bool(a.get("until_done"))
+            if hit:
+                self._end_plan(sid, a, "done")
+                ended.append(a["plan"].get("id") or "-")
+            else:
+                keep.append(a)
+        if ended:
+            s["active"] = keep
+            self.save()
+        return ended
+
+    def session_end(self, sid, peer_uid=None):
+        """The agent's session ended (Claude Code's SessionEnd hook): its `ttl=done` plans end with it. Fixed-time
+        plans keep their own clock. With `shared_plans` the bucket is shared by every session, so one session ending
+        proves nothing about the others: nothing is ended."""
+        self._ident = {"session": str(sid) if sid is not None else None, "actor": None, "peer_uid": peer_uid}
+        if self.cfg.get("shared_plans"):
+            return []
+        s = self.state["sessions"].get(str(sid or "no-session"))
+        if not s:
+            return []
+        ended, keep = [], []
+        for a in s.get("active") or []:
+            if a.get("until_done"):
+                self._end_plan(str(sid), a, "session-end")
+                ended.append(a["plan"].get("id") or "-")
+            else:
+                keep.append(a)
+        if ended:
+            s["active"] = keep
+            self.save()
+        return ended
+
     def keeper_command(self, cmd):
         """`keeper-propose …` or `keeper-status` alone in a Bash call: (name, {option: value}), else None."""
         try:
@@ -813,10 +951,10 @@ class Keeper:
         except (ValueError, TypeError):
             return None
         name = os.path.basename(toks[0]) if toks else ""
-        if name not in ("keeper-propose", "keeper-status") \
+        if name not in ("keeper-propose", "keeper-status", "keeper-done") \
                 or os.path.dirname(toks[0]) not in ("", "/opt/agent-guardrails/bin"):
             return None
-        allowed = ("--scope", "--text", "--wait") if name == "keeper-propose" else ("--scope", "--text")
+        allowed = {"keeper-propose": ("--scope", "--text", "--wait"), "keeper-done": ("--id",)}.get(name, ("--scope", "--text"))
         opts, i = {}, 1
         while i < len(toks):
             if toks[i] in allowed and i + 1 < len(toks):
@@ -824,6 +962,8 @@ class Keeper:
                 i += 2
             else:
                 return None
+        if "id" in opts and not re.fullmatch(r"[A-Za-z0-9_.-]{1,40}", opts["id"]):
+            return None
         if "wait" in opts and not re.fullmatch(r"\d{1,7}", opts["wait"]):     # a plain non-negative integer only
             return None                                                      # (clamped to wait_max_sec in check());
             # anything else (negative, decimal, non-numeric) is not recognized, same fallback as any other option
@@ -843,6 +983,10 @@ class Keeper:
         self.gate.TAB_ORIGINS.clear()
         self.gate.TAB_ORIGINS.update(getattr(self, "tab_origins", {}).get(str(sid), {}))
         kc = self.keeper_command(tool_input.get("command", "")) if tool == "Bash" else None
+        if kc and kc[0] == "keeper-done":
+            ended = self.done(sid, kc[1].get("id"))
+            return {"decision": "deny", "reason": ("keeper: plan(s) " + ", ".join(ended) + " ended (done). Nothing was run."
+                                                    ) if ended else "keeper: no plan to end. Nothing was run."}
         if kc and kc[0] == "keeper-status":
             return {"decision": "deny", "reason": "keeper status (nothing was run): " + json.dumps(self.status(sid))}
         if kc:
@@ -892,10 +1036,7 @@ class Keeper:
         # plan, whole -- so this loop never unions pieces of different plans into one approval; it only lets
         # DIFFERENT stages of one already-split compound command be covered by different plans, which is the one
         # exception the task calls for ("sauf cas des actions multi-étapes déjà découpées par go-gate").
-        active = [a for a in (s.get("active") or []) if a["expires"] >= self.now()]
-        if len(active) != len(s.get("active") or []):
-            s["active"] = active
-            self.save()
+        active = self._purge(sid, s)
         used = []
         for k, d, st in items:
             cat = self.gate.category(tool, tool_input, k, d)
@@ -928,9 +1069,11 @@ class Keeper:
                            "keeper-propose; the human approves it on the keeper bot.")
                 return {"decision": "deny", "reason": why}
             used.append(match["plan"].get("id"))
+            self._touch_usage(match, cat, st, tool_input)
             self.jr("allowed", plans=[match["plan"].get("id")], result="allowed",
                     action={"kind": "call", "tool": tool, "category": cat, "shape": command_shape(tool, st, cat),
                             "cmd": st})
+        self.save()                                        # the plans' usage counters
         self.log({"event": "allowed", "session": sid, "tool": tool, "plans": used})
         return {"decision": "allow", "reason": ""}
 
@@ -939,7 +1082,8 @@ class Keeper:
         Also lists every currently-valid standing plan (design §2): an agent that wants to know what it can already
         do without proposing can read this instead of guessing."""
         now = self.now()
-        active = [a for a in (self.session(sid).get("active") or []) if a["expires"] > now]
+        active = [a for a in self._purge(str(sid or "no-session") if not self.cfg.get("shared_plans") else "shared",
+                                         self.session(sid)) if a["expires"] > now]
         return {"active": [dict(a["plan"], expires_in_min=int((a["expires"] - now) / 60)) for a in active],
                 "pending": bool(self.session(sid).get("pending")), "standing": self._standing_view()}
 
@@ -1120,8 +1264,10 @@ class Keeper:
         pending proposal never by itself counts towards `had`: the answer ("nothing was active") only ever
         speaks of ACTIVE plans, even though a pending one is always dropped too."""
         had = False
-        for s in self.state["sessions"].values():
+        for rsid, s in self.state["sessions"].items():
             if plan_id is None:
+                for a in s.get("active") or []:
+                    self._end_plan(rsid, a, "stopped", identity={"actor": "owner-telegram", "session": rsid})
                 had = bool(s.pop("active", None)) or had
                 s.pop("pending", None)
                 continue
@@ -1129,6 +1275,9 @@ class Keeper:
             keep = [a for a in active if a["plan"].get("id") != plan_id]
             if len(keep) != len(active):
                 had = True
+                for a in active:
+                    if a["plan"].get("id") == plan_id:
+                        self._end_plan(rsid, a, "revoked", identity={"actor": "owner-telegram", "session": rsid})
                 s["active"] = keep
             pending = s.get("pending")
             if pending and pending["plan"].get("id") == plan_id:
@@ -1149,7 +1298,7 @@ class Keeper:
                 action={"kind": "plan"})
         return had
 
-    def _activate(self, s, p):
+    def _activate(self, s, p, sid=None):
         """Add p's plan to session `s`'s active list (requirements 3 and 4). A plan whose id matches one already
         active renews it in place (same slot, fresh hash/expiry) rather than adding a second entry. Otherwise it
         is appended; past the cap, the OLDEST active plan (by approval time, ties broken towards the one approved
@@ -1162,14 +1311,15 @@ class Keeper:
         if new_id is not None:
             for i, a in enumerate(active):
                 if a["plan"].get("id") == new_id:
-                    active[i] = {"plan": p["plan"], "hash": p["hash"], "approved_at": self.now(),
-                                 "expires": self.now() + p["plan"]["ttl"] * 60}
+                    self._end_plan(sid, a, "renewed")
+                    active[i] = self._new_entry(p)
                     return None
-        active.append({"plan": p["plan"], "hash": p["hash"], "approved_at": self.now(),
-                       "expires": self.now() + p["plan"]["ttl"] * 60})
+        active.append(self._new_entry(p))
         if len(active) > self.max_active_plans:
             oldest = min(range(len(active) - 1), key=lambda i: (active[i]["approved_at"], i))
-            return active.pop(oldest)["plan"].get("id") or "-"
+            gone = active.pop(oldest)
+            self._end_plan(sid, gone, "evicted")
+            return gone["plan"].get("id") or "-"
         return None
 
     def decide(self, from_id, chat_id, data):
@@ -1180,7 +1330,7 @@ class Keeper:
         parts = data.split(":")
         if parts[0] == "stop":
             return self.msg("ans_stopped") if self._revoke_all() else self.msg("ans_nothing_active")
-        if len(parts) != 3 or parts[0] not in ("approve", "reject") or not re.fullmatch(r"[0-9a-f]{12}", parts[1]) \
+        if len(parts) != 3 or parts[0] not in ("approve", "approvefixed", "reject") or not re.fullmatch(r"[0-9a-f]{12}", parts[1]) \
                 or not re.fullmatch(r"[0-9a-f]{16}", parts[2]):
             return self.msg("ans_malformed")
         action, h, nonce = parts
@@ -1199,6 +1349,11 @@ class Keeper:
                     self.jr("rejected", plans=[p["plan"].get("id")], result="rejected", identity={"actor": "owner-telegram", "session": sid},
                             action={"kind": "plan", "hash": h})
                     return self.msg("ans_rejected")
+                if action == "approvefixed" and p["plan"].get("until_done"):
+                    # the owner chose a fixed time instead of "until done": same scope, the default fixed duration
+                    plan = {k: v for k, v in p["plan"].items() if k != "until_done"}
+                    plan["ttl"] = max(1, min(int(self.cfg["ttl_default_min"]), int(self.cfg["ttl_max_min"])))
+                    p = dict(p, plan=plan)
                 if self.now() - p["proposed_at"] > self.cfg["pending_max_age_min"] * 60:
                     self._record_plan_status(h, "expired")
                     self.save()
@@ -1206,16 +1361,16 @@ class Keeper:
                     self.jr("approval-of-expired-plan-ignored", plans=[p["plan"].get("id")], result="ignored",
                             identity={"actor": "owner-telegram", "session": sid}, action={"kind": "plan", "hash": h})
                     return self.msg("ans_expired")
-                evicted = self._activate(s, p)
+                evicted = self._activate(s, p, sid=sid)
                 self._record_plan_status(h, "approved")
                 self.save()
                 self.log({"event": "approved", "session": sid, "plan": p["plan"].get("id"), "hash": h,
                           "evicted": evicted})
-                self.jr("approved", plans=[p["plan"].get("id")], result=f"active for {p['plan']['ttl']} min",
+                self.jr("approved", plans=[p["plan"].get("id")], result=("until done, at most " if p["plan"].get("until_done") else "active for ") + f"{p['plan']['ttl']} min",
                         identity={"actor": "owner-telegram", "session": sid},
                         action={"kind": "plan", "hash": h, "actions": list(p["plan"].get("actions") or []),
                                 "targets": [mask_text(t)[:80] for t in (p["plan"].get("targets") or [])][:20],
-                                "ttl": p["plan"]["ttl"]})
+                                "ttl": p["plan"]["ttl"], "until_done": bool(p["plan"].get("until_done"))})
                 if evicted:
                     # A visible lifecycle event of its own (requirement 3: never silently), under the dropped
                     # plan's own id, so /plans shows it as "revoked" without having to parse the approval's
@@ -1224,8 +1379,9 @@ class Keeper:
                               "replaced_by": p["plan"].get("id")})
                     self.jr("plan-evicted", plans=[evicted], result=f"replaced by {p['plan'].get('id')}",
                             identity={"actor": "keeperd", "session": sid}, action={"kind": "plan"})
-                    return self.msg("ans_approved_evicted", ttl=p["plan"]["ttl"], evicted=evicted)
-                return self.msg("ans_approved", ttl=p["plan"]["ttl"])
+                    return self.msg("ans_approved_done_evicted" if p["plan"].get("until_done") else "ans_approved_evicted",
+                                    ttl=p["plan"]["ttl"], evicted=evicted)
+                return self.msg("ans_approved_done" if p["plan"].get("until_done") else "ans_approved", ttl=p["plan"]["ttl"])
         self.log({"event": "decision-unknown-plan-ignored"})
         return self.msg("ans_unknown")
 
@@ -1470,6 +1626,10 @@ def serve(keeper, cfg, ready=None):
                 with keeper.lock_scope("status"):
                     state = keeper.plan_status(h)
                 return self.reply({"state": state})
+            if req.get("op") == "session-end":
+                with keeper.lock_scope("session-end"):
+                    keeper.session_end(req.get("session"), peer_uid=uid)
+                return self.reply({"ok": True})
             if req.get("op") == "observe":
                 with keeper.lock_scope("observe"):
                     keeper.observe(req.get("session"), str(req.get("tool", "")), str(req.get("response", ""))[:20000])
@@ -1557,6 +1717,21 @@ def summary_cli(args):
     return 0
 
 
+SWEEP_INTERVAL_SEC = 30
+
+
+def sweep_loop(keeper):
+    """Ends the plans whose time is up even when the agent makes no call, so the end (and what the plan covered) is
+    recorded when it happens. Never raises out of the thread."""
+    while True:
+        time.sleep(SWEEP_INTERVAL_SEC)
+        try:
+            with keeper.lock_scope("sweep"):
+                keeper.sweep()
+        except Exception as e:
+            keeper.log({"event": "sweep-error", "error": type(e).__name__})
+
+
 def journal_verify_cli(args):
     """`keeper-journal verify`, run by root: re-reads the whole journal and checks its chain. Root only, like the summary:
     the journal is private to the keeper user and its content must never be in front of the agent (it prints a count and,
@@ -1583,6 +1758,7 @@ def main():
     keeper = Keeper(cfg, bot)
     bot.log_fn = keeper.log                                     # 13/10: api()'s own slow/failed-call timing
     threading.Thread(target=bot.poll, args=(keeper,), daemon=True).start()
+    threading.Thread(target=sweep_loop, args=(keeper,), daemon=True).start()
     try:
         bot.send(startup_message(keeper.lang, cfg["mode"]))
     except Exception:

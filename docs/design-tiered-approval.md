@@ -77,7 +77,8 @@ Definitions.
 - Scope frozen at approval: targets, actions, exclusions (new optional `excludes=`) never change while the plan lives.
   Renewing with the same id is a new approval.
 - Manual revocation (`/stop <id>`) and global emergency stop (`/stop`) exist. `/stop` also sets a persisted
-  `auto_halt` flag that disables every automatic approval until the owner sends `/auto on`.
+  `auto_halt` flag that disables every automatic approval until the owner sends `/auto on` (lands with the reviewers in PR 4,
+  where automatic approval exists; PR 2 only ends plans).
 - Journal per plan: commands covered, targets touched, start, end, end reason (done, session end, idle, ceiling,
   revoked, stopped, evicted).
 

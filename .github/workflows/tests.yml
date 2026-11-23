@@ -34,6 +34,8 @@ jobs:
         run: cd keeper && python -m unittest -v test_chrome_origin.py
       - name: go-gate disguise and balance-oracle tests (were not in CI before 23/11/2026; run from a checkout)
         run: cd go-gate && python -m unittest -v test_disguise.py test_balance_oracle.py
+      - name: keeper task-lifetime plans tests (ttl=done, ceiling, keeper-done, session end, journal of what a plan covered)
+        run: cd keeper && python -m unittest -v test_task_plans.py
       - name: keeper block-mode dry run (real socket, real hook subprocess, fake local Telegram only)
         run: cd keeper && python -m unittest -v test_block_dryrun.py
       - name: keeper installer (syntax, dry run, install into a temp prefix)
